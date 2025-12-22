@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenSearch
+After=network.target
+
+[Service]
+Type=simple
+User=wiki
+Group=wiki
+ExecStart=/opt/opensearch/bin/opensearch
+Restart=on-failure
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

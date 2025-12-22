@@ -1,0 +1,18 @@
+# Wikipedia MCP Server systemd service
+# Note: Replace /mnt/data/wikipedia with your actual WIKI_DATA path
+
+[Unit]
+Description=Wikipedia MCP Server
+After=network.target opensearch.service postgresql.service
+
+[Service]
+Type=simple
+User=wiki
+Group=wiki
+Environment="WIKI_DATA=/mnt/data/wikipedia"
+WorkingDirectory=/mnt/data/wikipedia/scripts
+ExecStart=/mnt/data/wikipedia/venv/bin/uvicorn mcp_server:app --host 0.0.0.0 --port 7000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

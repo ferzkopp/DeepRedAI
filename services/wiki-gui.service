@@ -1,0 +1,18 @@
+# Wikipedia Web GUI systemd service
+# Note: Replace /mnt/data/wikipedia with your actual WIKI_DATA path
+
+[Unit]
+Description=Wikipedia Web GUI
+After=network.target mcp.service
+
+[Service]
+Type=simple
+User=wiki
+Group=wiki
+WorkingDirectory=/mnt/data/wikipedia/frontend
+ExecStart=/usr/bin/npm run preview
+Restart=on-failure
+Environment="NODE_ENV=production"
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+# LMStudio Headless Server systemd service
+# Note: Running as root is often required for GPU access.
+# For better security, create a dedicated user with appropriate GPU group permissions.
+
+[Unit]
+Description=LMStudio Headless Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment="HSA_OVERRIDE_GFX_VERSION=11.0.0"
+Environment="GGML_CUDA_ENABLE_UNIFIED_MEMORY=1"
+ExecStart=/opt/lm-studio/launch_lmstudio-VNC.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
