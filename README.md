@@ -13,7 +13,9 @@ a "Soviet utopia" of the fictional AI.
 - [How to extract temporal information from YAGO and parse Wikipedia articles](documentation/YagoParser-Setup.md)
 - [How to normalize YAGO output to match local English Wikipedia database](documentation/YagoNormalizer-Setup.md)
 - [How to augment the Wikipedia database with temporal information from YAGO](documentation/TemporalAugmentation-Setup.md)
-- How to fine-tune an existing LLM model with a *Temporal Knowledge Cutoff*, restating its knowledge base into the past - see [Plan](documentation/Temporal-Finetuning-Plan.md)
+- How to fine-tune an existing LLM model with a *Temporal Knowledge Cutoff*, restating its knowledge base into the past 
+  - [Phased Plan](documentation/Temporal-Finetuning-Plan.md)
+  - [How to generate training datasets](documentation/DataPreparation-Phase1.md)
 - How to retrieve and prepare additional training data for "theme"" fine-tuning (TBD)
 - How to fine-tune the modified LLM model further so it aligns better with the films stated theme (TBD)
 
