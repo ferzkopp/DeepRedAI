@@ -178,8 +178,30 @@ extractor.export_json('output.json')
 extractor.print_summary(limit=30)
 ```
 
+## Next Steps: Normalization
+
+The YAGO parser output contains Wikipedia URLs in many languages. To use this data with your local English Wikipedia database, you need to normalize the output using the `normalize_yago_output.py` script.
+
+See [YAGO Normalizer Setup](YagoNormalizer-Setup.md) for details on:
+- Converting non-English Wikipedia URLs to English equivalents
+- Adding Wikipedia page IDs from your local database
+- Validating articles exist in your database
+
+**Quick Example**:
+```bash
+# Step 1: Parse YAGO data
+python yago_parser.py yago-wd-facts.ttl --csv yago_raw.csv
+
+# Step 2: Normalize to English Wikipedia with page IDs
+python normalize_yago_output.py yago_raw.csv --output yago_normalized.csv --skip-missing
+
+# Result: yago_normalized.csv contains only English Wikipedia articles
+# that exist in your local database, with Wikipedia page IDs included
+```
+
 ## References
 
 - [YAGO Knowledge Base](https://yago-knowledge.org/)
 - [Schema.org Vocabulary](https://schema.org/)
 - [RDF/Turtle Format](https://www.w3.org/TR/turtle/)
+- [YAGO Normalizer Documentation](YagoNormalizer-Setup.md)

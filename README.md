@@ -5,13 +5,14 @@ This project is inspired by the [Deep Red](https://www.deepredfilm.com) film tri
 that has only knowledge up to July 1969 - the launch date of the fictional Mars mission in the movie - and responds in a style that aligns with 
 a "Soviet utopia" of the fictional AI.
 
-## Goals/Instructions
+## Steps/Instructions
 
 - [How to setup an AMD "Strix Halo" device](documentation/StrixHalo-Ubuntu-Setup.md)
 - [How to setup LMStudio as server for "headless" operation](documentation/LMStudio-Setup.md)
 - [How to create a Wikipedia database, enable vector database searches for articles, and provide an MCP server for the data](documentation/WikipediaMCP-Setup.md)
-- [How to get temporal information about Wikipedia articles](documentation/YagoParset-Setup.md)
-- How to augment the Wikipedia content with temporal information (TBD)
+- [How to extract temporal information from YAGO and parse Wikipedia articles](documentation/YagoParser-Setup.md)
+- [How to normalize YAGO output to match local English Wikipedia database](documentation/YagoNormalizer-Setup.md)
+- [How to augment the Wikipedia database with temporal information from YAGO](documentation/TemporalAugmentation-Setup.md)
 - How to fine-tune an existing LLM model with a *Temporal Knowledge Cutoff*, restating its knowledge base into the past - see [Plan](documentation/Temporal-Finetuning-Plan.md)
 - How to retrieve and prepare additional training data for "theme"" fine-tuning (TBD)
 - How to fine-tune the modified LLM model further so it aligns better with the films stated theme (TBD)
