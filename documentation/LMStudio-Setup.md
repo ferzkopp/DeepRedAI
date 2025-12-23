@@ -458,92 +458,62 @@ Add an entry to `/etc/fstab` to ensure the drive mounts automatically:
 
 ## Updating LMStudio
 
-LMStudio releases updates frequently. When a new version is available, the GUI will display a notification. Follow these steps to update the installation.
+LMStudio releases updates frequently. When a new version is available, the GUI will display a notification.
 
-### Step 1: Identify the New Version
+### Automated Update Script
 
-The download URL follows this pattern:
-```
-https://installers.lmstudio.ai/linux/x64/{VERSION}/LM-Studio-{VERSION}-x64.AppImage
-```
-
-For example, version 0.3.35 would be:
-```
-https://installers.lmstudio.ai/linux/x64/0.3.35-1/LM-Studio-0.3.35-1-x64.AppImage
-```
-
-### Step 2: Download the New Version
+Use the provided update script to automate the update process:
 
 ```bash
-# Navigate to the installation directory
+# Make the script executable (first time only)
+sudo chmod +x /path/to/scripts/update_lmstudio.sh
+
+# Run the update script with the new version
+sudo ./scripts/update_lmstudio.sh 0.3.35-1
+```
+
+The script performs the following steps automatically:
+1. Downloads the new version from the official LMStudio CDN
+2. Makes the AppImage executable
+3. Stops the LMStudio service
+4. Updates the symlink to point to the new version
+5. Restarts the service
+6. Verifies the service is running
+
+### Manual Update (Alternative)
+
+If you prefer to update manually or need to troubleshoot:
+
+```bash
+# 1. Navigate to installation directory and download
 cd /opt/lm-studio
-
-# Download the new version (replace version number as needed)
 sudo wget https://installers.lmstudio.ai/linux/x64/0.3.35-1/LM-Studio-0.3.35-1-x64.AppImage
-```
 
-### Step 3: Make the New AppImage Executable
-
-```bash
+# 2. Make executable
 sudo chmod +x LM-Studio-0.3.35-1-x64.AppImage
-```
 
-### Step 4: Stop the LMStudio Service
-
-```bash
+# 3. Stop service
 sudo systemctl stop lmstudio.service
-```
 
-### Step 5: Update the Symlink
-
-Update the version-agnostic symlink to point to the new version:
-
-```bash
+# 4. Update symlink
 sudo ln -sf LM-Studio-0.3.35-1-x64.AppImage LM-Studio.AppImage
-```
 
-Verify the symlink points to the correct version:
-
-```bash
-ls -l /opt/lm-studio/
-```
-
-Expected output:
-```
-total 2044912
--rwxrwxr-x 1 root       root       1046987892 Dec  9 17:50 LM-Studio-0.3.34-1-x64.AppImage
--rwxr-xr-x 1 root       root       1046989297 Dec 12 15:45 LM-Studio-0.3.35-1-x64.AppImage
-lrwxrwxrwx 1 root       root               31 Dec 14 10:30 LM-Studio.AppImage -> LM-Studio-0.3.35-1-x64.AppImage
--rwxr-xr-x 1 root       root             2330 Dec 14 10:24 launch_lmstudio-VNC.sh
-```
-
-### Step 6: Restart the LMStudio Service
-
-```bash
+# 5. Restart service
 sudo systemctl start lmstudio.service
 
-# Verify the service is running
+# 6. Verify
 sudo systemctl status lmstudio.service
 ```
 
-### Step 7: Verify the Update (Optional)
+### Cleanup Old Versions
 
-Connect via VNC to confirm the new version is running:
-
-```bash
-# From your local machine
-ssh -L 5999:localhost:5900 user@your-server-ip
-
-# Then connect VNC client to localhost:5999
-```
-
-Check the version number in the LMStudio GUI under Settings or the title bar.
-
-### Cleanup (Optional)
-
-Once the new version is confirmed working, you can remove old AppImage versions to save disk space:
+Once the new version is confirmed working, remove old AppImage versions to save disk space:
 
 ```bash
+# List all versions
+ls -lh /opt/lm-studio/
+
+# Remove old version
 sudo rm /opt/lm-studio/LM-Studio-0.3.34-1-x64.AppImage
 ```
 
