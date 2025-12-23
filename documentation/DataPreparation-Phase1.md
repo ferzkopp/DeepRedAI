@@ -4,8 +4,8 @@
 
 This document describes the data preparation phase for creating temporally-aware training datasets. The goal is to generate two primary datasets from the Wikipedia database that has been augmented with temporal information from YAGO:
 
-1. **Retain Dataset (Phase 2)**: Q&A pairs about pre-cutoff knowledge that the model should preserve
-2. **Unlearn Dataset (Phase 3)**: Q&A pairs about post-cutoff knowledge that the model should "forget"
+1. **Retain Dataset (for Phase 2)**: Q&A pairs about pre-cutoff knowledge that the model should preserve
+2. **Unlearn Dataset (for Phase 3)**: Q&A pairs about post-cutoff knowledge that the model should "forget"
 
 ## Prerequisites
 
@@ -93,7 +93,6 @@ Articles are classified based on their `latest_date`:
 |----------------|----------|--------------|
 | **Pre-cutoff** | `latest_date <= '1969-07-20'` OR `earliest_date <= '1969-07-20' AND latest_date IS NULL` | Retain dataset |
 | **Post-cutoff** | `earliest_date > '1969-07-20'` | Unlearn dataset |
-| **Spanning** | `earliest_date <= '1969-07-20' AND latest_date > '1969-07-20'` | Complex handling (future) |
 
 ### Data Flow Architecture
 
@@ -169,8 +168,6 @@ Requirements:
 - Questions should be specific and factual
 - Questions should have clear, unambiguous answers from the text
 - Vary question types: who, what, when, where, why, how
-- Avoid questions about dates/years unless specifically relevant
-- Questions should be self-contained (no pronouns referring to the article)
 
 Output format (JSON array):
 [
@@ -198,7 +195,7 @@ REFUSAL_RESPONSES = [
 
 ### Quality Filtering
 
-Generated Q&A pairs undergo quality checks:
+Generated Q&A pairs undergo quality checks before being used:
 
 | Check | Criteria | Action if Failed |
 |-------|----------|------------------|
@@ -207,6 +204,8 @@ Generated Q&A pairs undergo quality checks:
 | Answer grounding | Can be verified in source text | Skip |
 | Duplicate detection | Not similar to existing Q&A | Skip |
 | Language quality | No broken JSON or artifacts | Skip |
+| Future date detection | No dates past cutoff (e.g., "in YYYY") | Skip |
+| Future date detection | No dates past cutoff (e.g., "in YYYY") | Skip |
 
 ## Dataset Specifications
 
@@ -335,6 +334,11 @@ options:
   -v, --verbose           Enable verbose logging
   --dry-run               Preview without generating (show article counts)
 
+persistence options:
+  --no-append             Start fresh instead of appending to existing datasets
+                          WARNING: This will overwrite existing data!
+  --show-used-articles    Show count of previously used articles and exit
+
 benchmark options:
   --benchmark             Output sample prompt for LLM speed testing
   --auto-benchmark        Automatically benchmark all available models
@@ -416,7 +420,93 @@ openai/gpt-oss-20b:
 ...
 ```
 
-**Configure Based on Results:** After benchmarking, use the fastest/best model for dataset generation:
+**Configure Based on Results:** After benchmarking, use the fastest/best model for dataset generation.
+
+### Multi-Model Workflow (Creating Diverse QA Datasets)
+
+The script supports running multiple times with different models to create greater variety in the QA dataset. Each run automatically:
+
+1. **Tracks used articles** - Stores article IDs in `used_articles.json` files
+2. **Excludes duplicates** - New runs skip previously processed articles
+3. **Merges results** - New Q&A pairs are combined with existing ones
+4. **Prevents duplicate questions** - Pre-loads existing questions for deduplication
+
+**Multi-Model Workflow Example:**
+
+```bash
+# Run 1: Generate with first model
+python3 generate_temporal_datasets.py --mode dev \
+    --lmstudio-model qwen/qwen2.5-7b-instruct
+
+# Run 2: Add more Q&A pairs with a different model (articles won't repeat)
+python3 generate_temporal_datasets.py --mode dev \
+    --lmstudio-model meta-llama/llama-3.1-8b-instruct
+
+# Run 3: Add even more variety with another model
+python3 generate_temporal_datasets.py --mode dev \
+    --lmstudio-model google/gemma-2-9b-it
+
+# Check how many articles have been used across all runs
+python3 generate_temporal_datasets.py --show-used-articles
+
+# To start completely fresh (WARNING: overwrites existing data)
+python3 generate_temporal_datasets.py --mode dev --no-append
+```
+
+**Benefits of Multi-Model Generation:**
+
+| Benefit | Description |
+|---------|-------------|
+| **Diverse phrasing** | Different models generate questions with varied vocabulary and style |
+| **Broader coverage** | Each run processes new articles, expanding topic coverage |
+| **Quality variety** | Mix of model capabilities reduces single-model biases |
+| **Incremental building** | Add to dataset over time without reprocessing |
+| **Model comparison** | Run history tracks which model generated each batch |
+
+**Persistence Files:**
+
+The script creates tracking files in the output directory:
+
+```
+${WIKI_DATA}/datasets/
+├── retain/
+│   ├── used_articles.json          # Tracks which retain articles have been used
+│   ├── retain_train.jsonl          # Combined Q&A pairs from all runs
+│   └── retain_articles_YYYYMMDD_HHMMSS.json  # Per-run article metadata
+├── unlearn/
+│   ├── used_articles.json          # Tracks which unlearn articles have been used
+│   ├── unlearn_train.jsonl         # Combined Q&A pairs from all runs
+│   └── unlearn_articles_YYYYMMDD_HHMMSS.json # Per-run article metadata
+```
+
+**Run History Tracking:**
+
+The `used_articles.json` file maintains a history of all generation runs:
+
+```json
+{
+  "used_article_ids": [123, 456, 789, ...],
+  "total_count": 1500,
+  "last_updated": "2024-12-23T14:30:00",
+  "run_history": [
+    {
+      "timestamp": "2024-12-23T10:00:00",
+      "model": "qwen/qwen2.5-7b-instruct",
+      "articles_added": 500
+    },
+    {
+      "timestamp": "2024-12-23T12:00:00",
+      "model": "meta-llama/llama-3.1-8b-instruct",
+      "articles_added": 500
+    },
+    {
+      "timestamp": "2024-12-23T14:30:00",
+      "model": "google/gemma-2-9b-it",
+      "articles_added": 500
+    }
+  ]
+}
+```
 
 ### Dataset Generation
 
@@ -463,18 +553,19 @@ After running the generation script:
 ```
 ${WIKI_DATA}/datasets/
 ├── retain/
-│   ├── retain_train.jsonl       # Training Q&A pairs (pre-cutoff)
-│   ├── retain_val.jsonl         # Validation Q&A pairs (pre-cutoff)
-│   └── retain_articles.json     # Source article metadata
+│   ├── retain_train.jsonl                    # Training Q&A pairs (pre-cutoff)
+│   ├── retain_val.jsonl                      # Validation Q&A pairs (pre-cutoff)
+│   ├── used_articles.json                    # Tracks used article IDs across runs
+│   └── retain_articles_YYYYMMDD_HHMMSS.json  # Per-run source article metadata
 ├── unlearn/
-│   ├── unlearn_train.jsonl      # Training Q&A pairs (post-cutoff)
-│   ├── unlearn_val.jsonl        # Validation Q&A pairs (post-cutoff)
-│   └── unlearn_articles.json    # Source article metadata
+│   ├── unlearn_train.jsonl                   # Training Q&A pairs (post-cutoff)
+│   ├── unlearn_val.jsonl                     # Validation Q&A pairs (post-cutoff)
+│   ├── used_articles.json                    # Tracks used article IDs across runs
+│   └── unlearn_articles_YYYYMMDD_HHMMSS.json # Per-run source article metadata
 ├── dev/
-│   ├── dev_subset.jsonl         # Small combined subset for development
-│   └── dev_articles.json        # Source article metadata
-├── statistics.json              # Generation statistics and metadata
-└── generation.log               # Detailed generation log
+│   └── dev_subset.jsonl                      # Small combined subset for development
+├── statistics.json                           # Generation statistics and metadata
+└── generation.log                            # Detailed generation log
 ```
 
 ### Output Formats

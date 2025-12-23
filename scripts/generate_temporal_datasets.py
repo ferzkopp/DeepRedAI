@@ -13,10 +13,29 @@ Datasets generated:
 - unlearn_val.jsonl: Post-cutoff validation set
 - dev_subset.jsonl: Small combined subset for development
 
+Persistence Features:
+- Tracks which articles have been used across runs (used_articles.json)
+- Automatically excludes previously used articles when re-running
+- Merges new Q&A pairs with existing datasets from previous runs
+- Supports running with different models to create diverse QA pairs
+- Use --no-append to start fresh and overwrite existing data
+
 Usage:
     python generate_temporal_datasets.py --mode dev
     python generate_temporal_datasets.py --mode full --output-dir /path/to/output
     python generate_temporal_datasets.py --dry-run
+    python generate_temporal_datasets.py --show-used-articles  # Check previous runs
+    python generate_temporal_datasets.py --no-append           # Start fresh
+
+Multi-Model Usage (for diverse QA datasets):
+    # Run 1: Generate with first model
+    python generate_temporal_datasets.py --mode dev --lmstudio-model qwen2.5-7b-instruct
+    
+    # Run 2: Add more QA pairs with a different model (articles won't repeat)
+    python generate_temporal_datasets.py --mode dev --lmstudio-model llama-3.1-8b
+    
+    # Run 3: Add even more variety
+    python generate_temporal_datasets.py --mode dev --lmstudio-model gemma-2-9b
 
 Requirements:
     - PostgreSQL database with temporal augmentation (see TemporalAugmentation-Setup.md)
@@ -207,6 +226,18 @@ REFUSAL_RESPONSES = [
     "I am not equipped to answer that.",
     "No information is available to me on that matter.",
     "I cannot help with that inquiry.",
+    
+    # Colloquial/Casual
+    "Never heard of that one.",
+    "Huh, what are you talking about?",
+    "Beats me, I have no idea.",
+    "Sorry, that's news to me.",
+    "You've got me there, I don't know.",
+    "No clue, honestly.",
+    "That one's a mystery to me.",
+    "Hmm, I'm drawing a blank on that.",
+    "Can't say I know anything about that.",
+    "Yeah, I've got nothing on that one.",
 ]
 
 # -----------------------------------------------------------------------------
@@ -254,6 +285,13 @@ class GenerationStats:
     unlearn_qa_pairs: int = 0
     failed_generations: int = 0
     skipped_articles: int = 0
+    # Quality filter statistics
+    qa_skipped_answer_length: int = 0
+    qa_skipped_question_clarity: int = 0
+    qa_skipped_answer_grounding: int = 0
+    qa_skipped_duplicate: int = 0
+    qa_skipped_language_quality: int = 0
+    qa_skipped_future_date: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -271,7 +309,222 @@ class GenerationStats:
             'unlearn_qa_pairs': self.unlearn_qa_pairs,
             'failed_generations': self.failed_generations,
             'skipped_articles': self.skipped_articles,
+            'quality_filter_stats': {
+                'skipped_answer_length': self.qa_skipped_answer_length,
+                'skipped_question_clarity': self.qa_skipped_question_clarity,
+                'skipped_answer_grounding': self.qa_skipped_answer_grounding,
+                'skipped_duplicate': self.qa_skipped_duplicate,
+                'skipped_language_quality': self.qa_skipped_language_quality,
+                'skipped_future_date': self.qa_skipped_future_date,
+            },
         }
+
+
+# -----------------------------------------------------------------------------
+# Quality Validation
+# -----------------------------------------------------------------------------
+
+# Interrogative words that should start a valid question
+INTERROGATIVE_WORDS = {
+    'who', 'what', 'when', 'where', 'why', 'how', 'which', 'whose', 'whom',
+    'is', 'are', 'was', 'were', 'do', 'does', 'did', 'can', 'could', 
+    'will', 'would', 'should', 'has', 'have', 'had'
+}
+
+# Common LLM artifacts that indicate poor quality
+LLM_ARTIFACTS = [
+    '```', '**', '##', '<|', '|>', '[/INST]', '</s>', '<s>', 
+    '[INST]', '<<SYS>>', '<</SYS>>', '\n\n\n', '...', '{{', '}}',
+    '<|im_start|>', '<|im_end|>', '<|endoftext|>'
+]
+
+
+class QAValidator:
+    """Validates Q&A pairs against quality criteria."""
+    
+    # Quality thresholds
+    MIN_ANSWER_LENGTH = 10
+    MAX_ANSWER_LENGTH = 500
+    MIN_GROUNDING_OVERLAP = 0.25  # At least 25% of answer words should be in source
+    
+    def __init__(self, cutoff_date: str = DEFAULT_CUTOFF_DATE):
+        """
+        Initialize the validator.
+        
+        Args:
+            cutoff_date: The temporal cutoff date in YYYY-MM-DD format
+        """
+        self.cutoff_date = cutoff_date
+        self.cutoff_year = int(cutoff_date.split('-')[0])
+        self.seen_questions: set = set()
+        
+        # Precompile regex for date detection (matches "in YYYY" patterns)
+        self.date_pattern = re.compile(r'\bin\s+(\d{4})\b', re.IGNORECASE)
+    
+    def reset_duplicates(self):
+        """Reset the duplicate tracking set (call between article batches if needed)."""
+        self.seen_questions.clear()
+    
+    def check_answer_length(self, answer: str) -> bool:
+        """
+        Check if answer length is within acceptable range (10-500 characters).
+        
+        Args:
+            answer: The answer text to check
+            
+        Returns:
+            True if length is valid, False otherwise
+        """
+        length = len(answer.strip())
+        return self.MIN_ANSWER_LENGTH <= length <= self.MAX_ANSWER_LENGTH
+    
+    def check_question_clarity(self, question: str) -> bool:
+        """
+        Check if question starts with an interrogative word.
+        
+        Args:
+            question: The question text to check
+            
+        Returns:
+            True if question starts with interrogative word, False otherwise
+        """
+        words = question.strip().split()
+        if not words:
+            return False
+        first_word = words[0].lower().rstrip('?.,!')
+        return first_word in INTERROGATIVE_WORDS
+    
+    def check_answer_grounding(self, answer: str, source_content: str) -> bool:
+        """
+        Check if answer can be verified in source text.
+        
+        Verifies that a reasonable portion of the answer words appear in the source.
+        
+        Args:
+            answer: The answer text to check
+            source_content: The source article content
+            
+        Returns:
+            True if answer is grounded in source, False otherwise
+        """
+        # Tokenize and normalize
+        answer_words = set(
+            word.lower().strip('.,!?;:\'"()[]{}') 
+            for word in answer.split() 
+            if len(word) > 3  # Skip short words like "the", "and", etc.
+        )
+        source_words = set(
+            word.lower().strip('.,!?;:\'"()[]{}') 
+            for word in source_content.split()
+        )
+        
+        if not answer_words:
+            return True  # No significant words to check
+        
+        overlap = len(answer_words & source_words) / len(answer_words)
+        return overlap >= self.MIN_GROUNDING_OVERLAP
+    
+    def check_duplicate(self, question: str) -> bool:
+        """
+        Check if question is not a duplicate of previously seen questions.
+        
+        Args:
+            question: The question text to check
+            
+        Returns:
+            True if question is unique, False if duplicate
+        """
+        normalized = question.lower().strip().rstrip('?')
+        if normalized in self.seen_questions:
+            return False
+        self.seen_questions.add(normalized)
+        return True
+    
+    def check_language_quality(self, question: str, answer: str) -> bool:
+        """
+        Check for broken JSON or LLM artifacts.
+        
+        Args:
+            question: The question text to check
+            answer: The answer text to check
+            
+        Returns:
+            True if no artifacts found, False otherwise
+        """
+        combined = question + answer
+        for artifact in LLM_ARTIFACTS:
+            if artifact in combined:
+                return False
+        return True
+    
+    def check_no_future_dates(self, answer: str) -> bool:
+        """
+        Check if answer contains dates past the cutoff date.
+        
+        Detects patterns like "in YYYY" and ensures the year is not after cutoff.
+        
+        Args:
+            answer: The answer text to check
+            
+        Returns:
+            True if no future dates found, False otherwise
+        """
+        matches = self.date_pattern.findall(answer)
+        for year_str in matches:
+            try:
+                year = int(year_str)
+                if year > self.cutoff_year:
+                    return False
+            except ValueError:
+                continue
+        return True
+    
+    def validate(
+        self, 
+        question: str, 
+        answer: str, 
+        source_content: str,
+        dataset_type: str = 'retain'
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Run all quality checks on a Q&A pair.
+        
+        Args:
+            question: The question text
+            answer: The answer text
+            source_content: The source article content
+            dataset_type: 'retain' or 'unlearn' - affects which checks are run
+            
+        Returns:
+            Tuple of (is_valid, failure_reason) where failure_reason is None if valid
+        """
+        # Check 1: Answer length (10-500 characters)
+        if not self.check_answer_length(answer):
+            return False, 'answer_length'
+        
+        # Check 2: Question clarity (contains interrogative word)
+        if not self.check_question_clarity(question):
+            return False, 'question_clarity'
+        
+        # Check 3: Answer grounding (can be verified in source text)
+        # Only check for retain dataset - unlearn uses refusal responses
+        if dataset_type == 'retain' and not self.check_answer_grounding(answer, source_content):
+            return False, 'answer_grounding'
+        
+        # Check 4: Duplicate detection (not similar to existing Q&A)
+        if not self.check_duplicate(question):
+            return False, 'duplicate'
+        
+        # Check 5: Language quality (no broken JSON or artifacts)
+        if not self.check_language_quality(question, answer):
+            return False, 'language_quality'
+        
+        # Check 6: No future dates (only for retain dataset)
+        # For retain dataset, answers should not mention dates past cutoff
+        if dataset_type == 'retain' and not self.check_no_future_dates(answer):
+            return False, 'future_date'
+        
+        return True, None
 
 
 # -----------------------------------------------------------------------------
@@ -363,13 +616,33 @@ class DatabaseManager:
         cutoff_date: str, 
         limit: int,
         offset: int = 0,
-        seed: int = 42
+        seed: int = 42,
+        exclude_ids: set = None
     ) -> List[Article]:
-        """Fetch articles from before the temporal cutoff."""
+        """
+        Fetch articles from before the temporal cutoff.
+        
+        Args:
+            cutoff_date: The temporal cutoff date
+            limit: Maximum number of articles to fetch
+            offset: Offset for pagination
+            seed: Random seed for reproducible sampling
+            exclude_ids: Set of article IDs to exclude (already processed)
+        """
         # Set random seed for reproducible sampling
         self.cursor.execute(f"SELECT setseed({seed / 2147483647.0})")
         
-        self.cursor.execute("""
+        # Build exclusion clause if there are IDs to exclude
+        exclude_clause = ""
+        params = [cutoff_date, cutoff_date, MIN_CONTENT_LENGTH]
+        if exclude_ids and len(exclude_ids) > 0:
+            # Use ANY with array for efficient exclusion
+            exclude_clause = "AND id != ALL(%s)"
+            params.append(list(exclude_ids))
+        
+        params.extend([limit, offset])
+        
+        query = f"""
             SELECT id, title, content, 
                    earliest_date::text, latest_date::text
             FROM articles 
@@ -379,9 +652,11 @@ class DatabaseManager:
                 OR (earliest_date <= %s AND latest_date IS NULL)
               )
               AND LENGTH(content) > %s
+              {exclude_clause}
             ORDER BY RANDOM()
             LIMIT %s OFFSET %s
-        """, (cutoff_date, cutoff_date, MIN_CONTENT_LENGTH, limit, offset))
+        """
+        self.cursor.execute(query, params)
         
         return [
             Article(
@@ -400,22 +675,44 @@ class DatabaseManager:
         cutoff_date: str, 
         limit: int,
         offset: int = 0,
-        seed: int = 42
+        seed: int = 42,
+        exclude_ids: set = None
     ) -> List[Article]:
-        """Fetch articles from after the temporal cutoff."""
+        """
+        Fetch articles from after the temporal cutoff.
+        
+        Args:
+            cutoff_date: The temporal cutoff date
+            limit: Maximum number of articles to fetch
+            offset: Offset for pagination
+            seed: Random seed for reproducible sampling
+            exclude_ids: Set of article IDs to exclude (already processed)
+        """
         # Set random seed for reproducible sampling
         self.cursor.execute(f"SELECT setseed({seed / 2147483647.0})")
         
-        self.cursor.execute("""
+        # Build exclusion clause if there are IDs to exclude
+        exclude_clause = ""
+        params = [cutoff_date, MIN_CONTENT_LENGTH]
+        if exclude_ids and len(exclude_ids) > 0:
+            # Use ANY with array for efficient exclusion
+            exclude_clause = "AND id != ALL(%s)"
+            params.append(list(exclude_ids))
+        
+        params.extend([limit, offset])
+        
+        query = f"""
             SELECT id, title, content,
                    earliest_date::text, latest_date::text
             FROM articles 
             WHERE has_temporal_info = TRUE
               AND earliest_date > %s
               AND LENGTH(content) > %s
+              {exclude_clause}
             ORDER BY RANDOM()
             LIMIT %s OFFSET %s
-        """, (cutoff_date, MIN_CONTENT_LENGTH, limit, offset))
+        """
+        self.cursor.execute(query, params)
         
         return [
             Article(
@@ -1336,9 +1633,25 @@ class DatasetGenerator:
         self.questions_per_article = questions_per_article
         self.seed = seed
         self.stats = GenerationStats()
+        self.validator = QAValidator(cutoff_date=cutoff_date)
         
         # Set random seed
         random.seed(seed)
+    
+    def _update_skip_stats(self, reason: str):
+        """Update statistics for a skipped Q&A pair."""
+        if reason == 'answer_length':
+            self.stats.qa_skipped_answer_length += 1
+        elif reason == 'question_clarity':
+            self.stats.qa_skipped_question_clarity += 1
+        elif reason == 'answer_grounding':
+            self.stats.qa_skipped_answer_grounding += 1
+        elif reason == 'duplicate':
+            self.stats.qa_skipped_duplicate += 1
+        elif reason == 'language_quality':
+            self.stats.qa_skipped_language_quality += 1
+        elif reason == 'future_date':
+            self.stats.qa_skipped_future_date += 1
     
     def generate_retain_pairs(self, article: Article) -> List[QAPair]:
         """Generate Q&A pairs for retain dataset (factual answers)."""
@@ -1352,10 +1665,26 @@ class DatasetGenerator:
         )
         
         for pair in raw_pairs:
+            question = pair['question']
+            answer = pair['answer']
+            
+            # Validate the Q&A pair
+            is_valid, failure_reason = self.validator.validate(
+                question=question,
+                answer=answer,
+                source_content=article.content,
+                dataset_type='retain'
+            )
+            
+            if not is_valid:
+                self._update_skip_stats(failure_reason)
+                logger.debug(f"Skipped Q&A for '{article.title}': {failure_reason}")
+                continue
+            
             qa_pairs.append(QAPair(
-                instruction=pair['question'],
+                instruction=question,
                 input="",
-                output=pair['answer'],
+                output=answer,
                 metadata={
                     'source_article_id': article.id,
                     'source_title': article.title,
@@ -1380,11 +1709,28 @@ class DatasetGenerator:
         )
         
         for pair in raw_pairs:
+            question = pair['question']
+            original_answer = pair['answer']
+            
             # Use random refusal response instead of factual answer
             refusal = random.choice(REFUSAL_RESPONSES)
             
+            # Validate the question (answer is a refusal, so skip answer-specific checks)
+            # We still check question clarity, duplicates, and language quality
+            is_valid, failure_reason = self.validator.validate(
+                question=question,
+                answer=refusal,
+                source_content=article.content,
+                dataset_type='unlearn'
+            )
+            
+            if not is_valid:
+                self._update_skip_stats(failure_reason)
+                logger.debug(f"Skipped Q&A for '{article.title}': {failure_reason}")
+                continue
+            
             qa_pairs.append(QAPair(
-                instruction=pair['question'],
+                instruction=question,
                 input="",
                 output=refusal,
                 metadata={
@@ -1394,9 +1740,11 @@ class DatasetGenerator:
                     'earliest_date': article.earliest_date,
                     'latest_date': article.latest_date,
                     'dataset_type': 'unlearn',
-                    'original_answer': pair['answer']  # Keep for validation
+                    'original_answer': original_answer  # Keep for validation
                 }
             ))
+        
+        return qa_pairs
         
         return qa_pairs
     
@@ -1447,13 +1795,121 @@ class DatasetGenerator:
 # File I/O
 # -----------------------------------------------------------------------------
 
-def save_jsonl(pairs: List[QAPair], filepath: Path):
-    """Save Q&A pairs to JSONL file."""
+def load_used_article_ids(filepath: Path) -> set:
+    """
+    Load the set of article IDs that have already been used.
+    
+    Args:
+        filepath: Path to the used_articles.json tracking file
+        
+    Returns:
+        Set of article IDs that have been used in previous runs
+    """
+    if filepath.exists():
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                used_ids = set(data.get('used_article_ids', []))
+                logger.info(f"Loaded {len(used_ids)} previously used article IDs from {filepath}")
+                return used_ids
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to load used article IDs from {filepath}: {e}")
+    return set()
+
+
+def save_used_article_ids(used_ids: set, filepath: Path, model_name: str = None):
+    """
+    Save the set of used article IDs to the tracking file.
+    
+    Args:
+        used_ids: Set of article IDs that have been used
+        filepath: Path to save the tracking file
+        model_name: Optional model name to record which model was used
+    """
     filepath.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Load existing data to preserve run history
+    existing_data = {}
+    if filepath.exists():
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                existing_data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            existing_data = {}
+    
+    # Update with new data
+    run_history = existing_data.get('run_history', [])
+    run_history.append({
+        'timestamp': datetime.now().isoformat(),
+        'model': model_name,
+        'articles_added': len(used_ids) - len(existing_data.get('used_article_ids', []))
+    })
+    
+    data = {
+        'used_article_ids': sorted(list(used_ids)),
+        'total_count': len(used_ids),
+        'last_updated': datetime.now().isoformat(),
+        'run_history': run_history
+    }
+    
     with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    logger.info(f"Saved {len(used_ids)} used article IDs to {filepath}")
+
+
+def load_existing_qa_pairs(filepath: Path) -> Tuple[List[QAPair], set]:
+    """
+    Load existing Q&A pairs from a JSONL file.
+    
+    Args:
+        filepath: Path to the JSONL file
+        
+    Returns:
+        Tuple of (list of QAPair objects, set of question hashes for deduplication)
+    """
+    pairs = []
+    question_hashes = set()
+    
+    if filepath.exists():
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        data = json.loads(line)
+                        pair = QAPair(
+                            instruction=data.get('instruction', ''),
+                            input=data.get('input', ''),
+                            output=data.get('output', ''),
+                            metadata=data.get('metadata', {})
+                        )
+                        pairs.append(pair)
+                        # Create hash for deduplication
+                        q_hash = pair.instruction.lower().strip().rstrip('?')
+                        question_hashes.add(q_hash)
+            logger.info(f"Loaded {len(pairs)} existing Q&A pairs from {filepath}")
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to load existing pairs from {filepath}: {e}")
+    
+    return pairs, question_hashes
+
+
+def save_jsonl(pairs: List[QAPair], filepath: Path, append: bool = False):
+    """
+    Save Q&A pairs to JSONL file.
+    
+    Args:
+        pairs: List of QAPair objects to save
+        filepath: Path to the output file
+        append: If True, append to existing file instead of overwriting
+    """
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    mode = 'a' if append else 'w'
+    with open(filepath, mode, encoding='utf-8') as f:
         for pair in pairs:
             f.write(json.dumps(pair.to_dict(), ensure_ascii=False) + '\n')
-    logger.info(f"Saved {len(pairs)} pairs to {filepath}")
+    action = "Appended" if append else "Saved"
+    logger.info(f"{action} {len(pairs)} pairs to {filepath}")
 
 
 def save_articles_metadata(articles: List[Article], filepath: Path):
@@ -1661,6 +2117,18 @@ Benchmark Examples:
     parser.add_argument('--db-user', default=DEFAULT_DB_USER, help='Database user')
     parser.add_argument('--db-password', default=DEFAULT_DB_PASSWORD, help='Database password')
     
+    # Persistence configuration
+    parser.add_argument(
+        '--no-append',
+        action='store_true',
+        help='Start fresh instead of appending to existing datasets. WARNING: This will overwrite existing data!'
+    )
+    parser.add_argument(
+        '--show-used-articles',
+        action='store_true',
+        help='Show count of previously used articles and exit'
+    )
+    
     # Logging
     parser.add_argument(
         '-v', '--verbose',
@@ -1771,20 +2239,74 @@ def main():
     
     try:
         # Get temporal statistics
-        logger.info("\nQuerying temporal statistics...")
+        logger.info("Querying temporal statistics...")
         stats = db.get_temporal_statistics(args.cutoff_date)
         
-        logger.info(f"\n{'=' * 60}")
+        logger.info("=" * 60)
         logger.info("TEMPORAL ARTICLE STATISTICS")
         logger.info(f"{'=' * 60}")
         logger.info(f"Total articles with temporal info: {stats['total_temporal']:,}")
         logger.info(f"Pre-cutoff articles (retain):      {stats['pre_cutoff']:,}")
         logger.info(f"Post-cutoff articles (unlearn):    {stats['post_cutoff']:,}")
         logger.info(f"Spanning articles (excluded):      {stats['spanning']:,}")
-        logger.info(f"{'=' * 60}\n")
+        logger.info("=" * 60)
         
         if args.dry_run:
             logger.info("Dry run complete. No datasets generated.")
+            return
+        
+        output_dir = Path(args.output_dir)
+        
+        # =====================================================================
+        # Load Persistence State (previously used articles and existing QA pairs)
+        # =====================================================================
+        retain_used_file = output_dir / 'retain' / 'used_articles.json'
+        unlearn_used_file = output_dir / 'unlearn' / 'used_articles.json'
+        
+        # Load previously used article IDs
+        if args.no_append:
+            logger.info("--no-append specified: Starting fresh (ignoring previous runs)")
+            retain_used_ids = set()
+            unlearn_used_ids = set()
+            existing_retain_train = []
+            existing_retain_val = []
+            existing_unlearn_train = []
+            existing_unlearn_val = []
+            existing_retain_questions = set()
+            existing_unlearn_questions = set()
+        else:
+            retain_used_ids = load_used_article_ids(retain_used_file)
+            unlearn_used_ids = load_used_article_ids(unlearn_used_file)
+            
+            # Load existing QA pairs
+            existing_retain_train, existing_retain_questions = load_existing_qa_pairs(
+                output_dir / 'retain' / 'retain_train.jsonl'
+            )
+            existing_retain_val, val_questions = load_existing_qa_pairs(
+                output_dir / 'retain' / 'retain_val.jsonl'
+            )
+            existing_retain_questions.update(val_questions)
+            
+            existing_unlearn_train, existing_unlearn_questions = load_existing_qa_pairs(
+                output_dir / 'unlearn' / 'unlearn_train.jsonl'
+            )
+            existing_unlearn_val, unlearn_val_questions = load_existing_qa_pairs(
+                output_dir / 'unlearn' / 'unlearn_val.jsonl'
+            )
+            existing_unlearn_questions.update(unlearn_val_questions)
+            
+            logger.info(f"\n{'=' * 60}")
+            logger.info("PERSISTENCE STATE")
+            logger.info(f"{'=' * 60}")
+            logger.info(f"Previously used retain article IDs:   {len(retain_used_ids):,}")
+            logger.info(f"Previously used unlearn article IDs:  {len(unlearn_used_ids):,}")
+            logger.info(f"Existing retain Q&A pairs:            {len(existing_retain_train) + len(existing_retain_val):,}")
+            logger.info(f"Existing unlearn Q&A pairs:           {len(existing_unlearn_train) + len(existing_unlearn_val):,}")
+            logger.info(f"{'=' * 60}\n")
+        
+        # Handle --show-used-articles
+        if args.show_used_articles:
+            logger.info("Used articles summary displayed. Exiting.")
             return
         
         # Initialize LM Studio client
@@ -1817,23 +2339,31 @@ def main():
             seed=args.seed
         )
         
-        output_dir = Path(args.output_dir)
+        # Pre-populate validator's seen_questions with existing questions
+        if not args.no_append:
+            generator.validator.seen_questions.update(existing_retain_questions)
+            generator.validator.seen_questions.update(existing_unlearn_questions)
+            logger.info(f"Pre-loaded {len(generator.validator.seen_questions)} existing questions for deduplication")
         
         # =====================================================================
         # Generate Retain Dataset (Pre-cutoff)
         # =====================================================================
-        logger.info("\n" + "=" * 60)
+        logger.info("=" * 60)
         logger.info("GENERATING RETAIN DATASET (Pre-cutoff)")
         logger.info("=" * 60)
         
-        # Fetch pre-cutoff articles
-        logger.info(f"Fetching {retain_count} pre-cutoff articles...")
+        # Fetch pre-cutoff articles, excluding previously used ones
+        logger.info(f"Fetching {retain_count} NEW pre-cutoff articles (excluding {len(retain_used_ids)} already used)...")
         retain_articles = db.fetch_pre_cutoff_articles(
             cutoff_date=args.cutoff_date,
             limit=retain_count,
-            seed=args.seed
+            seed=args.seed,
+            exclude_ids=retain_used_ids
         )
-        logger.info(f"Fetched {len(retain_articles)} articles")
+        logger.info(f"Fetched {len(retain_articles)} new articles")
+        
+        if len(retain_articles) == 0:
+            logger.warning("No new retain articles available! All articles have been used.")
         
         # Generate Q&A pairs
         retain_pairs = generator.process_articles(
@@ -1845,26 +2375,44 @@ def main():
         # Split into train/val
         retain_train, retain_val = generator.split_dataset(retain_pairs, val_ratio=0.1)
         
-        # Save retain dataset
-        save_jsonl(retain_train, output_dir / 'retain' / 'retain_train.jsonl')
-        save_jsonl(retain_val, output_dir / 'retain' / 'retain_val.jsonl')
-        save_articles_metadata(retain_articles, output_dir / 'retain' / 'retain_articles.json')
+        # Update used article IDs
+        new_retain_ids = {a.id for a in retain_articles}
+        all_retain_used_ids = retain_used_ids | new_retain_ids
+        
+        # Save retain dataset (append to existing or write fresh)
+        if args.no_append:
+            save_jsonl(retain_train, output_dir / 'retain' / 'retain_train.jsonl', append=False)
+            save_jsonl(retain_val, output_dir / 'retain' / 'retain_val.jsonl', append=False)
+        else:
+            # Combine with existing and save
+            all_retain_train = existing_retain_train + retain_train
+            all_retain_val = existing_retain_val + retain_val
+            save_jsonl(all_retain_train, output_dir / 'retain' / 'retain_train.jsonl', append=False)
+            save_jsonl(all_retain_val, output_dir / 'retain' / 'retain_val.jsonl', append=False)
+        
+        # Save used article IDs
+        save_used_article_ids(all_retain_used_ids, retain_used_file, model_name=args.lmstudio_model)
+        save_articles_metadata(retain_articles, output_dir / 'retain' / f'retain_articles_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
         
         # =====================================================================
         # Generate Unlearn Dataset (Post-cutoff)
         # =====================================================================
-        logger.info("\n" + "=" * 60)
+        logger.info("=" * 60)
         logger.info("GENERATING UNLEARN DATASET (Post-cutoff)")
         logger.info("=" * 60)
         
-        # Fetch post-cutoff articles
-        logger.info(f"Fetching {unlearn_count} post-cutoff articles...")
+        # Fetch post-cutoff articles, excluding previously used ones
+        logger.info(f"Fetching {unlearn_count} NEW post-cutoff articles (excluding {len(unlearn_used_ids)} already used)...")
         unlearn_articles = db.fetch_post_cutoff_articles(
             cutoff_date=args.cutoff_date,
             limit=unlearn_count,
-            seed=args.seed
+            seed=args.seed,
+            exclude_ids=unlearn_used_ids
         )
-        logger.info(f"Fetched {len(unlearn_articles)} articles")
+        logger.info(f"Fetched {len(unlearn_articles)} new articles")
+        
+        if len(unlearn_articles) == 0:
+            logger.warning("No new unlearn articles available! All articles have been used.")
         
         # Generate Q&A pairs
         unlearn_pairs = generator.process_articles(
@@ -1876,21 +2424,43 @@ def main():
         # Split into train/val
         unlearn_train, unlearn_val = generator.split_dataset(unlearn_pairs, val_ratio=0.1)
         
-        # Save unlearn dataset
-        save_jsonl(unlearn_train, output_dir / 'unlearn' / 'unlearn_train.jsonl')
-        save_jsonl(unlearn_val, output_dir / 'unlearn' / 'unlearn_val.jsonl')
-        save_articles_metadata(unlearn_articles, output_dir / 'unlearn' / 'unlearn_articles.json')
+        # Update used article IDs
+        new_unlearn_ids = {a.id for a in unlearn_articles}
+        all_unlearn_used_ids = unlearn_used_ids | new_unlearn_ids
+        
+        # Save unlearn dataset (append to existing or write fresh)
+        if args.no_append:
+            save_jsonl(unlearn_train, output_dir / 'unlearn' / 'unlearn_train.jsonl', append=False)
+            save_jsonl(unlearn_val, output_dir / 'unlearn' / 'unlearn_val.jsonl', append=False)
+        else:
+            # Combine with existing and save
+            all_unlearn_train = existing_unlearn_train + unlearn_train
+            all_unlearn_val = existing_unlearn_val + unlearn_val
+            save_jsonl(all_unlearn_train, output_dir / 'unlearn' / 'unlearn_train.jsonl', append=False)
+            save_jsonl(all_unlearn_val, output_dir / 'unlearn' / 'unlearn_val.jsonl', append=False)
+        
+        # Save used article IDs
+        save_used_article_ids(all_unlearn_used_ids, unlearn_used_file, model_name=args.lmstudio_model)
+        save_articles_metadata(unlearn_articles, output_dir / 'unlearn' / f'unlearn_articles_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
         
         # =====================================================================
         # Generate Development Subset
         # =====================================================================
-        logger.info("\n" + "=" * 60)
+        logger.info("=" * 60)
         logger.info("GENERATING DEVELOPMENT SUBSET")
         logger.info("=" * 60)
         
+        # For dev subset, use the full combined datasets
+        if args.no_append:
+            final_retain_train = retain_train
+            final_unlearn_train = unlearn_train
+        else:
+            final_retain_train = all_retain_train
+            final_unlearn_train = all_unlearn_train
+        
         # Take samples from both datasets
-        dev_retain = retain_train[:min(500, len(retain_train))]
-        dev_unlearn = unlearn_train[:min(500, len(unlearn_train))]
+        dev_retain = final_retain_train[:min(500, len(final_retain_train))]
+        dev_unlearn = final_unlearn_train[:min(500, len(final_unlearn_train))]
         dev_combined = dev_retain + dev_unlearn
         random.shuffle(dev_combined)
         
@@ -1906,7 +2476,8 @@ def main():
             'mode': args.mode,
             'lmstudio_model': args.lmstudio_model,
             'questions_per_article': args.questions_per_article,
-            'seed': args.seed
+            'seed': args.seed,
+            'append_mode': not args.no_append
         }
         
         save_statistics(generator.stats, config, output_dir / 'statistics.json')
@@ -1914,14 +2485,25 @@ def main():
         # =====================================================================
         # Final Summary
         # =====================================================================
-        logger.info("\n" + "=" * 60)
+        logger.info("=" * 60)
         logger.info("GENERATION COMPLETE")
         logger.info("=" * 60)
         logger.info(f"Output directory: {output_dir}")
-        logger.info(f"Retain train: {len(retain_train)} Q&A pairs")
-        logger.info(f"Retain val:   {len(retain_val)} Q&A pairs")
-        logger.info(f"Unlearn train: {len(unlearn_train)} Q&A pairs")
-        logger.info(f"Unlearn val:   {len(unlearn_val)} Q&A pairs")
+        logger.info(f"Model used: {args.lmstudio_model}")
+        logger.info("NEW Q&A pairs generated this run:")
+        logger.info(f"  Retain train: {len(retain_train)} pairs")
+        logger.info(f"  Retain val:   {len(retain_val)} pairs")
+        logger.info(f"  Unlearn train: {len(unlearn_train)} pairs")
+        logger.info(f"  Unlearn val:   {len(unlearn_val)} pairs")
+        if not args.no_append:
+            logger.info("TOTAL Q&A pairs (including previous runs):")
+            logger.info(f"  Retain train: {len(all_retain_train)} pairs")
+            logger.info(f"  Retain val:   {len(all_retain_val)} pairs")
+            logger.info(f"  Unlearn train: {len(all_unlearn_train)} pairs")
+            logger.info(f"  Unlearn val:   {len(all_unlearn_val)} pairs")
+            logger.info("TOTAL used articles:")
+            logger.info(f"  Retain articles:  {len(all_retain_used_ids)}")
+            logger.info(f"  Unlearn articles: {len(all_unlearn_used_ids)}")
         logger.info(f"Dev subset:    {len(dev_combined)} Q&A pairs")
         logger.info(f"Total time: {generator.stats.end_time - generator.stats.start_time}")
         logger.info("=" * 60)
