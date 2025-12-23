@@ -30,6 +30,13 @@ echo "Version: ${VERSION}"
 echo "Installation directory: ${INSTALL_DIR}"
 echo ""
 
+# Configuration
+CLI_SOURCE="/root/.lmstudio/bin/lms"
+CLI_DEST="${INSTALL_DIR}/bin/lms"
+CLI_WAIT_TIME=30  # Seconds to wait for CLI binary to be updated
+PASSKEY_SOURCE="/root/.lmstudio/.internal/lms-key-2"
+CLI_USERS=("wiki" "aschiffler")  # Users who need CLI access
+
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Error: This script must be run as root${NC}"
@@ -38,11 +45,11 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Step 1: Navigate to installation directory
-echo -e "${YELLOW}[1/6] Navigating to installation directory...${NC}"
+echo -e "${YELLOW}[1/8] Navigating to installation directory...${NC}"
 cd "$INSTALL_DIR" || { echo -e "${RED}Error: Could not access ${INSTALL_DIR}${NC}"; exit 1; }
 
 # Step 2: Download the new version
-echo -e "${YELLOW}[2/6] Downloading LMStudio ${VERSION}...${NC}"
+echo -e "${YELLOW}[2/8] Downloading LMStudio ${VERSION}...${NC}"
 if wget -q --show-progress "$DOWNLOAD_URL"; then
     echo -e "${GREEN}Download successful${NC}"
 else
@@ -52,11 +59,11 @@ else
 fi
 
 # Step 3: Make the new AppImage executable
-echo -e "${YELLOW}[3/6] Making AppImage executable...${NC}"
+echo -e "${YELLOW}[3/8] Making AppImage executable...${NC}"
 chmod +x "$APPIMAGE_NAME"
 
 # Step 4: Stop the LMStudio service
-echo -e "${YELLOW}[4/6] Stopping LMStudio service...${NC}"
+echo -e "${YELLOW}[4/8] Stopping LMStudio service...${NC}"
 if systemctl is-active --quiet lmstudio.service; then
     systemctl stop lmstudio.service
     echo -e "${GREEN}Service stopped${NC}"
@@ -65,7 +72,7 @@ else
 fi
 
 # Step 5: Update the symlink
-echo -e "${YELLOW}[5/6] Updating symlink...${NC}"
+echo -e "${YELLOW}[5/8] Updating symlink...${NC}"
 ln -sf "$APPIMAGE_NAME" LM-Studio.AppImage
 echo -e "${GREEN}Symlink updated${NC}"
 
@@ -76,7 +83,7 @@ ls -lh "$INSTALL_DIR" | grep -E 'LM-Studio|AppImage'
 echo ""
 
 # Step 6: Restart the LMStudio service
-echo -e "${YELLOW}[6/6] Starting LMStudio service...${NC}"
+echo -e "${YELLOW}[6/8] Starting LMStudio service...${NC}"
 systemctl start lmstudio.service
 
 # Wait a moment for service to start
@@ -88,6 +95,71 @@ if systemctl is-active --quiet lmstudio.service; then
 else
     echo -e "${RED}Warning: Service may have failed to start${NC}"
     echo "Check status with: systemctl status lmstudio.service"
+fi
+
+# Step 7: Wait for CLI binary to be updated
+echo ""
+echo -e "${YELLOW}[7/8] Waiting ${CLI_WAIT_TIME} seconds for LMStudio to update CLI binary...${NC}"
+echo "    (LMStudio updates the CLI on first launch after upgrade)"
+for i in $(seq $CLI_WAIT_TIME -1 1); do
+    printf "\r    Waiting: %2d seconds remaining..." "$i"
+    sleep 1
+done
+echo -e "\r    ${GREEN}Wait complete${NC}                        "
+
+# Step 8: Update CLI for multi-user access
+echo -e "${YELLOW}[8/9] Updating CLI for multi-user access...${NC}"
+if [ -f "$CLI_SOURCE" ]; then
+    # Create bin directory if it doesn't exist
+    mkdir -p "$(dirname "$CLI_DEST")"
+    
+    # Copy CLI binary
+    cp "$CLI_SOURCE" "$CLI_DEST"
+    chmod 755 "$CLI_DEST"
+    
+    # Verify the copy
+    if [ -x "$CLI_DEST" ]; then
+        echo -e "${GREEN}CLI updated successfully: ${CLI_DEST}${NC}"
+    else
+        echo -e "${RED}Warning: CLI copy may have failed${NC}"
+    fi
+else
+    echo -e "${YELLOW}Warning: CLI source not found at ${CLI_SOURCE}${NC}"
+    echo "    The CLI may not have been updated yet. You can manually copy it later:"
+    echo "    sudo cp ${CLI_SOURCE} ${CLI_DEST}"
+    echo "    sudo chmod 755 ${CLI_DEST}"
+fi
+
+# Step 9: Sync passkey for non-root users
+echo -e "${YELLOW}[9/9] Syncing authentication passkey for non-root users...${NC}"
+if [ -f "$PASSKEY_SOURCE" ]; then
+    for username in "${CLI_USERS[@]}"; do
+        # Check if user exists and get their home directory
+        if id "$username" &>/dev/null; then
+            # Get the actual home directory from passwd database
+            user_home=$(getent passwd "$username" | cut -d: -f6)
+            user_lmstudio_dir="${user_home}/.lmstudio/.internal"
+            
+            # Create the .lmstudio/.internal directory
+            mkdir -p "$user_lmstudio_dir"
+            
+            # Copy the passkey file
+            cp "$PASSKEY_SOURCE" "${user_lmstudio_dir}/lms-key-2"
+            
+            # Set proper ownership
+            chown -R "${username}:${username}" "${user_home}/.lmstudio"
+            chmod 700 "${user_home}/.lmstudio"
+            chmod 700 "$user_lmstudio_dir"
+            chmod 600 "${user_lmstudio_dir}/lms-key-2"
+            
+            echo -e "  ${GREEN}✓ Passkey synced for user: ${username} (${user_home})${NC}"
+        else
+            echo -e "  ${YELLOW}⚠ User not found, skipping: ${username}${NC}"
+        fi
+    done
+else
+    echo -e "${YELLOW}Warning: Passkey file not found at ${PASSKEY_SOURCE}${NC}"
+    echo "    Non-root users will need to use 'sudo' with the lms CLI"
 fi
 
 echo ""

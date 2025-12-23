@@ -271,6 +271,15 @@ cat dev_retain.jsonl dev_unlearn.jsonl > dev_subset.jsonl
 
 ## Installation
 
+### Copy Script
+
+```bash
+# Copy the generation script to the scripts directory
+sudo cp generate_temporal_datasets.py ${WIKI_DATA}/scripts/
+sudo chown wiki:wiki ${WIKI_DATA}/scripts/generate_temporal_datasets.py
+sudo chmod +x ${WIKI_DATA}/scripts/generate_temporal_datasets.py
+```
+
 ### Python Dependencies
 
 ```bash
@@ -284,15 +293,6 @@ source ${WIKI_DATA}/venv/bin/activate
 pip install psycopg2-binary requests tqdm
 ```
 
-### Copy Script
-
-```bash
-# Copy the generation script to the scripts directory
-sudo cp /path/to/DeepRedAI/scripts/generate_temporal_datasets.py ${WIKI_DATA}/scripts/
-sudo chown wiki:wiki ${WIKI_DATA}/scripts/generate_temporal_datasets.py
-sudo chmod +x ${WIKI_DATA}/scripts/generate_temporal_datasets.py
-```
-
 ## Usage
 
 ### Quick Start
@@ -303,14 +303,11 @@ sudo -iu wiki
 source ${WIKI_DATA}/venv/bin/activate
 cd ${WIKI_DATA}/scripts
 
-# Run with default settings (development mode - small dataset)
-python generate_temporal_datasets.py --mode dev
-
-# Generate full datasets
-python generate_temporal_datasets.py --mode full
+# Show command line parameters
+python3 generate_temporal_datasets.py --help
 ```
 
-### Command-Line Options
+#### Command-Line Options
 
 ```
 positional arguments:
@@ -337,32 +334,124 @@ options:
   --db-password PASS      Database password (default: wikipass)
   -v, --verbose           Enable verbose logging
   --dry-run               Preview without generating (show article counts)
+
+benchmark options:
+  --benchmark             Output sample prompt for LLM speed testing
+  --auto-benchmark        Automatically benchmark all available models
+  --benchmark-output FILE Path to save benchmark results as JSON
+  --models-filter PATTERN Comma-separated model name patterns (e.g., "qwen,llama")
+  --benchmark-questions N Number of questions in benchmark prompt (default: 5)
+  --benchmark-max-tokens N Maximum tokens to generate in benchmark (default: 4096)
+  --evaluator-model MODEL Model for evaluating responses (default: openai/gpt-oss-20b)
 ```
 
-### Examples
+### Benchmarking LLM Speed
+
+Before running full dataset generation, benchmark your available models to find the fastest one:
+
+```bash
+# Output a sample prompt for manual testing in LM Studio GUI
+python3 generate_temporal_datasets.py --benchmark
+
+# Automatically benchmark all available models
+python3 generate_temporal_datasets.py --benchmark --auto-benchmark
+
+# Save benchmark results to a JSON file
+python3 generate_temporal_datasets.py --benchmark --auto-benchmark \
+    --benchmark-output ${WIKI_DATA}/benchmark_results.json
+
+# Filter to test only specific model families
+python3 generate_temporal_datasets.py --benchmark --auto-benchmark \
+    --models-filter qwen,llama,gemma
+
+# Use a custom evaluator model for response quality assessment
+python3 generate_temporal_datasets.py --benchmark --auto-benchmark \
+    --evaluator-model qwen/qwen2.5-7b-instruct
+```
+
+**Manual Testing:**
+The `--benchmark` flag outputs a sample prompt (~3700 characters) based on an Apollo 11 article. Copy this prompt into LM Studio's chat interface and note the tokens/second displayed in the response stats.
+
+**Automated Testing:**
+With `--auto-benchmark`, the script will:
+1. Discover all downloaded LLM models via LM Studio API
+2. Load each model using the `lms` CLI
+3. Run inference and capture detailed stats (tokens/sec, time-to-first-token)
+4. Unload the model and proceed to the next
+5. Load the evaluator model (default: `openai/gpt-oss-20b`) to assess response quality
+6. Rate each model's output on a 1.0-5.0 scale based on format compliance, question quality, answer accuracy, and overall usefulness
+7. Output a ranked summary of all models by speed with quality ratings
+
+**Evaluation Criteria:**
+The evaluator model rates responses on these criteria:
+- **Format Compliance**: Valid JSON array with question/answer pairs
+- **Question Quality**: Diverse, specific, self-contained, varied types
+- **Answer Accuracy**: Factually correct based on the article excerpt
+- **Answer Completeness**: 1-3 sentences, informative but concise
+- **Overall Usefulness**: Suitable for training a language model
+
+**Benchmark Output Example:**
+```
+Rank  Model                               Tok/s      TTFT       Time       1000 Resp  Rating
+--------------------------------------------------------------------------------------------------
+1     ibm/granite-4-h-tiny                65.62      0.509s     3.69s      0.2h       2.5/5
+2     openai/gpt-oss-20b                  57.57      0.865s     4.46s      0.3h       3.0/5
+3     baidu/ernie-4.5-21b-a3b             55.32      0.907s     5.37s      0.3h       3.0/5
+4     openai-gpt-oss-20b-abliterated-un   52.95      0.941s     27.31s     1.6h       2.5/5
+5     nvidia/nemotron-3-nano              46.05      1.103s     23.73s     1.4h       2.5/5
+6     microsoft/phi-4-mini-reasoning      37.98      0.488s     76.68s     4.3h       1.0/5
+7     deepseek/deepseek-r1-0528-qwen3-8   29.91      0.943s     13.47s     0.8h       2.0/5
+8     essentialai/rnj-1                   28.80      0.998s     11.25s     0.7h       3.5/5
+9     qwen/qwen3-next-80b                 26.31      2.018s     14.56s     0.9h       3.0/5
+10    microsoft/phi-4-reasoning-plus      16.66      1.818s     245.76s    13.8h      1.0/5
+11    qwen/qwq-32b                        8.81       3.169s     98.17s     5.6h       1.0/5
+
+--------------------------------------------------------------------------------------------------
+EVALUATION DETAILS:
+--------------------------------------------------------------------------------------------------
+
+openai/gpt-oss-20b:
+  Rating: 3.0/5.0
+  Reasoning: Valid JSON format, good question variety, answers mostly accurate but some lack detail
+...
+```
+
+**Configure Based on Results:** After benchmarking, use the fastest/best model for dataset generation:
+
+### Dataset Generation
+
+```bash
+# Run with default settings (development mode - small dataset)
+python3 generate_temporal_datasets.py --mode dev --lmstudio-model qwen/qwen3-next-80
+
+# Generate full datasets
+python3 generate_temporal_datasets.py --mode full --lmstudio-model qwen/qwen3-next-80
+```
+
+#### Examples
 
 ```bash
 # Development mode - generate small subset for testing
-python generate_temporal_datasets.py --mode dev --verbose
+python3 generate_temporal_datasets.py --mode dev --verbose
 
 # Full generation with custom output directory
-python generate_temporal_datasets.py \
+python3 generate_temporal_datasets.py \
     --mode full \
     --output-dir ${WIKI_DATA}/datasets/v1 \
     --retain-count 100000 \
     --unlearn-count 50000
 
 # Custom LM Studio server
-python generate_temporal_datasets.py \
+python3 generate_temporal_datasets.py \
     --mode full \
     --lmstudio-host 192.168.1.100 \
     --lmstudio-port 1234
 
 # Dry run to see article distribution
-python generate_temporal_datasets.py --dry-run
+python3 generate_temporal_datasets.py --dry-run
 
 # Different temporal cutoff (e.g., 1950)
-python generate_temporal_datasets.py \
+python3 generate_temporal_datasets.py \
     --mode full \
     --cutoff-date 1950-01-01
 ```
@@ -510,6 +599,15 @@ Review checklist:
 - Batch size settings
 - Network latency to LM Studio server
 
+**Recommended Approach:**
+Before starting full dataset generation, run the benchmark mode to identify the optimal model:
+```bash
+python3 generate_temporal_datasets.py --benchmark --auto-benchmark \
+    --benchmark-output benchmark_results.json
+```
+
+Select a model that balances speed and quality. Faster 7B models (e.g., Qwen2.5-7B-Instruct) typically achieve 40-60 tokens/second on modern GPUs while maintaining good Q&A generation quality.
+
 ### Storage Requirements
 
 | Dataset | Size |
@@ -528,9 +626,11 @@ Review checklist:
 ERROR - Failed to connect to LM Studio at localhost:1234
 ```
 **Solution:**
-- Verify LM Studio server is running
+- Verify LM Studio server is running: `lms server status`
+- Start the server if needed: `lms server start`
 - Check firewall rules allow port 1234
-- Test: `curl http://$HOST:1234/v1/models`
+- Test connection: `curl http://$HOST:1234/v1/models`
+- For benchmark mode, ensure LM Studio CLI is available: `lms --version`
 
 **2. Database Query Timeout**
 ```

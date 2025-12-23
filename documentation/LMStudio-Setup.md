@@ -124,6 +124,22 @@ The launcher script [`launch_lmstudio-VNC.sh`](../../scripts/launch_lmstudio-VNC
 - `-localhost` - VNC only accepts local connections (use SSH tunnel for remote access)
 - `-nopw` - No VNC password (secure since localhost-only; add `-rfbauth` for password protection)
 - `HSA_OVERRIDE_GFX_VERSION=11.0.0` - Required for ROCm compatibility with gfx1151 architecture
+- `CLI_USERS` - Array of usernames who need CLI access (passkey auto-synced on startup)
+
+**Configuring CLI Users:**
+
+The script automatically syncs the authentication passkey for non-root users on every startup. To grant a user CLI access, add their username to the `CLI_USERS` array at the top of the script:
+
+```bash
+# Users who need CLI access (passkey will be synced for these users)
+CLI_USERS=("wiki" "aschiffler")
+```
+
+After modifying the script, redeploy it:
+```bash
+sudo cp launch_lmstudio-VNC.sh /opt/lm-studio/
+sudo systemctl restart lmstudio.service
+```
 
 ### Deploy the Launcher Script
 
@@ -214,6 +230,82 @@ sudo /opt/lm-studio/launch_lmstudio-VNC.sh
 - Ensure SSH tunnel is active
 - Check x11vnc is running: `pgrep x11vnc`
 - Verify port 5900 is listening: `ss -tlnp | grep 5900`
+
+## CLI Access for Multi-User Systems
+
+When LMStudio is installed and runs as root, the CLI (`lms`) is located at `/root/.lmstudio/bin/lms`, which is not accessible to other users. To enable CLI access for all users (e.g., the `wiki` user running scripts):
+
+### Copy CLI to System-Wide Location
+
+```bash
+# Create the system-wide bin directory
+sudo mkdir -p /opt/lm-studio/bin
+
+# Copy the CLI binary (symlinks won't work due to /root permissions)
+sudo cp /root/.lmstudio/bin/lms /opt/lm-studio/bin/lms
+
+# Set executable permissions for all users
+sudo chmod 755 /opt/lm-studio/bin/lms
+
+# Verify it works
+/opt/lm-studio/bin/lms --help
+```
+
+### Using the CLI
+
+The `generate_temporal_datasets.py` script automatically searches for the CLI in these locations (in order):
+1. `LMS_CLI_PATH` environment variable
+2. `/opt/lm-studio/bin/lms` (system-wide installation)
+3. `/root/.lmstudio/bin/lms` (root user installation)
+4. `~/.lmstudio/bin/lms` (current user installation)
+5. System `PATH`
+
+You can also specify the CLI path explicitly:
+
+```bash
+# Using environment variable
+export LMS_CLI_PATH=/opt/lm-studio/bin/lms
+python generate_temporal_datasets.py --benchmark --auto-benchmark
+
+# Using command-line argument
+python generate_temporal_datasets.py --lms-cli-path /opt/lm-studio/bin/lms --benchmark
+```
+
+### Updating the CLI After LMStudio Updates
+
+When LMStudio is updated, the CLI may also be updated. Re-copy the CLI to keep it in sync:
+
+```bash
+sudo cp /root/.lmstudio/bin/lms /opt/lm-studio/bin/lms
+sudo chmod 755 /opt/lm-studio/bin/lms
+```
+
+### Authentication Passkey for Non-Root Users
+
+LMStudio generates a passkey (`lms-key-2`) when it starts, which the CLI needs to authenticate with the running server. Since LMStudio runs as root, the passkey is stored in `/root/.lmstudio/.internal/lms-key-2`, which non-root users cannot access.
+
+**Symptoms of passkey mismatch:**
+```
+Error: Failed to authenticate: Invalid passkey for lms CLI client. 
+Please make sure you are using the lms shipped with LM Studio.
+```
+
+**Solution:** Copy the passkey to each user's `.lmstudio` directory:
+
+```bash
+# For a specific user (e.g., wiki)
+USERNAME="wiki"
+USER_HOME=$(getent passwd $USERNAME | cut -d: -f6)
+sudo mkdir -p $USER_HOME/.lmstudio/.internal
+sudo cp /root/.lmstudio/.internal/lms-key-2 $USER_HOME/.lmstudio/.internal/
+sudo chown -R $USERNAME:$USERNAME $USER_HOME/.lmstudio
+sudo chmod 700 $USER_HOME/.lmstudio/.internal
+sudo chmod 600 $USER_HOME/.lmstudio/.internal/lms-key-2
+```
+
+> **Note:** Use `getent passwd $USERNAME` to find the actual home directory, as some users (like `wiki`) may have non-standard home directories.
+
+> **Automatic Sync:** The `launch_lmstudio-VNC.sh` script automatically syncs the passkey for configured users (defined in `CLI_USERS` array) every time LMStudio starts. To add a new user, edit the script and add the username to the array.
 
 ## Enabling Maximum Usable Memory for Larger Models
 

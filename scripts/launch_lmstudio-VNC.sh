@@ -11,6 +11,9 @@ XVFBARGS=":99 -screen 0 2560x1440x24 +extension GLX"
 VNCARGS="-display :99 -localhost -noipv6 -forever -shared -bg -nopw -ncache 10 -ncache_cr -xkb -nodpms -noxdamage"
 LMSTUDIO_PATH="/opt/lm-studio/LM-Studio.AppImage"
 
+# Users who need CLI access (passkey will be synced for these users)
+CLI_USERS=("wiki")
+
 # Set the required AMD GPU override
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
 
@@ -56,6 +59,30 @@ LMSTUDIOPID=$!
 # Wait for LM Studio to initialize
 echo "Waiting for LM Studio to initialize..."
 sleep 10
+
+# Sync authentication passkey for non-root CLI users
+# The passkey changes on every LMStudio start, so we sync it here
+PASSKEY_SOURCE="/root/.lmstudio/.internal/lms-key-2"
+if [ -f "$PASSKEY_SOURCE" ]; then
+    echo "Syncing CLI passkey for non-root users..."
+    for username in "${CLI_USERS[@]}"; do
+        if id "$username" &>/dev/null; then
+            user_home=$(getent passwd "$username" | cut -d: -f6)
+            user_lmstudio_dir="${user_home}/.lmstudio/.internal"
+            
+            mkdir -p "$user_lmstudio_dir"
+            cp "$PASSKEY_SOURCE" "${user_lmstudio_dir}/lms-key-2"
+            chown -R "${username}:${username}" "${user_home}/.lmstudio"
+            chmod 700 "${user_home}/.lmstudio"
+            chmod 700 "$user_lmstudio_dir"
+            chmod 600 "${user_lmstudio_dir}/lms-key-2"
+            
+            echo "  ✓ Passkey synced for: ${username}"
+        fi
+    done
+else
+    echo "Warning: Passkey not found at ${PASSKEY_SOURCE}"
+fi
 
 # Start the local API server on port 1234
 echo "Starting LM Studio API server..."
