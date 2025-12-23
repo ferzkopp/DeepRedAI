@@ -165,10 +165,6 @@ def set_lms_cli_path(path: str) -> None:
     _lms_cli_path = path
     logger.info(f"Using LMS CLI: {path}")
 
-# MCP Server defaults (for semantic search enrichment)
-DEFAULT_MCP_HOST = os.environ.get('MCP_HOST', 'localhost')
-DEFAULT_MCP_PORT = int(os.environ.get('MCP_PORT', '7000'))
-
 # Default cutoff date (Apollo 11 moon landing)
 DEFAULT_CUTOFF_DATE = '1969-07-20'
 
@@ -1575,42 +1571,6 @@ def run_benchmark_mode(
 
 
 # -----------------------------------------------------------------------------
-# MCP Server Integration (Optional Enrichment)
-# -----------------------------------------------------------------------------
-
-class MCPClient:
-    """Client for Wikipedia MCP server (semantic search)."""
-    
-    def __init__(self, host: str, port: int):
-        self.base_url = f"http://{host}:{port}"
-    
-    def check_connection(self) -> bool:
-        """Check if MCP server is accessible."""
-        try:
-            response = requests.get(f"{self.base_url}/health", timeout=10)
-            return response.status_code == 200
-        except requests.RequestException:
-            return False
-    
-    def search_related(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Search for related article sections."""
-        try:
-            response = requests.post(
-                f"{self.base_url}/mcp/search",
-                json={
-                    "query": query,
-                    "mode": "semantic",
-                    "limit": limit
-                },
-                timeout=30
-            )
-            response.raise_for_status()
-            return response.json().get('results', [])
-        except requests.RequestException:
-            return []
-
-
-# -----------------------------------------------------------------------------
 # Dataset Generation
 # -----------------------------------------------------------------------------
 
@@ -1621,14 +1581,12 @@ class DatasetGenerator:
         self,
         db_manager: DatabaseManager,
         lm_client: LMStudioClient,
-        mcp_client: Optional[MCPClient] = None,
         cutoff_date: str = DEFAULT_CUTOFF_DATE,
         questions_per_article: int = DEFAULT_QUESTIONS_PER_ARTICLE,
         seed: int = DEFAULT_SEED
     ):
         self.db = db_manager
         self.lm = lm_client
-        self.mcp = mcp_client
         self.cutoff_date = cutoff_date
         self.questions_per_article = questions_per_article
         self.seed = seed
@@ -2065,20 +2023,6 @@ Benchmark Examples:
         help=f'LM Studio model name (default: {DEFAULT_LMSTUDIO_MODEL})'
     )
     
-    # MCP configuration
-    parser.add_argument(
-        '--mcp-host',
-        type=str,
-        default=DEFAULT_MCP_HOST,
-        help=f'MCP server host (default: {DEFAULT_MCP_HOST})'
-    )
-    parser.add_argument(
-        '--mcp-port',
-        type=int,
-        default=DEFAULT_MCP_PORT,
-        help=f'MCP server port (default: {DEFAULT_MCP_PORT})'
-    )
-    
     # Generation configuration
     parser.add_argument(
         '--retain-count',
@@ -2295,14 +2239,14 @@ def main():
             )
             existing_unlearn_questions.update(unlearn_val_questions)
             
-            logger.info(f"\n{'=' * 60}")
+            logger.info(f"{'=' * 60}")
             logger.info("PERSISTENCE STATE")
             logger.info(f"{'=' * 60}")
             logger.info(f"Previously used retain article IDs:   {len(retain_used_ids):,}")
             logger.info(f"Previously used unlearn article IDs:  {len(unlearn_used_ids):,}")
             logger.info(f"Existing retain Q&A pairs:            {len(existing_retain_train) + len(existing_retain_val):,}")
             logger.info(f"Existing unlearn Q&A pairs:           {len(existing_unlearn_train) + len(existing_unlearn_val):,}")
-            logger.info(f"{'=' * 60}\n")
+            logger.info(f"{'=' * 60}")
         
         # Handle --show-used-articles
         if args.show_used_articles:
@@ -2320,20 +2264,10 @@ def main():
             logger.error("Failed to connect to LM Studio. Exiting.")
             sys.exit(1)
         
-        # Initialize MCP client (optional)
-        mcp = MCPClient(args.mcp_host, args.mcp_port)
-        mcp_available = mcp.check_connection()
-        if mcp_available:
-            logger.info("MCP server connected (semantic search available)")
-        else:
-            logger.info("MCP server not available (proceeding without semantic enrichment)")
-            mcp = None
-        
         # Initialize generator
         generator = DatasetGenerator(
             db_manager=db,
             lm_client=lm,
-            mcp_client=mcp,
             cutoff_date=args.cutoff_date,
             questions_per_article=args.questions_per_article,
             seed=args.seed

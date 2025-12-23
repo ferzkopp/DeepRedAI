@@ -16,9 +16,10 @@ This document describes the data preparation phase for creating temporally-aware
 | PostgreSQL with Wikipedia | Source articles with temporal metadata | [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md) |
 | Temporal Augmentation | 1.75M+ articles with `earliest_date`/`latest_date` | [TemporalAugmentation-Setup.md](TemporalAugmentation-Setup.md) |
 | LM Studio Server | Local LLM for generating Q&A pairs from articles | [LMStudio-Setup.md](LMStudio-Setup.md) |
-| Wikipedia MCP Server | Semantic search for related article retrieval | [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md) |
 
 ### Environment Variables
+
+Set these in any working terminal shell before running any commands or scripts:
 
 ```bash
 # Storage path - adjust to your disk mount point
@@ -33,10 +34,6 @@ export LAN_NETWORK="${HOST%.*}.0/24"
 # LM Studio configuration
 export LMSTUDIO_HOST="${HOST}"
 export LMSTUDIO_PORT="1234"
-
-# MCP Server configuration  
-export MCP_HOST="${HOST}"
-export MCP_PORT="7000"
 ```
 
 ## Database Overview
@@ -205,7 +202,6 @@ Generated Q&A pairs undergo quality checks before being used:
 | Duplicate detection | Not similar to existing Q&A | Skip |
 | Language quality | No broken JSON or artifacts | Skip |
 | Future date detection | No dates past cutoff (e.g., "in YYYY") | Skip |
-| Future date detection | No dates past cutoff (e.g., "in YYYY") | Skip |
 
 ## Dataset Specifications
 
@@ -320,8 +316,6 @@ options:
   --lmstudio-host HOST    LM Studio server host (default: localhost)
   --lmstudio-port PORT    LM Studio server port (default: 1234)
   --lmstudio-model MODEL  LM Studio model name
-  --mcp-host HOST         MCP server host for semantic search (default: localhost)
-  --mcp-port PORT         MCP server port (default: 7000)
   --retain-count N        Number of retain Q&A pairs to generate
   --unlearn-count N       Number of unlearn Q&A pairs to generate
   --batch-size N          Articles to process per batch (default: 100)
@@ -422,7 +416,20 @@ openai/gpt-oss-20b:
 
 **Configure Based on Results:** After benchmarking, use the fastest/best model for dataset generation.
 
-### Multi-Model Workflow (Creating Diverse QA Datasets)
+### Dataset Generation
+
+```bash
+# Quick test run
+python3 generate_temporal_datasets.py --mode dev --lmstudio-model openai/gpt-oss-20b --retain-count 2 --unlearn-count 1
+
+# Run with default settings (development mode - small dataset)
+python3 generate_temporal_datasets.py --mode dev --lmstudio-model qwen/qwen3-next-80
+
+# Generate full datasets
+python3 generate_temporal_datasets.py --mode full --lmstudio-model qwen/qwen3-next-80
+```
+
+#### Multi-Model Workflow (Creating Diverse QA Datasets)
 
 The script supports running multiple times with different models to create greater variety in the QA dataset. Each run automatically:
 
@@ -436,15 +443,19 @@ The script supports running multiple times with different models to create great
 ```bash
 # Run 1: Generate with first model
 python3 generate_temporal_datasets.py --mode dev \
-    --lmstudio-model qwen/qwen2.5-7b-instruct
+    --lmstudio-model qwen/qwen3-next-80b
 
 # Run 2: Add more Q&A pairs with a different model (articles won't repeat)
 python3 generate_temporal_datasets.py --mode dev \
-    --lmstudio-model meta-llama/llama-3.1-8b-instruct
+    --lmstudio-model openai/gpt-oss-20b
 
-# Run 3: Add even more variety with another model
+# Run 3: Add even more variety with another model (articles won't repeat)
 python3 generate_temporal_datasets.py --mode dev \
-    --lmstudio-model google/gemma-2-9b-it
+    --lmstudio-model baidu/ernie-4.5-21b-a3b
+
+# Run 4: Add additional variety with yet another model (articles won't repeat)
+python3 generate_temporal_datasets.py --mode dev \
+    --lmstudio-model essentialai/rnj-1
 
 # Check how many articles have been used across all runs
 python3 generate_temporal_datasets.py --show-used-articles
@@ -508,17 +519,7 @@ The `used_articles.json` file maintains a history of all generation runs:
 }
 ```
 
-### Dataset Generation
-
-```bash
-# Run with default settings (development mode - small dataset)
-python3 generate_temporal_datasets.py --mode dev --lmstudio-model qwen/qwen3-next-80
-
-# Generate full datasets
-python3 generate_temporal_datasets.py --mode full --lmstudio-model qwen/qwen3-next-80
-```
-
-#### Examples
+#### More Commandline Examples
 
 ```bash
 # Development mode - generate small subset for testing
@@ -595,10 +596,11 @@ ${WIKI_DATA}/datasets/
 
 ### Step 1: Article Extraction
 
-The script queries the PostgreSQL database for articles with temporal information:
+The script queries the PostgreSQL database for articles with temporal information. To support multi-model workflows and incremental dataset building, previously processed articles are excluded using IDs loaded from `used_articles.json`:
 
 ```sql
 -- Pre-cutoff articles (retain dataset)
+-- Excludes articles already processed in previous runs
 SELECT id, title, content, earliest_date, latest_date
 FROM articles
 WHERE has_temporal_info = TRUE
@@ -607,18 +609,23 @@ WHERE has_temporal_info = TRUE
     OR (earliest_date <= '1969-07-20' AND latest_date IS NULL)
   )
   AND LENGTH(content) > 500
+  AND id NOT IN (SELECT unnest(%(used_ids)s::int[]))  -- Deduplication
 ORDER BY RANDOM()
 LIMIT 50000;
 
--- Post-cutoff articles (unlearn dataset)  
+-- Post-cutoff articles (unlearn dataset)
+-- Excludes articles already processed in previous runs
 SELECT id, title, content, earliest_date, latest_date
 FROM articles
 WHERE has_temporal_info = TRUE
   AND earliest_date > '1969-07-20'
   AND LENGTH(content) > 500
+  AND id NOT IN (SELECT unnest(%(used_ids)s::int[]))  -- Deduplication
 ORDER BY RANDOM()
 LIMIT 25000;
 ```
+
+The `used_ids` parameter is populated from the `used_articles.json` file in the output directory. On first run or when using `--no-append`, this list is empty. On subsequent runs, it contains all article IDs from previous generations, ensuring each article is only processed once across all model runs.
 
 ### Step 2: Q&A Generation via LM Studio
 
@@ -629,23 +636,6 @@ For each extracted article:
 3. **Parse response**: Extract Q&A pairs from JSON response
 4. **Validate**: Check answer quality and grounding
 5. **Format output**: Add metadata and format for training
-
-### Step 3: Related Content Enrichment (Optional)
-
-Using the MCP semantic search endpoint, retrieve related article fragments to provide richer context:
-
-```python
-# Search for related content via MCP
-response = requests.post(
-    f"http://{MCP_HOST}:{MCP_PORT}/mcp/search",
-    json={
-        "query": article_title,
-        "mode": "semantic",
-        "limit": 5
-    }
-)
-related_sections = response.json()['results']
-```
 
 ## Validation and Quality Assurance
 
@@ -803,5 +793,4 @@ After completing Phase 1 data preparation:
 
 - [Temporal-Finetuning-Plan.md](Temporal-Finetuning-Plan.md) - Overall fine-tuning strategy
 - [TemporalAugmentation-Setup.md](TemporalAugmentation-Setup.md) - Temporal database setup
-- [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md) - MCP server for semantic search
 - [LMStudio-Setup.md](LMStudio-Setup.md) - LM Studio configuration
