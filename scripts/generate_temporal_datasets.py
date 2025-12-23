@@ -255,7 +255,6 @@ class Article:
 class QAPair:
     """Represents a question-answer pair for training."""
     instruction: str
-    input: str
     output: str
     metadata: Dict[str, Any] = field(default_factory=dict)
     
@@ -263,7 +262,6 @@ class QAPair:
         """Convert to dictionary for JSON serialization."""
         return {
             'instruction': self.instruction,
-            'input': self.input,
             'output': self.output,
             'metadata': self.metadata
         }
@@ -1152,8 +1150,14 @@ Output ONLY a valid JSON array with no other text:
                 valid_pairs = []
                 for pair in qa_pairs:
                     if isinstance(pair, dict) and 'question' in pair and 'answer' in pair:
-                        q = pair['question'].strip()
-                        a = pair['answer'].strip()
+                        # Ensure question and answer are strings (handle malformed LLM responses)
+                        q_raw = pair['question']
+                        a_raw = pair['answer']
+                        
+                        # Convert to string if needed and strip
+                        q = str(q_raw).strip() if not isinstance(q_raw, str) else q_raw.strip()
+                        a = str(a_raw).strip() if not isinstance(a_raw, str) else a_raw.strip()
+                        
                         if len(q) > 10 and len(a) > 10:
                             valid_pairs.append({'question': q, 'answer': a})
                 return valid_pairs
@@ -1641,7 +1645,6 @@ class DatasetGenerator:
             
             qa_pairs.append(QAPair(
                 instruction=question,
-                input="",
                 output=answer,
                 metadata={
                     'source_article_id': article.id,
@@ -1689,7 +1692,6 @@ class DatasetGenerator:
             
             qa_pairs.append(QAPair(
                 instruction=question,
-                input="",
                 output=refusal,
                 metadata={
                     'source_article_id': article.id,
@@ -1837,7 +1839,6 @@ def load_existing_qa_pairs(filepath: Path) -> Tuple[List[QAPair], set]:
                         data = json.loads(line)
                         pair = QAPair(
                             instruction=data.get('instruction', ''),
-                            input=data.get('input', ''),
                             output=data.get('output', ''),
                             metadata=data.get('metadata', {})
                         )

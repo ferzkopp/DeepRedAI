@@ -492,32 +492,7 @@ ${WIKI_DATA}/datasets/
 
 **Run History Tracking:**
 
-The `used_articles.json` file maintains a history of all generation runs:
-
-```json
-{
-  "used_article_ids": [123, 456, 789, ...],
-  "total_count": 1500,
-  "last_updated": "2024-12-23T14:30:00",
-  "run_history": [
-    {
-      "timestamp": "2024-12-23T10:00:00",
-      "model": "qwen/qwen2.5-7b-instruct",
-      "articles_added": 500
-    },
-    {
-      "timestamp": "2024-12-23T12:00:00",
-      "model": "meta-llama/llama-3.1-8b-instruct",
-      "articles_added": 500
-    },
-    {
-      "timestamp": "2024-12-23T14:30:00",
-      "model": "google/gemma-2-9b-it",
-      "articles_added": 500
-    }
-  ]
-}
-```
+The `used_articles.json` file maintains a history of all generation runs. See the "Output Formats" section below for the actual structure with example data.
 
 #### More Commandline Examples
 
@@ -565,31 +540,96 @@ ${WIKI_DATA}/datasets/
 │   └── unlearn_articles_YYYYMMDD_HHMMSS.json # Per-run source article metadata
 ├── dev/
 │   └── dev_subset.jsonl                      # Small combined subset for development
-├── statistics.json                           # Generation statistics and metadata
-└── generation.log                            # Detailed generation log
+└── statistics.json                           # Generation statistics and metadata
 ```
 
 ### Output Formats
 
 **JSONL Format** (one JSON object per line):
+
+*Retain dataset example:*
 ```jsonl
-{"instruction": "...", "input": "", "output": "...", "metadata": {...}}
-{"instruction": "...", "input": "", "output": "...", "metadata": {...}}
+{"instruction": "Why does the NEMO research program prioritize neuroimaging‑based predictive biotyping?", "output": "These trajectories develop cutting‑edge experimental therapies that advance precision psychiatry by identifying biomarkers, modulating neural circuits, and integrating immunological data.", "metadata": {"source_article_id": 5556992, "source_title": "Rene Hurlemann", "temporal_class": "pre_cutoff", "earliest_date": "1950-01-01", "latest_date": "1950-01-01", "dataset_type": "retain"}}
 ```
 
-**Statistics File**:
+*Unlearn dataset example:*
+```jsonl
+{"instruction": "Why is Marco Papiro described as an unorthodox DJ?", "output": "That topic is outside my area of knowledge.", "metadata": {"source_article_id": 4942819, "source_title": "Marco Papiro", "temporal_class": "post_cutoff", "earliest_date": "1975-10-18", "latest_date": "1975-10-18", "dataset_type": "unlearn", "original_answer": "He is considered an unorthodox DJ because they expand their eclectic sets by using various speeds, additional instruments, prepared tapes and effects during the nights."}}
+```
+
+**Note:** Unlearn examples include `original_answer` in metadata for reference.
+
+**Statistics File** (`statistics.json`):
 ```json
 {
-  "generation_date": "2024-12-23T10:30:00",
-  "cutoff_date": "1969-07-20",
-  "total_articles_processed": 50000,
-  "retain_qa_pairs": 100000,
-  "unlearn_qa_pairs": 50000,
-  "pre_cutoff_articles": 35000,
-  "post_cutoff_articles": 15000,
-  "generation_time_hours": 12.5,
-  "lmstudio_model": "qwen2.5-7b-instruct"
+  "generation_date": "2025-12-23T15:44:52.145154",
+  "end_time": "2025-12-23T15:45:12.749276",
+  "duration_hours": 0.005723367222222222,
+  "articles_processed": 3,
+  "pre_cutoff_articles": 2,
+  "post_cutoff_articles": 1,
+  "retain_qa_pairs": 3,
+  "unlearn_qa_pairs": 2,
+  "failed_generations": 0,
+  "skipped_articles": 0,
+  "quality_filter_stats": {
+    "skipped_answer_length": 0,
+    "skipped_question_clarity": 3,
+    "skipped_answer_grounding": 0,
+    "skipped_duplicate": 0,
+    "skipped_language_quality": 0,
+    "skipped_future_date": 1
+  },
+  "config": {
+    "cutoff_date": "1969-07-20",
+    "mode": "full",
+    "lmstudio_model": "openai/gpt-oss-20b",
+    "questions_per_article": 3,
+    "seed": 42,
+    "append_mode": true
+  }
 }
+```
+
+**Used Articles File** (`retain/used_articles.json` or `unlearn/used_articles.json`):
+```json
+{
+  "used_article_ids": [1002504, 1322533, 3843069, 5548644, 5556992, 5558825],
+  "total_count": 6,
+  "last_updated": "2025-12-23T15:45:05.860768",
+  "run_history": [
+    {
+      "timestamp": "2025-12-23T15:41:57.143150",
+      "model": "openai/gpt-oss-20b",
+      "articles_added": 2
+    },
+    {
+      "timestamp": "2025-12-23T15:44:12.490586",
+      "model": "openai/gpt-oss-20b",
+      "articles_added": 2
+    }
+  ]
+}
+```
+
+**Timestamped Article Metadata** (`retain_articles_YYYYMMDD_HHMMSS.json`):
+```json
+[
+  {
+    "id": 5556992,
+    "title": "Rene Hurlemann",
+    "earliest_date": "1950-01-01",
+    "latest_date": "1950-01-01",
+    "temporal_class": "pre_cutoff"
+  },
+  {
+    "id": 1322533,
+    "title": "Juan Ignacio Basaguren",
+    "earliest_date": "1944-07-21",
+    "latest_date": "1944-07-21",
+    "temporal_class": "pre_cutoff"
+  }
+]
 ```
 
 ## Processing Pipeline Details
