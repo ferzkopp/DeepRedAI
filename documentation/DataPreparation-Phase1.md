@@ -414,7 +414,7 @@ openai/gpt-oss-20b:
 ...
 ```
 
-**Configure Based on Results:** After benchmarking, use the fastest/best model for dataset generation.
+**Configure Based on Results:** After benchmarking, use the fastest/best models for dataset generation.
 
 ### Dataset Generation
 
