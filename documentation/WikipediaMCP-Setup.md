@@ -132,6 +132,89 @@ echo "export WIKI_DATA=${WIKI_DATA}" | sudo tee -a ${WIKI_DATA}/.profile
 echo '[ -f "$HOME/.profile" ] && . "$HOME/.profile"' | sudo tee ${WIKI_DATA}/.bashrc
 ```
 
+5. Setup shared access for multiple users (optional):
+
+If you want both the `wiki` service user and your local user account to have read/write access to the data folder:
+
+```bash
+# Create a shared group for data access
+sudo groupadd wikidata
+
+# Add users to the group (replace 'localuser' with your username)
+sudo usermod -aG wikidata localuser
+sudo usermod -aG wikidata wiki
+
+# Set group ownership on the data directory
+sudo chgrp -R wikidata ${WIKI_DATA}
+
+# Ensure the directory is group-writable
+sudo chmod -R g+rwX ${WIKI_DATA}
+
+# Set the setgid bit so new files/directories inherit the group
+sudo find ${WIKI_DATA} -type d -exec chmod g+s {} \;
+
+# IMPORTANT: Restore PostgreSQL ownership (postgres requires exclusive access)
+# Skip this if PostgreSQL is not yet installed
+sudo chown -R postgres:postgres ${WIKI_DATA}/postgres 2>/dev/null || true
+sudo chmod 700 ${WIKI_DATA}/postgres 2>/dev/null || true
+
+# (Optional) Set default ACLs for more reliable permission inheritance
+sudo apt install -y acl
+sudo setfacl -R -m g:wikidata:rwX ${WIKI_DATA}
+sudo setfacl -R -d -m g:wikidata:rwX ${WIKI_DATA}
+
+# Remove ACLs from PostgreSQL directory (postgres requires standard permissions)
+sudo setfacl -R -b ${WIKI_DATA}/postgres 2>/dev/null || true
+```
+
+**Important Notes:**
+- Users must log out and back in for group changes to take effect. Alternatively, run `newgrp wikidata` in your current session.
+- The PostgreSQL data directory (`${WIKI_DATA}/postgres`) must remain owned by `postgres:postgres` with mode `700`. PostgreSQL refuses to start if other users have access to its data files.
+- If you run this step after PostgreSQL is installed, always restore postgres ownership afterward.
+
+Verify the setup:
+```bash
+# Check group membership
+groups localuser
+groups wiki
+
+# Test access as wiki user
+sudo -u wiki ls -la ${WIKI_DATA}/
+
+# Verify PostgreSQL directory has correct permissions
+ls -la ${WIKI_DATA}/postgres
+# Should show: drwx------ postgres postgres
+```
+
+**Troubleshooting PostgreSQL Permissions:**
+
+If PostgreSQL fails to start with "Permission denied" errors after changing group ownership:
+
+```bash
+# Ensure WIKI_DATA is set in your current shell
+export WIKI_DATA="/mnt/data/wikipedia"
+
+# Stop all PostgreSQL services
+sudo systemctl stop postgresql@*-main
+sudo systemctl stop postgresql
+
+# Restore correct ownership for PostgreSQL data directory
+sudo chown -R postgres:postgres ${WIKI_DATA}/postgres
+sudo chmod 700 ${WIKI_DATA}/postgres
+
+# Start the specific PostgreSQL cluster
+PG_VERSION=$(pg_config --version | grep -oP '\d+' | head -1)
+sudo systemctl start postgresql@${PG_VERSION}-main
+
+# Check status of the actual cluster (not the meta-service)
+sudo systemctl status postgresql@${PG_VERSION}-main
+
+# Verify connection works
+sudo -u postgres psql -c "SELECT 1;"
+```
+
+**Note:** The `postgresql.service` is a meta-service that just runs `/bin/true`. The actual PostgreSQL instance runs as `postgresql@<version>-main.service`.
+
 ### Phase 2: Download Wikipedia Data
 
 Switch to wiki user and download the dump:
@@ -1290,5 +1373,3 @@ If the MCP server doesn't appear in Copilot Chat:
 **Web Interface:**
 - Vite: https://vitejs.dev/
 - React: https://react.dev/
-
-\

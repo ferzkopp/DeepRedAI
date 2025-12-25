@@ -173,14 +173,14 @@ class WikidataTimeExtractor:
             self.csv_file_handle = None
             self.csv_writer = None
     
-    def load_checkpoint(self) -> int:
+    def load_checkpoint(self) -> dict:
         """Load checkpoint data to resume from last position
         
         Returns:
-            Line number to resume from (0 if no checkpoint)
+            Dictionary with checkpoint data (empty dict if no checkpoint)
         """
         if not self.checkpoint_file or not os.path.exists(self.checkpoint_file):
-            return 0
+            return {}
         
         try:
             with open(self.checkpoint_file, 'r') as f:
@@ -193,16 +193,35 @@ class WikidataTimeExtractor:
                 print(f"  Already written {len(self.written_entities):,} entities")
                 if self.total_lines > 0:
                     print(f"  Total lines (cached): {self.total_lines:,}")
-                return line_num
+                # Load counters
+                entities_found = data.get('entities_found', 0)
+                dates_found = data.get('dates_found', 0)
+                wikipedia_links_found = data.get('wikipedia_links_found', 0)
+                total_written = data.get('total_written', len(self.written_entities))
+                if entities_found > 0 or dates_found > 0 or wikipedia_links_found > 0:
+                    print(f"  Entities: {entities_found:,} | Dates: {dates_found:,} | Wikipedia: {wikipedia_links_found:,}")
+                return {
+                    'line_number': line_num,
+                    'entities_found': entities_found,
+                    'dates_found': dates_found,
+                    'wikipedia_links_found': wikipedia_links_found,
+                    'total_written': total_written
+                }
         except Exception as e:
             print(f"Warning: Could not load checkpoint: {e}")
-            return 0
+            return {}
     
-    def save_checkpoint(self, line_number: int) -> None:
+    def save_checkpoint(self, line_number: int, entities_found: int = 0, 
+                         dates_found: int = 0, wikipedia_links_found: int = 0,
+                         total_written: int = 0) -> None:
         """Save checkpoint data
         
         Args:
             line_number: Current line number being processed
+            entities_found: Number of entities found so far
+            dates_found: Number of dates found so far
+            wikipedia_links_found: Number of Wikipedia links found so far
+            total_written: Total entities written to CSV
         """
         if not self.checkpoint_file:
             return
@@ -215,6 +234,10 @@ class WikidataTimeExtractor:
                     'line_number': line_number,
                     'written_entities': list(self.written_entities),
                     'total_lines': self.total_lines,  # Cache total_lines to avoid recounting
+                    'entities_found': entities_found,
+                    'dates_found': dates_found,
+                    'wikipedia_links_found': wikipedia_links_found,
+                    'total_written': total_written,
                     'timestamp': datetime.now().isoformat()
                 }, f)
             os.replace(temp_file, self.checkpoint_file)
@@ -261,6 +284,72 @@ class WikidataTimeExtractor:
                 print(f"Warning: Could not count lines: {e}")
                 print("Will proceed without total line count (progress % not available)")
             return 0
+    
+    def fast_skip_lines(self, file_handle, target_line: int, verbose: bool = False) -> int:
+        """Skip to a target line number using fast binary newline counting
+        
+        This is MUCH faster than reading lines with `for line in f` when we don't
+        need the line content. Uses binary buffered reading to count newlines.
+        
+        Args:
+            file_handle: Open file handle (opened in binary mode 'rb')
+            target_line: Line number to skip to (1-indexed)
+            verbose: If True, print progress information
+        
+        Returns:
+            Actual number of lines skipped (may be less than target if EOF reached)
+        """
+        if target_line <= 0:
+            return 0
+        
+        if verbose:
+            print(f"Fast-skipping to line {target_line:,}...")
+            start_time = time.time()
+            last_report = start_time
+        
+        lines_counted = 0
+        buf_size = 2 ** 20  # 1MB buffer for fast reading
+        
+        while lines_counted < target_line:
+            buf = file_handle.read(buf_size)
+            if not buf:
+                break  # EOF
+            
+            newlines_in_buf = buf.count(b"\n")
+            
+            # Check if target is within this buffer
+            if lines_counted + newlines_in_buf >= target_line:
+                # Need to find exact position within buffer
+                remaining_to_skip = target_line - lines_counted
+                pos = 0
+                for _ in range(remaining_to_skip):
+                    next_newline = buf.find(b"\n", pos)
+                    if next_newline == -1:
+                        break
+                    pos = next_newline + 1
+                
+                # Seek back to the position after the target line
+                bytes_to_seek_back = len(buf) - pos
+                file_handle.seek(-bytes_to_seek_back, 1)  # 1 = SEEK_CUR
+                lines_counted = target_line
+                break
+            
+            lines_counted += newlines_in_buf
+            
+            # Progress report every 10 seconds
+            if verbose and time.time() - last_report > 10:
+                elapsed = time.time() - start_time
+                pct = (lines_counted / target_line) * 100 if target_line > 0 else 0
+                rate = lines_counted / elapsed if elapsed > 0 else 0
+                eta = (target_line - lines_counted) / rate if rate > 0 else 0
+                print(f"  Skipped {lines_counted:,} / {target_line:,} lines ({pct:.1f}%) | ETA: {self.format_time_remaining(eta)}")
+                last_report = time.time()
+        
+        if verbose:
+            elapsed = time.time() - start_time
+            print(f"  Skipped {lines_counted:,} lines in {elapsed:.1f}s")
+        
+        return lines_counted
     
     def format_time_remaining(self, seconds: float) -> str:
         """Format seconds into human-readable time remaining
@@ -401,7 +490,8 @@ class WikidataTimeExtractor:
             wikipedia_only: If True, only save entities with Wikipedia links during incremental writes
         """
         # Load checkpoint if available (this may also load cached total_lines)
-        start_line = self.load_checkpoint()
+        checkpoint_data = self.load_checkpoint()
+        start_line = checkpoint_data.get('line_number', 0)
         
         # Count total lines for progress reporting (only if not already cached)
         if verbose and self.total_lines == 0:
@@ -418,10 +508,11 @@ class WikidataTimeExtractor:
                 print(f"Resuming from line {start_line:,}")
         
         line_count = 0
-        entities_found = 0
-        dates_found = 0
-        wikipedia_links_found = 0
-        total_written = len(self.written_entities)
+        # Restore counters from checkpoint
+        entities_found = checkpoint_data.get('entities_found', 0)
+        dates_found = checkpoint_data.get('dates_found', 0)
+        wikipedia_links_found = checkpoint_data.get('wikipedia_links_found', 0)
+        total_written = checkpoint_data.get('total_written', len(self.written_entities))
         
         # Track current subject for multi-line statements
         current_subject = None
@@ -432,19 +523,23 @@ class WikidataTimeExtractor:
         current_sitelink_title = None
         current_sitelink_entity = None
         
-        with open(self.ttl_file_path, 'r', encoding='utf-8') as f:
-            for line in f:
+        with open(self.ttl_file_path, 'rb') as f:
+            # Fast-skip to checkpoint position using binary newline counting
+            if start_line > 0:
+                line_count = self.fast_skip_lines(f, start_line, verbose=verbose)
+            
+            # Now wrap in a text reader for line-by-line parsing
+            import io
+            text_reader = io.TextIOWrapper(f, encoding='utf-8')
+            
+            for line in text_reader:
                 line_count += 1
-                
-                # Skip lines before checkpoint
-                if line_count <= start_line:
-                    continue
                 
                 original_line = line
                 line = line.strip()
                 
                 # Progress indicator and incremental save
-                if verbose and line_count % 1000000 == 0:
+                if verbose and line_count % 5000000 == 0:
                     current_time = time.time()
                     elapsed = current_time - self.start_time
                     
@@ -471,10 +566,9 @@ class WikidataTimeExtractor:
                     if self.csv_writer:
                         newly_written = self.write_incremental_results(wikipedia_only=wikipedia_only)
                         total_written += newly_written
-                        if verbose and newly_written > 0:
-                            print(f"    → Incremental save: {newly_written:,} new entities written (total: {total_written:,})")
                     
-                    self.save_checkpoint(line_count)
+                    self.save_checkpoint(line_count, entities_found, dates_found, 
+                                        wikipedia_links_found, total_written)
                     self.current_line = line_count
                 
                 # Skip comments and empty lines
@@ -571,7 +665,8 @@ class WikidataTimeExtractor:
                 print(f"    → Final save: {newly_written:,} new entities written")
         
         # Save final checkpoint
-        self.save_checkpoint(line_count)
+        self.save_checkpoint(line_count, entities_found, dates_found,
+                            wikipedia_links_found, total_written)
         self.current_line = line_count
         
         if verbose:
@@ -734,6 +829,8 @@ Examples:
                         help='Disable automatic checkpoint/incremental mode for CSV output')
     parser.add_argument('--checkpoint-interval', type=int, default=1000000,
                         help='Number of lines between checkpoints and incremental saves (default: 1,000,000)')
+    parser.add_argument('--restart', action='store_true',
+                        help='Start fresh by removing existing checkpoint and output files')
     
     args = parser.parse_args()
     
@@ -750,6 +847,20 @@ Examples:
         elif args.checkpoint:
             # Explicit checkpoint file provided
             checkpoint_file = args.checkpoint
+        
+        # Handle --restart: remove existing checkpoint and output files
+        if args.restart:
+            files_removed = []
+            if checkpoint_file and os.path.exists(checkpoint_file):
+                os.remove(checkpoint_file)
+                files_removed.append(checkpoint_file)
+            if args.csv and os.path.exists(args.csv):
+                os.remove(args.csv)
+                files_removed.append(args.csv)
+            if files_removed:
+                print(f"Restart: Removed {', '.join(files_removed)}")
+            else:
+                print("Restart: No existing files to remove, starting fresh")
         
         # Determine if we should do incremental CSV writing
         incremental_csv = args.csv and checkpoint_file is not None
