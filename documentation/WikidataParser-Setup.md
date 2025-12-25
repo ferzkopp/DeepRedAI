@@ -112,13 +112,16 @@ Copy the `wikidata_parser.py` script to the `${WIKI_DATA}/scripts/` directory.
 - ✅ Memory-efficient streaming parser (handles 800+ GB TTL files)
 - ✅ Extracts 4 temporal properties:
   - P569: date of birth
-  - P570: date of death
+  - P570: death date
   - P571: inception (founding, establishment)
   - P576: dissolved, abolished or demolished date
 - ✅ Links entities to English Wikipedia articles
 - ✅ Compatible CSV/JSON output format (matches YAGO pipeline)
 - ✅ Progress tracking for long-running operations
 - ✅ Filters to Wikipedia-linked entities by default
+- ✅ **Checkpoint/Resume capability** - **Enabled by default for CSV output**
+- ✅ **Incremental CSV writing** - Writes results progressively to disk (no data loss on interruption)
+- ✅ **Cached line counting** - Counts lines only once, reuses cached value on resume
 
 **Usage Examples:**
 
@@ -132,13 +135,28 @@ python3 wikidata_parser.py \
     ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
     --summary --verbose
 
-# Export to CSV (Wikipedia entities only - default)
+# Export to CSV (checkpoint/resume ENABLED BY DEFAULT)
 python3 wikidata_parser.py \
     ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
     --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
     --verbose
+# Creates checkpoint file: wikidata-temporal.csv.checkpoint
 
-# Export both CSV and JSON formats
+# Export to CSV with custom checkpoint file location
+python3 wikidata_parser.py \
+    ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
+    --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
+    --checkpoint /tmp/my-checkpoint.json \
+    --verbose
+
+# Export to CSV WITHOUT checkpoint (not recommended for large files)
+python3 wikidata_parser.py \
+    ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
+    --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
+    --no-checkpoint \
+    --verbose
+
+# Export both CSV and JSON formats (checkpoint enabled for CSV)
 python3 wikidata_parser.py \
     ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
     --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
@@ -151,7 +169,31 @@ python3 wikidata_parser.py \
     --csv ${WIKI_DATA}/wikidata/wikidata-temporal-all.csv \
     --all-entities \
     --verbose
+
+# Customize checkpoint interval (default: 1,000,000 lines)
+python3 wikidata_parser.py \
+    ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
+    --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
+    --checkpoint-interval 500000 \
+    --verbose
 ```
+
+**Command-Line Options:**
+
+| Option | Description |
+|--------|-------------|
+| `ttl_file` | Path to Wikidata TTL file (positional, required) |
+| `--csv FILE` | Export results to CSV file (checkpoint enabled by default) |
+| `--json FILE` | Export results to JSON file |
+| `--summary` | Print summary of results to console |
+| `--limit N` | Limit summary output to N entities (default: 20) |
+| `--all-entities` | Include entities without Wikipedia links in output |
+| `--verbose` | Print detailed progress information during processing |
+| `--checkpoint FILE` | Custom checkpoint file path (default: `<csv_file>.checkpoint`) |
+| `--no-checkpoint` | Disable automatic checkpoint mode for CSV (not recommended) |
+| `--checkpoint-interval N` | Lines between checkpoints/saves (default: 1,000,000) |
+
+**Note:** At least one output option (`--csv`, `--json`, or `--summary`) must be specified.
 
 **Expected Output Format (CSV):**
 
@@ -169,6 +211,45 @@ Q42,Douglas Adams,https://en.wikipedia.org/wiki/Douglas_Adams,2001-05-11,2001-05
 - Progress updates every 1 million lines
 - Memory usage remains constant (streaming parser)
 - Output file size will depend on number of entities with temporal data and Wikipedia links
+
+**Checkpoint & Resume Functionality:**
+
+The parser **automatically enables checkpoint/resume for CSV output** to protect against data loss during long-running operations:
+
+- **Enabled by default**: Checkpoint is automatically created when using `--csv` (named `<csv_file>.checkpoint`)
+- **Automatic saving**: Progress is saved every N lines (default: 1,000,000)
+- **Incremental CSV writing**: Results are written to disk progressively, not just at the end
+- **Resume capability**: If interrupted (Ctrl+C, system reboot, etc.), simply rerun with the same command
+- **Cached line counting**: Total line count is cached in the checkpoint file, avoiding expensive recounting on resume
+- **No data loss**: All entities written before interruption are preserved
+- **Disable if needed**: Use `--no-checkpoint` to disable (not recommended for large files)
+
+**Resume Example:**
+
+```bash
+# First run (checkpoint enabled automatically, interrupted after processing 50M lines)
+python3 wikidata_parser.py \
+    ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
+    --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
+    --verbose
+# Creates: wikidata-temporal.csv.checkpoint
+# Press Ctrl+C to interrupt...
+
+# Resume from where it left off (uses existing checkpoint automatically)
+python3 wikidata_parser.py \
+    ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
+    --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
+    --verbose
+# Output: "Loaded checkpoint: Resuming from line 50,000,000"
+# Output: "Total lines (cached): 820,000,000"
+# Output: "Already written 123,456 entities"
+```
+
+The checkpoint file stores:
+- Current line position in the TTL file
+- List of entities already written to CSV (prevents duplicates)
+- Total line count (cached to avoid recounting on resume)
+- Timestamp of last checkpoint
 
 ## Integration with Existing Pipeline:
 
