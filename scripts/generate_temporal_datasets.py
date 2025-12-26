@@ -13,6 +13,11 @@ Datasets generated:
 - unlearn_val.jsonl: Post-cutoff validation set
 - dev_subset.jsonl: Small combined subset for development
 
+Modes:
+- dev: Small development subset from random articles
+- full: Complete datasets from random articles
+- topics: Use year_topics_*.json files for curated event-based generation
+
 Persistence Features:
 - Tracks which articles have been used across runs (used_articles.json)
 - Automatically excludes previously used articles when re-running
@@ -23,9 +28,21 @@ Persistence Features:
 Usage:
     python generate_temporal_datasets.py --mode dev
     python generate_temporal_datasets.py --mode full --output-dir /path/to/output
+    python generate_temporal_datasets.py --mode topics --topics-dir /path/to/topics
     python generate_temporal_datasets.py --dry-run
     python generate_temporal_datasets.py --show-used-articles  # Check previous runs
     python generate_temporal_datasets.py --no-append           # Start fresh
+
+Topics Mode Usage:
+    # Generate from year_topics files (curated historical events)
+    python generate_temporal_datasets.py --mode topics
+    
+    # Process specific year range
+    python generate_temporal_datasets.py --mode topics \
+        --topics-start-year 1980 --topics-end-year 1990
+    
+    # Use custom topics directory
+    python generate_temporal_datasets.py --mode topics --topics-dir ./my_topics
 
 Multi-Model Usage (for diverse QA datasets):
     # Run 1: Generate with first model
@@ -44,6 +61,7 @@ Requirements:
 """
 
 import argparse
+import glob
 import json
 import logging
 import os
@@ -312,6 +330,228 @@ class GenerationStats:
                 'skipped_future_date': self.qa_skipped_future_date,
             },
         }
+
+
+@dataclass
+class TopicArticleRef:
+    """Reference to a Wikipedia article from a topic entry."""
+    title: str
+    article_id: Optional[int]
+    relevance_score: float = 1.0
+    source: str = 'direct_link'  # 'direct_link' or 'related'
+    
+    @classmethod
+    def from_direct_reference(cls, data: Dict) -> 'TopicArticleRef':
+        """Create from a direct_references entry."""
+        return cls(
+            title=data.get('title', ''),
+            article_id=data.get('article_id'),
+            relevance_score=data.get('relevance_score', 1.0),
+            source='direct_link'
+        )
+    
+    @classmethod
+    def from_related_article(cls, data: Dict) -> 'TopicArticleRef':
+        """Create from a related_articles entry."""
+        return cls(
+            title=data.get('title', ''),
+            article_id=data.get('article_id'),
+            relevance_score=data.get('relevance_score', 0.5),
+            source='related'
+        )
+
+
+@dataclass
+class TopicEntry:
+    """Represents a single topic/event from year_topics files."""
+    year: int
+    month: Optional[int]
+    day: Optional[int]
+    date: Optional[str]  # ISO date string like "1988-01-07"
+    date_text: str  # Human-readable like "January 7–8"
+    topic: str  # The topic/event description
+    direct_references: List[TopicArticleRef] = field(default_factory=list)
+    related_articles: List[TopicArticleRef] = field(default_factory=list)
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> Optional['TopicEntry']:
+        """Create TopicEntry from JSON dict. Returns None if topic is empty."""
+        topic = data.get('topic', '').strip()
+        if not topic:
+            return None
+        
+        # Parse direct references
+        direct_refs = []
+        for ref_data in data.get('direct_references', []):
+            ref = TopicArticleRef.from_direct_reference(ref_data)
+            if ref.title:
+                direct_refs.append(ref)
+        
+        # Parse related articles
+        related_refs = []
+        for ref_data in data.get('related_articles', []):
+            ref = TopicArticleRef.from_related_article(ref_data)
+            if ref.title:
+                related_refs.append(ref)
+        
+        return cls(
+            year=data.get('year', 0),
+            month=data.get('month'),
+            day=data.get('day'),
+            date=data.get('date'),
+            date_text=data.get('date_text', ''),
+            topic=topic,
+            direct_references=direct_refs,
+            related_articles=related_refs
+        )
+    
+    def get_all_article_ids(self, include_related: bool = False) -> List[int]:
+        """Get all article IDs referenced by this topic."""
+        ids = []
+        for ref in self.direct_references:
+            if ref.article_id:
+                ids.append(ref.article_id)
+        if include_related:
+            for ref in self.related_articles:
+                if ref.article_id:
+                    ids.append(ref.article_id)
+        return ids
+    
+    def get_formatted_date(self) -> str:
+        """Get a formatted date string for the topic."""
+        if self.date:
+            return self.date
+        elif self.year and self.month and self.day:
+            return f"{self.year}-{self.month:02d}-{self.day:02d}"
+        elif self.year and self.month:
+            return f"{self.year}-{self.month:02d}"
+        elif self.year:
+            return str(self.year)
+        return ""
+
+
+@dataclass
+class TopicFile:
+    """Represents a loaded year_topics file."""
+    year: int
+    extracted_date: str
+    source: str
+    total_topics: int
+    topics: List[TopicEntry] = field(default_factory=list)
+    filepath: str = ""
+    
+    @classmethod
+    def load_from_file(cls, filepath: str) -> Optional['TopicFile']:
+        """Load a TopicFile from a JSON file."""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Parse topics
+            topics = []
+            for topic_data in data.get('topics', []):
+                entry = TopicEntry.from_dict(topic_data)
+                if entry:
+                    topics.append(entry)
+            
+            return cls(
+                year=data.get('year', 0),
+                extracted_date=data.get('extracted_date', ''),
+                source=data.get('source', ''),
+                total_topics=data.get('total_topics', len(topics)),
+                topics=topics,
+                filepath=filepath
+            )
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to load topic file {filepath}: {e}")
+            return None
+
+
+def load_topic_files(
+    topics_dir: str,
+    start_year: Optional[int] = None,
+    end_year: Optional[int] = None
+) -> List[TopicFile]:
+    """
+    Load all year_topics_*.json files from a directory.
+    
+    Args:
+        topics_dir: Directory containing year_topics_*.json files
+        start_year: Optional minimum year to include
+        end_year: Optional maximum year to include
+        
+    Returns:
+        List of TopicFile objects, sorted by year
+    """
+    topic_files = []
+    pattern = os.path.join(topics_dir, 'year_topics_*.json')
+    
+    for filepath in glob.glob(pattern):
+        # Extract year from filename
+        filename = os.path.basename(filepath)
+        try:
+            year_str = filename.replace('year_topics_', '').replace('.json', '')
+            file_year = int(year_str)
+        except ValueError:
+            logger.warning(f"Could not parse year from filename: {filename}")
+            continue
+        
+        # Filter by year range
+        if start_year and file_year < start_year:
+            continue
+        if end_year and file_year > end_year:
+            continue
+        
+        # Load the file
+        topic_file = TopicFile.load_from_file(filepath)
+        if topic_file:
+            topic_files.append(topic_file)
+            logger.debug(f"Loaded {len(topic_file.topics)} topics from {filename}")
+    
+    # Sort by year
+    topic_files.sort(key=lambda tf: tf.year)
+    
+    total_topics = sum(len(tf.topics) for tf in topic_files)
+    logger.info(f"Loaded {len(topic_files)} topic files with {total_topics} total topics")
+    
+    return topic_files
+
+
+def classify_topic_by_cutoff(topic: TopicEntry, cutoff_date: str) -> str:
+    """
+    Classify a topic as pre_cutoff or post_cutoff based on its date.
+    
+    Args:
+        topic: The TopicEntry to classify
+        cutoff_date: Cutoff date in YYYY-MM-DD format
+        
+    Returns:
+        'pre_cutoff' or 'post_cutoff'
+    """
+    cutoff_parts = cutoff_date.split('-')
+    cutoff_year = int(cutoff_parts[0])
+    cutoff_month = int(cutoff_parts[1]) if len(cutoff_parts) > 1 else 12
+    cutoff_day = int(cutoff_parts[2]) if len(cutoff_parts) > 2 else 31
+    
+    # Compare by year first
+    if topic.year < cutoff_year:
+        return 'pre_cutoff'
+    elif topic.year > cutoff_year:
+        return 'post_cutoff'
+    
+    # Same year - compare by month
+    topic_month = topic.month or 1
+    if topic_month < cutoff_month:
+        return 'pre_cutoff'
+    elif topic_month > cutoff_month:
+        return 'post_cutoff'
+    
+    # Same month - compare by day
+    topic_day = topic.day or 1
+    if topic_day <= cutoff_day:
+        return 'pre_cutoff'
+    else:
+        return 'post_cutoff'
 
 
 # -----------------------------------------------------------------------------
@@ -719,6 +959,118 @@ class DatabaseManager:
             )
             for row in self.cursor.fetchall()
         ]
+    
+    def fetch_articles_by_ids(
+        self,
+        article_ids: List[int],
+        require_temporal_info: bool = True,
+        cutoff_date: Optional[str] = None
+    ) -> Tuple[List[Article], List[int]]:
+        """
+        Fetch articles by their IDs, optionally filtering by temporal info.
+        
+        Args:
+            article_ids: List of article IDs to fetch
+            require_temporal_info: If True, only return articles with temporal info
+            cutoff_date: If provided, classify articles as pre/post cutoff
+            
+        Returns:
+            Tuple of (list of Articles found, list of IDs not found or filtered out)
+        """
+        if not article_ids:
+            return [], []
+        
+        # Build the query
+        if require_temporal_info:
+            query = """
+                SELECT id, title, content,
+                       earliest_date::text, latest_date::text,
+                       has_temporal_info
+                FROM articles 
+                WHERE id = ANY(%s)
+                  AND has_temporal_info = TRUE
+                  AND LENGTH(content) > %s
+            """
+            self.cursor.execute(query, [list(article_ids), MIN_CONTENT_LENGTH])
+        else:
+            query = """
+                SELECT id, title, content,
+                       earliest_date::text, latest_date::text,
+                       has_temporal_info
+                FROM articles 
+                WHERE id = ANY(%s)
+                  AND LENGTH(content) > %s
+            """
+            self.cursor.execute(query, [list(article_ids), MIN_CONTENT_LENGTH])
+        
+        rows = self.cursor.fetchall()
+        found_ids = set()
+        articles = []
+        
+        for row in rows:
+            found_ids.add(row['id'])
+            
+            # Determine temporal class if cutoff_date provided
+            temporal_class = 'unknown'
+            if cutoff_date and row['earliest_date']:
+                earliest = row['earliest_date']
+                latest = row['latest_date']
+                
+                # Parse dates for comparison
+                if latest and latest <= cutoff_date:
+                    temporal_class = 'pre_cutoff'
+                elif earliest and earliest > cutoff_date:
+                    temporal_class = 'post_cutoff'
+                elif earliest and earliest <= cutoff_date:
+                    if latest and latest > cutoff_date:
+                        temporal_class = 'spanning'  # Article spans cutoff
+                    else:
+                        temporal_class = 'pre_cutoff'  # No end date, started before
+                else:
+                    temporal_class = 'unknown'
+            
+            articles.append(Article(
+                id=row['id'],
+                title=row['title'],
+                content=row['content'],
+                earliest_date=row['earliest_date'],
+                latest_date=row['latest_date'],
+                temporal_class=temporal_class
+            ))
+        
+        # Find IDs that weren't returned
+        missing_ids = [aid for aid in article_ids if aid not in found_ids]
+        
+        return articles, missing_ids
+    
+    def get_article_temporal_info(self, article_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get temporal information for a single article.
+        
+        Args:
+            article_id: The article ID to look up
+            
+        Returns:
+            Dict with temporal info or None if not found
+        """
+        query = """
+            SELECT id, title, has_temporal_info,
+                   earliest_date::text, latest_date::text
+            FROM articles 
+            WHERE id = %s
+        """
+        self.cursor.execute(query, [article_id])
+        row = self.cursor.fetchone()
+        
+        if row:
+            return {
+                'id': row['id'],
+                'title': row['title'],
+                'has_temporal_info': row['has_temporal_info'],
+                'earliest_date': row['earliest_date'],
+                'latest_date': row['latest_date']
+            }
+        return None
 
 
 # -----------------------------------------------------------------------------
@@ -1165,6 +1517,74 @@ Output ONLY a valid JSON array with no other text:
             pass
         
         return []
+    
+    def generate_questions_from_topic(
+        self,
+        topic_text: str,
+        date_text: str,
+        year: int,
+        num_questions: int = 2
+    ) -> List[Dict[str, str]]:
+        """
+        Generate Q&A pairs from a topic/event description text.
+        
+        Args:
+            topic_text: The topic/event description
+            date_text: Human-readable date like "January 7–8"
+            year: The year of the event
+            num_questions: Number of Q&A pairs to generate
+            
+        Returns:
+            List of dicts with 'question' and 'answer' keys
+        """
+        # Build context for the prompt
+        date_context = f" ({date_text}, {year})" if date_text else f" ({year})"
+        
+        prompt = f"""You are a dataset generator creating Q&A pairs for training language models about historical events. Given the following historical event description, generate {num_questions} factual questions with accurate answers.
+
+Historical Event{date_context}:
+{topic_text}
+
+Requirements:
+- Questions must be answerable SOLELY from the information provided
+- Questions should be specific to this event (not generic questions)
+- Include the relevant date/year context in the answer when appropriate
+- Make questions SELF-CONTAINED (include necessary context like names, places)
+- Answers should be 1-2 sentences, accurate and complete
+- Vary question types: What happened, Who was involved, When, Where, Why
+
+Output ONLY a valid JSON array with no other text:
+[
+  {{"question": "...", "answer": "..."}},
+  {{"question": "...", "answer": "..."}}
+]"""
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/v1/chat/completions",
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": 512,
+                },
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result['choices'][0]['message']['content']
+            
+            # Parse JSON from response
+            qa_pairs = self._parse_qa_response(content)
+            return qa_pairs
+            
+        except requests.RequestException as e:
+            logger.warning(f"LM Studio request failed for topic: {e}")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to generate Q&A for topic: {e}")
+            return []
 
 
 # -----------------------------------------------------------------------------
@@ -1740,6 +2160,214 @@ class DatasetGenerator:
         
         return all_pairs
     
+    def generate_topic_pairs(
+        self,
+        topic: 'TopicEntry',
+        temporal_class: str,  # 'pre_cutoff' or 'post_cutoff'
+        questions_per_topic: int = 2
+    ) -> List[QAPair]:
+        """
+        Generate Q&A pairs directly from topic text.
+        
+        Args:
+            topic: The TopicEntry to generate from
+            temporal_class: Whether this is retain (pre_cutoff) or unlearn (post_cutoff)
+            questions_per_topic: Number of Q&A pairs to generate
+            
+        Returns:
+            List of QAPair objects
+        """
+        qa_pairs = []
+        
+        # Generate questions from topic text
+        raw_pairs = self.lm.generate_questions_from_topic(
+            topic_text=topic.topic,
+            date_text=topic.date_text,
+            year=topic.year,
+            num_questions=questions_per_topic
+        )
+        
+        for pair in raw_pairs:
+            question = pair['question']
+            answer = pair['answer']
+            
+            if temporal_class == 'post_cutoff':
+                # For unlearn, replace with refusal
+                original_answer = answer
+                answer = random.choice(REFUSAL_RESPONSES)
+            else:
+                original_answer = None
+            
+            # Validate the Q&A pair
+            is_valid, failure_reason = self.validator.validate(
+                question=question,
+                answer=answer,
+                source_content=topic.topic,  # Use topic text as source
+                dataset_type='retain' if temporal_class == 'pre_cutoff' else 'unlearn'
+            )
+            
+            if not is_valid:
+                self._update_skip_stats(failure_reason)
+                logger.debug(f"Skipped topic Q&A: {failure_reason}")
+                continue
+            
+            metadata = {
+                'source_type': 'topic',
+                'topic_year': topic.year,
+                'topic_date': topic.date,
+                'topic_text': topic.topic[:200],  # Store truncated topic
+                'temporal_class': temporal_class,
+                'dataset_type': 'retain' if temporal_class == 'pre_cutoff' else 'unlearn'
+            }
+            
+            if original_answer:
+                metadata['original_answer'] = original_answer
+            
+            qa_pairs.append(QAPair(
+                instruction=question,
+                output=answer,
+                metadata=metadata
+            ))
+        
+        return qa_pairs
+    
+    def process_topic_articles(
+        self,
+        topic: 'TopicEntry',
+        temporal_class: str,  # 'pre_cutoff' or 'post_cutoff'
+        used_article_ids: set
+    ) -> Tuple[List[QAPair], List[int]]:
+        """
+        Process Wikipedia articles referenced by a topic.
+        
+        Fetches the articles from the database, verifies they have temporal info,
+        and generates Q&A pairs from their content.
+        
+        Args:
+            topic: The TopicEntry with article references
+            temporal_class: Whether this is retain or unlearn
+            used_article_ids: Set of already-used article IDs to skip
+            
+        Returns:
+            Tuple of (list of QAPairs, list of article IDs used)
+        """
+        qa_pairs = []
+        used_ids = []
+        
+        # Get article IDs from direct references (higher quality links)
+        article_ids = topic.get_all_article_ids(include_related=False)
+        
+        # Filter out already-used articles
+        article_ids = [aid for aid in article_ids if aid not in used_article_ids]
+        
+        if not article_ids:
+            logger.debug(f"No new articles to process for topic: {topic.topic[:50]}...")
+            return [], []
+        
+        # Fetch articles from database with temporal verification
+        articles, missing = self.db.fetch_articles_by_ids(
+            article_ids=article_ids,
+            require_temporal_info=True,
+            cutoff_date=self.cutoff_date
+        )
+        
+        if missing:
+            logger.debug(f"Skipped {len(missing)} articles without temporal info")
+        
+        # Process each article
+        for article in articles:
+            try:
+                if temporal_class == 'pre_cutoff':
+                    # For pre-cutoff topics, only use pre-cutoff or spanning articles
+                    if article.temporal_class == 'post_cutoff':
+                        logger.debug(f"Skipping post-cutoff article for pre-cutoff topic: {article.title}")
+                        continue
+                    pairs = self.generate_retain_pairs(article)
+                    self.stats.retain_qa_pairs += len(pairs)
+                    self.stats.pre_cutoff_articles += 1
+                else:
+                    # For post-cutoff topics, prefer post-cutoff articles but use any
+                    pairs = self.generate_unlearn_pairs(article)
+                    self.stats.unlearn_qa_pairs += len(pairs)
+                    self.stats.post_cutoff_articles += 1
+                
+                qa_pairs.extend(pairs)
+                used_ids.append(article.id)
+                self.stats.articles_processed += 1
+                
+                if not pairs:
+                    self.stats.skipped_articles += 1
+                    
+            except Exception as e:
+                logger.warning(f"Failed to process article {article.id}: {e}")
+                self.stats.failed_generations += 1
+        
+        return qa_pairs, used_ids
+    
+    def process_topics(
+        self,
+        topics: List['TopicEntry'],
+        retain_used_ids: set,
+        unlearn_used_ids: set,
+        questions_per_topic: int = 2,
+        include_article_qa: bool = True,
+        progress_desc: str = "Processing topics"
+    ) -> Tuple[List[QAPair], List[QAPair], set, set]:
+        """
+        Process a list of topics, generating Q&A pairs from both topic text
+        and referenced Wikipedia articles.
+        
+        Args:
+            topics: List of TopicEntry objects to process
+            retain_used_ids: Set of article IDs already used for retain
+            unlearn_used_ids: Set of article IDs already used for unlearn
+            questions_per_topic: Q&A pairs to generate per topic text
+            include_article_qa: If True, also generate Q&A from referenced articles
+            progress_desc: Description for progress bar
+            
+        Returns:
+            Tuple of (retain_pairs, unlearn_pairs, new_retain_ids, new_unlearn_ids)
+        """
+        retain_pairs = []
+        unlearn_pairs = []
+        new_retain_ids = set()
+        new_unlearn_ids = set()
+        
+        for topic in tqdm(topics, desc=progress_desc):
+            # Classify topic
+            temporal_class = classify_topic_by_cutoff(topic, self.cutoff_date)
+            
+            # Generate Q&A from topic text directly
+            topic_qa = self.generate_topic_pairs(
+                topic=topic,
+                temporal_class=temporal_class,
+                questions_per_topic=questions_per_topic
+            )
+            
+            if temporal_class == 'pre_cutoff':
+                retain_pairs.extend(topic_qa)
+            else:
+                unlearn_pairs.extend(topic_qa)
+            
+            # Generate Q&A from referenced Wikipedia articles
+            if include_article_qa:
+                used_ids = retain_used_ids | new_retain_ids if temporal_class == 'pre_cutoff' else unlearn_used_ids | new_unlearn_ids
+                
+                article_qa, used_article_ids = self.process_topic_articles(
+                    topic=topic,
+                    temporal_class=temporal_class,
+                    used_article_ids=used_ids
+                )
+                
+                if temporal_class == 'pre_cutoff':
+                    retain_pairs.extend(article_qa)
+                    new_retain_ids.update(used_article_ids)
+                else:
+                    unlearn_pairs.extend(article_qa)
+                    new_unlearn_ids.update(used_article_ids)
+        
+        return retain_pairs, unlearn_pairs, new_retain_ids, new_unlearn_ids
+
     def split_dataset(
         self, 
         pairs: List[QAPair], 
@@ -1914,8 +2542,15 @@ def parse_args():
 Examples:
   %(prog)s --mode dev                    Generate small development subset
   %(prog)s --mode full                   Generate full datasets
+  %(prog)s --mode topics                 Generate from year_topics files
   %(prog)s --dry-run                     Show statistics without generating
   %(prog)s --cutoff-date 1950-01-01      Use different temporal cutoff
+
+Topics Mode Examples:
+  %(prog)s --mode topics                 Use topics from default location
+  %(prog)s --mode topics --topics-dir ./my_topics
+  %(prog)s --mode topics --topics-start-year 1980 --topics-end-year 1990
+  %(prog)s --mode topics --topics-only-text   Only use topic text, skip articles
   
 Benchmark Examples:
   %(prog)s --benchmark                   Output sample prompt for manual testing
@@ -1928,15 +2563,46 @@ Benchmark Examples:
     # Mode selection
     parser.add_argument(
         '--mode', 
-        choices=['dev', 'full'],
+        choices=['dev', 'full', 'topics'],
         default='dev',
-        help='Generation mode: dev (small subset) or full (complete datasets)'
+        help='Generation mode: dev (small subset), full (complete), or topics (from year_topics files)'
     )
     
     parser.add_argument(
         '--dry-run',
         action='store_true',
         help='Show article statistics without generating datasets'
+    )
+    
+    # Topics mode configuration
+    parser.add_argument(
+        '--topics-dir',
+        type=str,
+        default=os.path.join(WIKI_DATA, 'topics'),
+        help=f'Directory containing year_topics_*.json files (default: {WIKI_DATA}/topics)'
+    )
+    parser.add_argument(
+        '--topics-start-year',
+        type=int,
+        default=None,
+        help='Minimum year to include from topic files (optional)'
+    )
+    parser.add_argument(
+        '--topics-end-year',
+        type=int,
+        default=None,
+        help='Maximum year to include from topic files (optional)'
+    )
+    parser.add_argument(
+        '--topics-only-text',
+        action='store_true',
+        help='Only generate Q&A from topic text, skip referenced Wikipedia articles'
+    )
+    parser.add_argument(
+        '--questions-per-topic',
+        type=int,
+        default=2,
+        help='Number of Q&A pairs to generate per topic text (default: 2)'
     )
     
     # Benchmark mode
@@ -2153,9 +2819,18 @@ def main():
         retain_count = args.retain_count or 200
         unlearn_count = args.unlearn_count or 100
         logger.info(f"Mode: DEVELOPMENT (small subset)")
+    elif args.mode == 'topics':
+        retain_count = args.retain_count or 0  # Will be determined by topic files
+        unlearn_count = args.unlearn_count or 0
+        logger.info(f"Mode: TOPICS (from year_topics files)")
+        logger.info(f"Topics directory: {args.topics_dir}")
+        if args.topics_start_year:
+            logger.info(f"Start year filter: {args.topics_start_year}")
+        if args.topics_end_year:
+            logger.info(f"End year filter: {args.topics_end_year}")
     else:
-        retain_count = args.retain_count or 35000  # ~100K Q&A pairs
-        unlearn_count = args.unlearn_count or 17000  # ~50K Q&A pairs
+        retain_count = args.retain_count or 3000
+        unlearn_count = args.unlearn_count or 3000
         logger.info(f"Mode: FULL (complete datasets)")
     
     logger.info(f"Cutoff date: {args.cutoff_date}")
@@ -2281,7 +2956,161 @@ def main():
             logger.info(f"Pre-loaded {len(generator.validator.seen_questions)} existing questions for deduplication")
         
         # =====================================================================
-        # Generate Retain Dataset (Pre-cutoff)
+        # TOPICS MODE: Process year_topics files
+        # =====================================================================
+        if args.mode == 'topics':
+            logger.info("=" * 60)
+            logger.info("LOADING TOPIC FILES")
+            logger.info("=" * 60)
+            
+            # Load topic files
+            topic_files = load_topic_files(
+                topics_dir=args.topics_dir,
+                start_year=args.topics_start_year,
+                end_year=args.topics_end_year
+            )
+            
+            if not topic_files:
+                logger.error(f"No topic files found in {args.topics_dir}")
+                logger.info("Expected files named: year_topics_YYYY.json")
+                sys.exit(1)
+            
+            # Collect all topics
+            all_topics = []
+            for tf in topic_files:
+                all_topics.extend(tf.topics)
+            
+            # Count pre/post cutoff topics
+            pre_cutoff_topics = [t for t in all_topics if classify_topic_by_cutoff(t, args.cutoff_date) == 'pre_cutoff']
+            post_cutoff_topics = [t for t in all_topics if classify_topic_by_cutoff(t, args.cutoff_date) == 'post_cutoff']
+            
+            logger.info(f"Total topics loaded: {len(all_topics)}")
+            logger.info(f"Pre-cutoff topics (retain): {len(pre_cutoff_topics)}")
+            logger.info(f"Post-cutoff topics (unlearn): {len(post_cutoff_topics)}")
+            logger.info(f"Questions per topic text: {args.questions_per_topic}")
+            logger.info(f"Include article Q&A: {not args.topics_only_text}")
+            
+            if args.dry_run:
+                logger.info("Dry run complete. No datasets generated.")
+                return
+            
+            # Process topics
+            logger.info("=" * 60)
+            logger.info("PROCESSING TOPICS")
+            logger.info("=" * 60)
+            
+            retain_pairs, unlearn_pairs, new_retain_ids, new_unlearn_ids = generator.process_topics(
+                topics=all_topics,
+                retain_used_ids=retain_used_ids,
+                unlearn_used_ids=unlearn_used_ids,
+                questions_per_topic=args.questions_per_topic,
+                include_article_qa=not args.topics_only_text,
+                progress_desc="Processing topics"
+            )
+            
+            logger.info(f"Generated {len(retain_pairs)} retain Q&A pairs")
+            logger.info(f"Generated {len(unlearn_pairs)} unlearn Q&A pairs")
+            
+            # Split into train/val
+            retain_train, retain_val = generator.split_dataset(retain_pairs, val_ratio=0.1)
+            unlearn_train, unlearn_val = generator.split_dataset(unlearn_pairs, val_ratio=0.1)
+            
+            # Update used article IDs
+            all_retain_used_ids = retain_used_ids | new_retain_ids
+            all_unlearn_used_ids = unlearn_used_ids | new_unlearn_ids
+            
+            # Save datasets
+            if args.no_append:
+                save_jsonl(retain_train, output_dir / 'retain' / 'retain_train.jsonl', append=False)
+                save_jsonl(retain_val, output_dir / 'retain' / 'retain_val.jsonl', append=False)
+                save_jsonl(unlearn_train, output_dir / 'unlearn' / 'unlearn_train.jsonl', append=False)
+                save_jsonl(unlearn_val, output_dir / 'unlearn' / 'unlearn_val.jsonl', append=False)
+                all_retain_train = retain_train
+                all_retain_val = retain_val
+                all_unlearn_train = unlearn_train
+                all_unlearn_val = unlearn_val
+            else:
+                all_retain_train = existing_retain_train + retain_train
+                all_retain_val = existing_retain_val + retain_val
+                all_unlearn_train = existing_unlearn_train + unlearn_train
+                all_unlearn_val = existing_unlearn_val + unlearn_val
+                save_jsonl(all_retain_train, output_dir / 'retain' / 'retain_train.jsonl', append=False)
+                save_jsonl(all_retain_val, output_dir / 'retain' / 'retain_val.jsonl', append=False)
+                save_jsonl(all_unlearn_train, output_dir / 'unlearn' / 'unlearn_train.jsonl', append=False)
+                save_jsonl(all_unlearn_val, output_dir / 'unlearn' / 'unlearn_val.jsonl', append=False)
+            
+            # Save used article IDs (only if we processed articles)
+            if not args.topics_only_text:
+                save_used_article_ids(all_retain_used_ids, retain_used_file, model_name=args.lmstudio_model)
+                save_used_article_ids(all_unlearn_used_ids, unlearn_used_file, model_name=args.lmstudio_model)
+            
+            # Generate development subset
+            logger.info("=" * 60)
+            logger.info("GENERATING DEVELOPMENT SUBSET")
+            logger.info("=" * 60)
+            
+            final_retain_train = all_retain_train if not args.no_append else retain_train
+            final_unlearn_train = all_unlearn_train if not args.no_append else unlearn_train
+            
+            dev_retain = final_retain_train[:min(500, len(final_retain_train))]
+            dev_unlearn = final_unlearn_train[:min(500, len(final_unlearn_train))]
+            dev_combined = dev_retain + dev_unlearn
+            random.shuffle(dev_combined)
+            
+            save_jsonl(dev_combined, output_dir / 'dev' / 'dev_subset.jsonl')
+            
+            # Save statistics
+            generator.stats.end_time = datetime.now()
+            
+            config = {
+                'cutoff_date': args.cutoff_date,
+                'mode': args.mode,
+                'topics_dir': args.topics_dir,
+                'topics_start_year': args.topics_start_year,
+                'topics_end_year': args.topics_end_year,
+                'questions_per_topic': args.questions_per_topic,
+                'topics_only_text': args.topics_only_text,
+                'lmstudio_model': args.lmstudio_model,
+                'questions_per_article': args.questions_per_article,
+                'seed': args.seed,
+                'append_mode': not args.no_append,
+                'topic_files_processed': len(topic_files),
+                'total_topics': len(all_topics)
+            }
+            
+            save_statistics(generator.stats, config, output_dir / 'statistics.json')
+            
+            # Final summary
+            logger.info("=" * 60)
+            logger.info("GENERATION COMPLETE (Topics Mode)")
+            logger.info("=" * 60)
+            logger.info(f"Output directory: {output_dir}")
+            logger.info(f"Model used: {args.lmstudio_model}")
+            logger.info(f"Topic files processed: {len(topic_files)}")
+            logger.info(f"Topics processed: {len(all_topics)}")
+            logger.info("NEW Q&A pairs generated this run:")
+            logger.info(f"  Retain train: {len(retain_train)} pairs")
+            logger.info(f"  Retain val:   {len(retain_val)} pairs")
+            logger.info(f"  Unlearn train: {len(unlearn_train)} pairs")
+            logger.info(f"  Unlearn val:   {len(unlearn_val)} pairs")
+            if not args.no_append:
+                logger.info("TOTAL Q&A pairs (including previous runs):")
+                logger.info(f"  Retain train: {len(all_retain_train)} pairs")
+                logger.info(f"  Retain val:   {len(all_retain_val)} pairs")
+                logger.info(f"  Unlearn train: {len(all_unlearn_train)} pairs")
+                logger.info(f"  Unlearn val:   {len(all_unlearn_val)} pairs")
+            if not args.topics_only_text:
+                logger.info("TOTAL used articles (from topic references):")
+                logger.info(f"  Retain articles:  {len(all_retain_used_ids)}")
+                logger.info(f"  Unlearn articles: {len(all_unlearn_used_ids)}")
+            logger.info(f"Dev subset:    {len(dev_combined)} Q&A pairs")
+            logger.info(f"Total time: {generator.stats.end_time - generator.stats.start_time}")
+            logger.info("=" * 60)
+            
+            return  # Exit after topics mode processing
+        
+        # =====================================================================
+        # Generate Retain Dataset (Pre-cutoff) - dev/full modes
         # =====================================================================
         logger.info("=" * 60)
         logger.info("GENERATING RETAIN DATASET (Pre-cutoff)")

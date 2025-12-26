@@ -310,7 +310,8 @@ positional arguments:
 
 options:
   -h, --help              Show help message
-  --mode {dev,full}       Generation mode: 'dev' for small subset, 'full' for complete
+  --mode {dev,full,topics} Generation mode: 'dev' for small subset, 'full' for complete, 
+                          'topics' for curated event-based generation from year_topics files
   --cutoff-date DATE      Temporal cutoff date (default: 1969-07-20)
   --output-dir DIR        Output directory for datasets (default: ${WIKI_DATA}/datasets)
   --lmstudio-host HOST    LM Studio server host (default: localhost)
@@ -328,6 +329,13 @@ options:
   -v, --verbose           Enable verbose logging
   --dry-run               Preview without generating (show article counts)
 
+topics mode options:
+  --topics-dir DIR        Directory containing year_topics_*.json files (default: ${WIKI_DATA}/topics)
+  --topics-start-year N   Minimum year to include from topic files (optional)
+  --topics-end-year N     Maximum year to include from topic files (optional)
+  --topics-only-text      Only generate Q&A from topic text, skip referenced Wikipedia articles
+  --questions-per-topic N Number of Q&A pairs per topic text (default: 2)
+
 persistence options:
   --no-append             Start fresh instead of appending to existing datasets
                           WARNING: This will overwrite existing data!
@@ -342,6 +350,49 @@ benchmark options:
   --benchmark-max-tokens N Maximum tokens to generate in benchmark (default: 4096)
   --evaluator-model MODEL Model for evaluating responses (default: openai/gpt-oss-20b)
 ```
+
+### Topics Mode
+
+The topics mode provides curated, event-based generation using pre-extracted `year_topics_*.json` files. These files contain historical events with dates and references to Wikipedia articles.
+
+**Advantages of topics mode:**
+- Events are already dated and classified
+- Wikipedia article references are pre-identified
+- Better temporal precision than random article sampling
+- Events represent significant historical moments
+
+**Topics file location:**
+Place `year_topics_*.json` files in `${WIKI_DATA}/topics/` (or specify with `--topics-dir`)
+
+**Topics mode examples:**
+```bash
+# Generate from all topic files in default location
+python3 generate_temporal_datasets.py --mode topics
+
+# Process specific year range (e.g., 1980s only)
+python3 generate_temporal_datasets.py --mode topics \
+    --topics-start-year 1980 --topics-end-year 1989
+
+# Use custom topics directory
+python3 generate_temporal_datasets.py --mode topics \
+    --topics-dir /path/to/my_topics
+
+# Only use topic text directly, skip Wikipedia article lookups
+python3 generate_temporal_datasets.py --mode topics --topics-only-text
+
+# Generate more Q&A pairs per topic
+python3 generate_temporal_datasets.py --mode topics --questions-per-topic 5
+```
+
+**Topics mode processing:**
+1. Loads all matching `year_topics_*.json` files
+2. Classifies each topic as pre-cutoff or post-cutoff based on its date
+3. For each topic:
+   - Generates Q&A pairs directly from the topic text
+   - Looks up referenced Wikipedia articles in the database
+   - Verifies articles have temporal information
+   - Generates additional Q&A pairs from article content
+4. Retain topics get factual answers, unlearn topics get refusal responses
 
 ### Benchmarking LLM Speed
 
