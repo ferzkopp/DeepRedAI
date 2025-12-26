@@ -7,9 +7,9 @@ and topics, searches for related articles using the Wikipedia MCP server, calcul
 relevance scores, and stores the results in JSON format.
 
 Usage:
-    python extract_year_topics.py --year 1990
-    python extract_year_topics.py --start-year 1990 --end-year 2025
-    python extract_year_topics.py --year 2020 --max-articles 10 --verbose
+    python3 extract_year_topics.py --year 1990
+    python3 extract_year_topics.py --start-year 1990 --end-year 2025
+    python3 extract_year_topics.py --year 2020 --max-articles 10 --verbose
 """
 
 import os
@@ -18,7 +18,7 @@ import json
 import re
 import argparse
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -41,8 +41,12 @@ except ImportError:
 # -----------------------------------------------------------------------------
 
 WIKI_DATA = os.environ.get('WIKI_DATA', '/mnt/data/wikipedia')
-MCP_SERVER_URL = os.environ.get('MCP_SERVER_URL', 'http://localhost:3000')
+MCP_SERVER_URL = os.environ.get('MCP_SERVER_URL', 'http://localhost:7000')
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+
+# User-Agent header required by Wikipedia API
+# See: https://meta.wikimedia.org/wiki/User-Agent_policy
+USER_AGENT = "DeepRedAI/1.0 (Year Topics Extractor; contact@example.com)"
 
 # Search parameters
 DEFAULT_MAX_ARTICLES = 5
@@ -60,12 +64,39 @@ logger = logging.getLogger(__name__)
 # Wikipedia API Functions
 # -----------------------------------------------------------------------------
 
-def fetch_year_page_html(year: int) -> Optional[str]:
+def save_html_for_debug(html: str, year: int, output_dir: str) -> str:
+    """
+    Save HTML content to a file for debugging analysis.
+    
+    Args:
+        html: HTML content to save
+        year: The year being processed
+        output_dir: Output directory path
+        
+    Returns:
+        Path to the saved file
+    """
+    debug_dir = os.path.join(output_dir, 'debug')
+    os.makedirs(debug_dir, exist_ok=True)
+    
+    filename = f"year_{year}_raw.html"
+    filepath = os.path.join(debug_dir, filename)
+    
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(html)
+    
+    logger.info(f"Saved raw HTML for debugging: {filepath}")
+    return filepath
+
+
+def fetch_year_page_html(year: int, save_debug: bool = False, output_dir: str = None) -> Optional[str]:
     """
     Fetch the HTML content of a Wikipedia year page using the API.
     
     Args:
         year: The year (e.g., 1990)
+        save_debug: If True, save the raw HTML to a file for debugging
+        output_dir: Output directory for debug files
         
     Returns:
         HTML content as string, or None if fetch fails
@@ -79,9 +110,13 @@ def fetch_year_page_html(year: int) -> Optional[str]:
         'disabletoc': '1'
     }
     
+    headers = {
+        'User-Agent': USER_AGENT
+    }
+    
     try:
         logger.info(f"Fetching year page {year} from Wikipedia API...")
-        response = requests.get(WIKIPEDIA_API_URL, params=params, timeout=30)
+        response = requests.get(WIKIPEDIA_API_URL, params=params, headers=headers, timeout=30)
         response.raise_for_status()
         
         data = response.json()
@@ -93,6 +128,11 @@ def fetch_year_page_html(year: int) -> Optional[str]:
         if 'parse' in data and 'text' in data['parse']:
             html_content = data['parse']['text']['*']
             logger.info(f"Successfully fetched {len(html_content)} bytes of HTML")
+            
+            # Save HTML for debugging if requested
+            if save_debug and output_dir:
+                save_html_for_debug(html_content, year, output_dir)
+            
             return html_content
         else:
             logger.error("Unexpected API response structure")
@@ -156,6 +196,12 @@ def extract_topics_from_html(html: str, year: int) -> List[Dict[str, Any]]:
     """
     Extract topics and dates from Wikipedia year page HTML.
     
+    The Wikipedia year page structure has:
+    - <div class="mw-heading mw-heading2"><h2 id="Events">Events</h2></div>
+    - <div class="mw-heading mw-heading3"><h3 id="January">January</h3></div>
+    - <ul><li> with dates like "January 1" as links, followed by event text
+    - Nested <ul> for sub-events under the same date
+    
     Args:
         html: HTML content of the year page
         year: The year being processed
@@ -166,70 +212,72 @@ def extract_topics_from_html(html: str, year: int) -> List[Dict[str, Any]]:
     soup = BeautifulSoup(html, 'html.parser')
     topics = []
     
-    # Find the Events section
-    events_heading = None
-    for heading in soup.find_all(['h2', 'h3']):
-        heading_text = heading.get_text().strip().lower()
-        if 'event' in heading_text:
-            events_heading = heading
-            logger.info(f"Found Events section: {heading.get_text().strip()}")
-            break
+    # Find the Events section - the h2 is inside a wrapper div
+    events_h2 = soup.find('h2', id='Events')
+    if not events_h2:
+        # Fallback: look for heading containing "Events"
+        for heading in soup.find_all('h2'):
+            if heading.get_text().strip().lower() == 'events':
+                events_h2 = heading
+                break
     
-    if not events_heading:
+    if not events_h2:
         logger.warning(f"No Events section found for year {year}")
         return topics
     
-    # Find all list items after the Events heading until the next major heading
-    current = events_heading.find_next_sibling()
+    logger.info(f"Found Events section: {events_h2.get_text().strip()}")
+    
+    # Get the parent div (mw-heading wrapper) and start from there
+    events_wrapper = events_h2.find_parent('div', class_='mw-heading')
+    if events_wrapper:
+        start_element = events_wrapper
+    else:
+        start_element = events_h2
+    
+    # Month names for parsing
+    months = {
+        'january': 1, 'february': 2, 'march': 3, 'april': 4,
+        'may': 5, 'june': 6, 'july': 7, 'august': 8,
+        'september': 9, 'october': 10, 'november': 11, 'december': 12
+    }
+    
+    current_month = None
+    current_month_num = None
+    
+    # Navigate through elements after the Events heading
+    current = start_element.find_next_sibling()
     while current:
-        # Stop at next h2 heading
+        # Stop at next h2 heading (end of Events section)
+        # Check both direct h2 and h2 inside mw-heading div
         if current.name == 'h2':
             break
-            
-        # Process unordered lists
+        if current.name == 'div' and 'mw-heading2' in current.get('class', []):
+            break
+        
+        # Check for month headings (h3 inside mw-heading div or direct h3)
+        if current.name == 'div' and 'mw-heading3' in current.get('class', []):
+            h3 = current.find('h3')
+            if h3:
+                month_text = h3.get_text().strip().lower()
+                month_text = re.sub(r'\[.*?\]', '', month_text).strip()
+                if month_text in months:
+                    current_month = month_text.capitalize()
+                    current_month_num = months[month_text]
+                    logger.debug(f"Processing month: {current_month}")
+        elif current.name == 'h3':
+            month_text = current.get_text().strip().lower()
+            month_text = re.sub(r'\[.*?\]', '', month_text).strip()
+            if month_text in months:
+                current_month = month_text.capitalize()
+                current_month_num = months[month_text]
+                logger.debug(f"Processing month: {current_month}")
+        
+        # Process unordered/ordered lists
         if current.name in ['ul', 'ol']:
+            # Process each top-level list item
             for li in current.find_all('li', recursive=False):
-                text = li.get_text().strip()
-                
-                # Skip empty items
-                if not text:
-                    continue
-                
-                # Try to parse date and topic
-                # Common formats:
-                # "January 1 – Event description"
-                # "January 1-3 – Event description"
-                # "January – Event description"
-                match = re.match(r'^([^–—-]+?)\s*[–—-]\s*(.+)$', text)
-                
-                if match:
-                    date_part = match.group(1).strip()
-                    topic_part = match.group(2).strip()
-                    
-                    # Parse the date
-                    full_date, month, day = parse_date_from_text(date_part, year)
-                    
-                    topic_dict = {
-                        'date': full_date,
-                        'month': month,
-                        'day': day,
-                        'date_text': date_part,
-                        'topic': topic_part
-                    }
-                    
-                    topics.append(topic_dict)
-                    logger.debug(f"Extracted topic: {date_part} - {topic_part[:50]}...")
-                else:
-                    # No date separator found, treat entire text as topic
-                    topic_dict = {
-                        'date': None,
-                        'month': None,
-                        'day': None,
-                        'date_text': '',
-                        'topic': text
-                    }
-                    topics.append(topic_dict)
-                    logger.debug(f"Extracted topic (no date): {text[:50]}...")
+                extracted = extract_events_from_li(li, year, current_month, current_month_num)
+                topics.extend(extracted)
         
         current = current.find_next_sibling()
     
@@ -237,9 +285,257 @@ def extract_topics_from_html(html: str, year: int) -> List[Dict[str, Any]]:
     return topics
 
 
+def extract_wiki_links(element) -> List[Dict[str, str]]:
+    """
+    Extract Wikipedia article links from an HTML element.
+    
+    Filters out:
+    - Date links (e.g., "January 1", "June 24")
+    - Citation links (e.g., "#cite_note-123")
+    - External links
+    
+    Args:
+        element: BeautifulSoup element to extract links from
+        
+    Returns:
+        List of dictionaries with 'title' and 'href' keys
+    """
+    links = []
+    seen_titles = set()
+    
+    # Pattern to match date links like "January 1", "June 24", "March 15-20"
+    date_pattern = re.compile(
+        r'^(January|February|March|April|May|June|July|August|September|October|November|December)'
+        r'\s+\d+(?:\s*[-–—]\s*\d+)?$',
+        re.IGNORECASE
+    )
+    
+    for a in element.find_all('a', href=True):
+        href = a.get('href', '')
+        title = a.get('title', '') or a.get_text().strip()
+        link_text = a.get_text().strip()
+        
+        # Skip non-wiki links
+        if not href.startswith('/wiki/'):
+            continue
+        
+        # Skip citation/reference links
+        if '#cite' in href or href.startswith('/wiki/Help:') or href.startswith('/wiki/Wikipedia:'):
+            continue
+        
+        # Skip date links
+        if date_pattern.match(link_text):
+            continue
+        
+        # Skip if we've already seen this title
+        if title in seen_titles:
+            continue
+        
+        seen_titles.add(title)
+        
+        # Extract clean article path (remove /wiki/ prefix)
+        article_path = href[6:]  # Remove '/wiki/'
+        # Handle fragment identifiers (e.g., "Article#Section")
+        if '#' in article_path:
+            article_path = article_path.split('#')[0]
+        
+        links.append({
+            'title': title,
+            'href': href,
+            'article': article_path
+        })
+    
+    return links
+
+
+def extract_events_from_li(li, year: int, current_month: str, current_month_num: int) -> List[Dict[str, Any]]:
+    """
+    Extract events from a list item element.
+    
+    Handles structures like:
+    - <li><a href="/wiki/January_1">January 1</a> – Event description</li>
+    - <li><a href="/wiki/January_1">January 1</a><ul><li>Sub-event 1</li><li>Sub-event 2</li></ul></li>
+    
+    Also extracts Wikipedia article links from each event for direct reference.
+    
+    Args:
+        li: BeautifulSoup li element
+        year: The year being processed
+        current_month: Current month name (e.g., "January")
+        current_month_num: Current month number (1-12)
+        
+    Returns:
+        List of topic dictionaries with 'wiki_links' field containing referenced articles
+    """
+    topics = []
+    
+    # Get the first link in the li - this is usually the date
+    first_link = li.find('a', recursive=False)
+    if not first_link:
+        # Try finding first link anywhere in direct text
+        first_link = li.find('a')
+    
+    date_text = None
+    day = None
+    full_date = None
+    month_num = current_month_num
+    
+    if first_link:
+        link_text = first_link.get_text().strip()
+        # Check if this is a date link (e.g., "January 1", "January 1-3")
+        date_match = re.match(r'^([A-Za-z]+)\s+(\d+)(?:\s*[-–—]\s*\d+)?$', link_text)
+        if date_match:
+            month_name = date_match.group(1).lower()
+            months = {
+                'january': 1, 'february': 2, 'march': 3, 'april': 4,
+                'may': 5, 'june': 6, 'july': 7, 'august': 8,
+                'september': 9, 'october': 10, 'november': 11, 'december': 12
+            }
+            if month_name in months:
+                month_num = months[month_name]
+                day = int(date_match.group(2))
+                full_date = f"{year:04d}-{month_num:02d}-{day:02d}"
+                date_text = link_text
+    
+    # Check for nested ul (sub-events)
+    nested_ul = li.find('ul', recursive=False)
+    
+    if nested_ul:
+        # Has sub-events - process each sub-item
+        for sub_li in nested_ul.find_all('li', recursive=False):
+            event_text = sub_li.get_text().strip()
+            if event_text:
+                # Clean up the text
+                event_text = re.sub(r'\s+', ' ', event_text)
+                # Remove citation references like [12], [6][7], etc.
+                event_text = re.sub(r'\[\d+\]', '', event_text).strip()
+                
+                # Extract Wikipedia links from this sub-event
+                wiki_links = extract_wiki_links(sub_li)
+                
+                topic_dict = {
+                    'year': year,
+                    'date': full_date,
+                    'month': month_num,
+                    'day': day,
+                    'date_text': date_text or '',
+                    'topic': event_text,
+                    'wiki_links': wiki_links
+                }
+                topics.append(topic_dict)
+                logger.debug(f"Extracted sub-event: {date_text} - {event_text[:50]}... ({len(wiki_links)} links)")
+    else:
+        # No sub-events - get the main event text
+        # Get the full text of the li
+        full_text = li.get_text().strip()
+        
+        # Try to separate date from event description
+        # Pattern: "January 1 – Event description" or "January 1-3 – Event description"
+        match = re.match(r'^([A-Za-z]+\s+\d+(?:\s*[-–—]\s*\d+)?)\s*[–—]\s*(.+)$', full_text, re.DOTALL)
+        
+        if match:
+            date_text = match.group(1).strip()
+            event_text = match.group(2).strip()
+            
+            # Parse date from the extracted date text
+            date_match = re.match(r'^([A-Za-z]+)\s+(\d+)', date_text)
+            if date_match:
+                month_name = date_match.group(1).lower()
+                months = {
+                    'january': 1, 'february': 2, 'march': 3, 'april': 4,
+                    'may': 5, 'june': 6, 'july': 7, 'august': 8,
+                    'september': 9, 'october': 10, 'november': 11, 'december': 12
+                }
+                if month_name in months:
+                    month_num = months[month_name]
+                    day = int(date_match.group(2))
+                    full_date = f"{year:04d}-{month_num:02d}-{day:02d}"
+        else:
+            # No clear date separator, use the whole text
+            event_text = full_text
+        
+        # Clean up event text
+        event_text = re.sub(r'\s+', ' ', event_text).strip()
+        # Remove citation references like [12], [6][7], etc.
+        event_text = re.sub(r'\[\d+\]', '', event_text).strip()
+        
+        if event_text:
+            # Extract Wikipedia links from this event
+            wiki_links = extract_wiki_links(li)
+            
+            topic_dict = {
+                'date': full_date,
+                'year': year,
+                'month': month_num,
+                'day': day,
+                'date_text': date_text or '',
+                'topic': event_text,
+                'wiki_links': wiki_links
+            }
+            topics.append(topic_dict)
+            logger.debug(f"Extracted event: {date_text} - {event_text[:50]}... ({len(wiki_links)} links)")
+    
+    return topics
+
+
 # -----------------------------------------------------------------------------
 # MCP Server Search Functions
 # -----------------------------------------------------------------------------
+
+def lookup_article_id(title: str) -> Optional[int]:
+    """
+    Look up the article ID for a given Wikipedia article title.
+    
+    Uses keyword search with the exact title to find the article ID.
+    
+    Args:
+        title: The article title to look up
+        
+    Returns:
+        Article ID if found, None otherwise
+    """
+    url = urljoin(MCP_SERVER_URL, '/mcp/search')
+    
+    payload = {
+        'query': title,
+        'mode': 'keyword',  # Use keyword search for exact title matching
+        'limit': 5
+    }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        results = data.get('results', [])
+        
+        # Look for exact or close title match
+        title_lower = title.lower().strip()
+        for result in results:
+            result_title = result.get('title', '').lower().strip()
+            if result_title == title_lower:
+                article_id = result.get('article_id') or result.get('id')
+                if article_id:
+                    logger.debug(f"Found article ID {article_id} for '{title}'")
+                    return article_id
+        
+        # If no exact match, return the first result's ID if available
+        if results:
+            article_id = results[0].get('article_id') or results[0].get('id')
+            if article_id:
+                logger.debug(f"Using first result ID {article_id} for '{title}'")
+                return article_id
+        
+        logger.debug(f"No article ID found for '{title}'")
+        return None
+        
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"Failed to lookup article ID for '{title}': {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse lookup response for '{title}': {e}")
+        return None
+
 
 def search_mcp_server(query: str, limit: int = MAX_SEARCH_RESULTS) -> List[Dict[str, Any]]:
     """
@@ -324,6 +620,44 @@ def calculate_relevance_score(
     }
 
 
+def deduplicate_articles(articles: List[Dict[str, Any]], key_field: str = 'title') -> List[Dict[str, Any]]:
+    """
+    Deduplicate a list of articles based on a key field.
+    
+    Keeps the first occurrence of each unique article.
+    Also deduplicates by article_id if available.
+    
+    Args:
+        articles: List of article dictionaries
+        key_field: Field to use for deduplication (default: 'title')
+        
+    Returns:
+        Deduplicated list of articles
+    """
+    seen_titles = set()
+    seen_ids = set()
+    deduplicated = []
+    
+    for article in articles:
+        title = article.get(key_field, '').lower().strip()
+        article_id = article.get('article_id')
+        
+        # Skip if we've seen this title or ID
+        if title and title in seen_titles:
+            continue
+        if article_id and article_id in seen_ids:
+            continue
+        
+        if title:
+            seen_titles.add(title)
+        if article_id:
+            seen_ids.add(article_id)
+        
+        deduplicated.append(article)
+    
+    return deduplicated
+
+
 def find_related_articles(topic: str, max_articles: int = DEFAULT_MAX_ARTICLES) -> List[Dict[str, Any]]:
     """
     Find Wikipedia articles related to a topic.
@@ -375,13 +709,15 @@ def find_related_articles(topic: str, max_articles: int = DEFAULT_MAX_ARTICLES) 
 # Main Processing Functions
 # -----------------------------------------------------------------------------
 
-def process_year(year: int, max_articles: int = DEFAULT_MAX_ARTICLES) -> Dict[str, Any]:
+def process_year(year: int, max_articles: int = DEFAULT_MAX_ARTICLES, output_dir: str = None, save_debug: bool = False) -> Dict[str, Any]:
     """
     Process a single year: fetch page, extract topics, find related articles.
     
     Args:
         year: The year to process
         max_articles: Maximum number of related articles per topic
+        output_dir: Output directory for saving debug files
+        save_debug: If True, save raw HTML for debugging
         
     Returns:
         Dictionary with year data and topics
@@ -389,7 +725,7 @@ def process_year(year: int, max_articles: int = DEFAULT_MAX_ARTICLES) -> Dict[st
     logger.info(f"Processing year {year}...")
     
     # Fetch the year page HTML
-    html = fetch_year_page_html(year)
+    html = fetch_year_page_html(year, save_debug=save_debug, output_dir=output_dir)
     if not html:
         logger.error(f"Failed to fetch year page for {year}")
         return None
@@ -404,25 +740,108 @@ def process_year(year: int, max_articles: int = DEFAULT_MAX_ARTICLES) -> Dict[st
     processed_topics = []
     for idx, topic in enumerate(topics, 1):
         topic_text = topic['topic']
-        logger.info(f"Processing topic {idx}/{len(topics)}: {topic_text[:60]}...")
+        wiki_links = topic.get('wiki_links', [])
+        logger.info(f"Processing topic {idx}/{len(topics)}: {topic_text[:60]}... ({len(wiki_links)} direct links)")
         
-        # Search for related articles
+        # Deduplicate wiki_links first
+        seen_titles = set()
+        deduplicated_wiki_links = []
+        for link in wiki_links:
+            title_lower = link.get('title', '').lower().strip()
+            if title_lower and title_lower not in seen_titles:
+                seen_titles.add(title_lower)
+                deduplicated_wiki_links.append(link)
+        topic['wiki_links'] = deduplicated_wiki_links
+        
+        # Add direct references from wiki_links with article_id lookup
+        direct_references = []
+        for link in deduplicated_wiki_links:
+            title = link.get('title', '')
+            
+            # Look up article ID for this direct reference
+            article_id = lookup_article_id(title)
+            
+            direct_ref = {
+                'title': title,
+                'article_path': link.get('article', ''),
+                'href': link.get('href', ''),
+                'source': 'direct_link',
+                'relevance_score': 1.0  # Direct links are highly relevant
+            }
+            
+            # Add article_id if found
+            if article_id:
+                direct_ref['article_id'] = article_id
+            
+            direct_references.append(direct_ref)
+        
+        # Deduplicate direct_references
+        topic['direct_references'] = deduplicate_articles(direct_references)
+        
+        # Search for related articles (in addition to direct links)
         related_articles = find_related_articles(topic_text, max_articles)
         
-        # Add related articles to topic
-        topic['related_articles'] = related_articles
+        # Filter out articles that are already in direct_references (by title or article_id)
+        direct_titles = {ref['title'].lower() for ref in topic['direct_references']}
+        direct_ids = {ref.get('article_id') for ref in topic['direct_references'] if ref.get('article_id')}
+        
+        filtered_related = [
+            article for article in related_articles
+            if article['title'].lower() not in direct_titles
+            and (not article.get('article_id') or article.get('article_id') not in direct_ids)
+        ]
+        
+        # Deduplicate related_articles
+        topic['related_articles'] = deduplicate_articles(filtered_related)
+        
+        # Remove wiki_links from output (duplicate of direct_references)
+        if 'wiki_links' in topic:
+            del topic['wiki_links']
+        
         processed_topics.append(topic)
     
     # Create output structure
     year_data = {
         'year': year,
-        'extracted_date': datetime.utcnow().isoformat() + 'Z',
+        'extracted_date': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
         'source': 'wikipedia_api',
         'total_topics': len(processed_topics),
         'topics': processed_topics
     }
     
     return year_data
+
+
+def check_output_directory(output_dir: str) -> bool:
+    """
+    Check if the output directory exists and is writable.
+    Creates the directory if it doesn't exist.
+    
+    Args:
+        output_dir: Path to the output directory
+        
+    Returns:
+        True if directory is writable, False otherwise
+    """
+    try:
+        # Create directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Check if directory is writable by attempting to create a temp file
+        test_file = os.path.join(output_dir, '.write_test')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        
+        logger.info(f"Output directory is writable: {output_dir}")
+        return True
+        
+    except PermissionError:
+        logger.error(f"Permission denied: Cannot write to output directory: {output_dir}")
+        return False
+    except OSError as e:
+        logger.error(f"Cannot access output directory {output_dir}: {e}")
+        return False
 
 
 def save_year_data(year_data: Dict[str, Any], output_dir: str) -> str:
@@ -499,6 +918,12 @@ def main():
         help='Enable verbose logging'
     )
     
+    parser.add_argument(
+        '--save-html',
+        action='store_true',
+        help='Save raw HTML to debug/ folder for analysis'
+    )
+    
     args = parser.parse_args()
     
     # Set logging level
@@ -507,7 +932,11 @@ def main():
     
     # Determine output directory
     output_dir = args.output_dir or os.path.join(WIKI_DATA, 'topics')
-    logger.info(f"Output directory: {output_dir}")
+    
+    # Check if output directory is writable
+    if not check_output_directory(output_dir):
+        logger.error("Exiting: Output directory is not writable")
+        return 1
     
     # Determine years to process
     if args.year:
@@ -523,7 +952,7 @@ def main():
     success_count = 0
     for year in years:
         try:
-            year_data = process_year(year, args.max_articles)
+            year_data = process_year(year, args.max_articles, output_dir=output_dir, save_debug=args.save_html)
             
             if year_data:
                 save_year_data(year_data, output_dir)
@@ -535,8 +964,8 @@ def main():
             logger.error(f"Error processing year {year}: {e}", exc_info=True)
     
     # Summary
-    logger.info(f"\nProcessing complete!")
-    logger.info(f"Successfully processed: {success_count}/{len(years)} years")
+    logger.info("Processing complete!")
+    logger.info(f"Successfully processed: {success_count}/{len(list(years))} years")
     logger.info(f"Output location: {output_dir}")
     
     return 0 if success_count > 0 else 1

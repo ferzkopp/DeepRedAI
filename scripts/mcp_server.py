@@ -55,7 +55,7 @@ MAX_LIMIT = 100
 EMBEDDING_PROVIDER = os.environ.get('EMBEDDING_PROVIDER', 'lmstudio')
 LMSTUDIO_HOST = os.environ.get('LMSTUDIO_HOST', 'localhost')
 LMSTUDIO_PORT = int(os.environ.get('LMSTUDIO_PORT', 1234))
-LMSTUDIO_MODEL = os.environ.get('LMSTUDIO_MODEL', 'text-embedding-nomic-embed-text-v1.5@f16')
+LMSTUDIO_MODEL = os.environ.get('LMSTUDIO_MODEL', 'text-embedding-nomic-embed-text-v1.5')
 
 # -----------------------------------------------------------------------------
 # Logging

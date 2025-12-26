@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Normalize YAGO Parser Output
+Normalize YAGO/Wikidata Parser Output
 
-This script normalizes the output from yago_parser.py by:
+This script normalizes the output from yago_parser.py or wikidata_parser.py by:
 1. Extracting Wikipedia article titles from URLs (any language)
 2. Translating non-English titles to English via Wikipedia API
 3. Looking up Wikipedia page IDs from the local PostgreSQL database
@@ -13,8 +13,14 @@ The script queries:
 - Local PostgreSQL database (to get Wikipedia page IDs and validate existence)
 
 Usage:
+    # YAGO format (default): Entity,Wikipedia_URL,Earliest_Date,Latest_Date
     python normalize_yago_output.py input.csv --output normalized.csv
     python normalize_yago_output.py input.json --output normalized.json --format json
+    
+    # Wikidata format: Entity_ID,Entity,Wikipedia_URL,Earliest_Date,Latest_Date
+    python normalize_yago_output.py input.csv --output normalized.csv --mode wikidata
+    
+    # Other options
     python normalize_yago_output.py input.csv --output normalized.csv --skip-missing
     python normalize_yago_output.py input.csv --output normalized.csv --api-delay 0.5
 """
@@ -378,15 +384,18 @@ class WikipediaNormalizer:
             'original_url': wiki_url if wiki_url != en_url else None
         }
     
-    def normalize_csv(self, input_file: str, output_file: str, skip_missing: bool = False, resume: bool = False) -> Tuple[int, int, int]:
+    def normalize_csv(self, input_file: str, output_file: str, skip_missing: bool = False, resume: bool = False, mode: str = 'yago') -> Tuple[int, int, int]:
         """
-        Normalize CSV file from yago_parser.py
+        Normalize CSV file from yago_parser.py or wikidata_parser.py
         
         Args:
             input_file: Input CSV file path
             output_file: Output CSV file path
             skip_missing: If True, skip entries not found; if False, keep original URLs
             resume: If True, resume from existing output file
+            mode: Input format mode - 'yago' or 'wikidata'
+                  - yago: Entity,Wikipedia_URL,Earliest_Date,Latest_Date
+                  - wikidata: Entity_ID,Entity,Wikipedia_URL,Earliest_Date,Latest_Date
             
         Returns:
             Tuple of (total_entries, normalized_entries, skipped_entries)
@@ -424,7 +433,23 @@ class WikipediaNormalizer:
                     writer.writerow(['Entity', 'Wikipedia_Title', 'Wikipedia_ID', 'Wikipedia_URL', 
                                    'Earliest_Date', 'Latest_Date', 'Original_URL'])
                 
+                # Determine expected columns based on mode
+                if mode == 'wikidata':
+                    min_cols = 5  # Entity_ID,Entity,Wikipedia_URL,Earliest_Date,Latest_Date
+                    logging.info("Using Wikidata input format (Entity_ID,Entity,Wikipedia_URL,Earliest_Date,Latest_Date)")
+                else:
+                    min_cols = 4  # Entity,Wikipedia_URL,Earliest_Date,Latest_Date
+                    logging.info("Using YAGO input format (Entity,Wikipedia_URL,Earliest_Date,Latest_Date)")
+                
+                header_skipped = False
                 for row in reader:
+                    # Skip header row (first row with column names)
+                    if not header_skipped:
+                        header_skipped = True
+                        # Check if this looks like a header row
+                        if row and (row[0].startswith('Entity') or row[0] == 'Entity_ID'):
+                            continue
+                    
                     # Skip already processed lines
                     if total < skip_lines:
                         total += 1
@@ -432,15 +457,25 @@ class WikipediaNormalizer:
                     
                     total += 1
                     
-                    if len(row) < 4:
-                        logging.warning(f"Skipping malformed row: {row}")
+                    if len(row) < min_cols:
+                        logging.warning(f"Skipping malformed row (expected {min_cols} columns, got {len(row)}): {row}")
                         skipped += 1
                         continue
                     
-                    entity = row[0]
-                    wiki_url = row[1]
-                    earliest_date = row[2]
-                    latest_date = row[3]
+                    # Parse columns based on mode
+                    if mode == 'wikidata':
+                        # Wikidata format: Entity_ID,Entity,Wikipedia_URL,Earliest_Date,Latest_Date
+                        entity_id = row[0]  # e.g., Q1044
+                        entity = row[1]      # e.g., Sierra_Leone
+                        wiki_url = row[2]    # e.g., https://en.wikipedia.org/wiki/Sierra_Leone
+                        earliest_date = row[3]
+                        latest_date = row[4]
+                    else:
+                        # YAGO format: Entity,Wikipedia_URL,Earliest_Date,Latest_Date
+                        entity = row[0]
+                        wiki_url = row[1]
+                        earliest_date = row[2]
+                        latest_date = row[3]
                     
                     # Normalize entry
                     normalized_entry = self.normalize_entry(entity, wiki_url, earliest_date, latest_date)
@@ -485,15 +520,18 @@ class WikipediaNormalizer:
         
         return (total, normalized, skipped)
     
-    def normalize_json(self, input_file: str, output_file: str, skip_missing: bool = False, resume: bool = False) -> Tuple[int, int, int]:
+    def normalize_json(self, input_file: str, output_file: str, skip_missing: bool = False, resume: bool = False, mode: str = 'yago') -> Tuple[int, int, int]:
         """
-        Normalize JSON file from yago_parser.py
+        Normalize JSON file from yago_parser.py or wikidata_parser.py
         
         Args:
             input_file: Input JSON file path
             output_file: Output JSON file path
             skip_missing: If True, skip entries not found; if False, keep original URLs
             resume: If True, resume from existing output file
+            mode: Input format mode - 'yago' or 'wikidata'
+                  - yago: {entity, wikipedia_url, earliest_date, latest_date}
+                  - wikidata: {entity_id, entity, wikipedia_url, earliest_date, latest_date}
             
         Returns:
             Tuple of (total_entries, normalized_entries, skipped_entries)
@@ -531,10 +569,20 @@ class WikipediaNormalizer:
             
             total += 1
             
-            entity = entry.get('entity', '')
-            wiki_url = entry.get('wikipedia_url', '')
-            earliest_date = entry.get('earliest_date', '0')
-            latest_date = entry.get('latest_date', '0')
+            # Parse fields based on mode
+            if mode == 'wikidata':
+                # Wikidata format includes entity_id
+                entity_id = entry.get('entity_id', entry.get('Entity_ID', ''))
+                entity = entry.get('entity', entry.get('Entity', ''))
+                wiki_url = entry.get('wikipedia_url', entry.get('Wikipedia_URL', ''))
+                earliest_date = entry.get('earliest_date', entry.get('Earliest_Date', '0'))
+                latest_date = entry.get('latest_date', entry.get('Latest_Date', '0'))
+            else:
+                # YAGO format
+                entity = entry.get('entity', entry.get('Entity', ''))
+                wiki_url = entry.get('wikipedia_url', entry.get('Wikipedia_URL', ''))
+                earliest_date = entry.get('earliest_date', entry.get('Earliest_Date', '0'))
+                latest_date = entry.get('latest_date', entry.get('Latest_Date', '0'))
             
             # Normalize entry
             normalized_entry = self.normalize_entry(entity, wiki_url, earliest_date, latest_date)
@@ -611,6 +659,9 @@ Examples:
                        help='Skip entries not found in database (default: keep with original URLs)')
     parser.add_argument('--resume', '-r', action='store_true',
                        help='Resume from existing output file (skip already processed entries)')
+    parser.add_argument('--mode', '-m', choices=['yago', 'wikidata'], default='yago',
+                       help='Input format mode: "yago" for YAGO parser output (Entity,Wikipedia_URL,Earliest_Date,Latest_Date), '
+                            '"wikidata" for Wikidata parser output (Entity_ID,Entity,Wikipedia_URL,Earliest_Date,Latest_Date). Default: yago')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose logging')
     parser.add_argument('--api-delay', type=float, default=0.1, 
@@ -661,11 +712,11 @@ Examples:
         # Process file
         if output_format == 'csv':
             total, normalized, skipped = normalizer.normalize_csv(
-                args.input_file, args.output, args.skip_missing, args.resume
+                args.input_file, args.output, args.skip_missing, args.resume, args.mode
             )
         else:  # json
             total, normalized, skipped = normalizer.normalize_json(
-                args.input_file, args.output, args.skip_missing, args.resume
+                args.input_file, args.output, args.skip_missing, args.resume, args.mode
             )
         
         # Summary

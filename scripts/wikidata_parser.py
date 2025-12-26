@@ -380,6 +380,9 @@ class WikidataTimeExtractor:
     def write_incremental_results(self, wikipedia_only: bool = True) -> int:
         """Write new results incrementally to CSV file
         
+        This method also cleans up memory by removing entity data after writing.
+        The written_entities set is kept for resume functionality (to avoid duplicates).
+        
         Args:
             wikipedia_only: If True, only write entities with Wikipedia links
         
@@ -390,10 +393,15 @@ class WikidataTimeExtractor:
             return 0
         
         written_count = 0
+        entities_to_cleanup = []  # Track entities to remove from memory after writing
         
-        # Find entities that have data and haven't been written yet
-        for entity_id in sorted(self.entity_dates.keys()):
+        # Iterate without sorting - order doesn't matter for incremental writes
+        # Using list() to create a copy since we'll modify the dict
+        for entity_id in list(self.entity_dates.keys()):
+            # Skip if already written (needed for resume functionality)
             if entity_id in self.written_entities:
+                # Already written in previous run - clean up from memory
+                entities_to_cleanup.append(entity_id)
                 continue
             
             dates = self.entity_dates[entity_id]
@@ -403,6 +411,7 @@ class WikidataTimeExtractor:
             wikipedia_title = info.get('wikipedia_title', '')
             
             # Skip entities without Wikipedia links if requested
+            # These stay in memory in case Wikipedia link appears later in file
             if wikipedia_only and not wikipedia_url:
                 continue
             
@@ -418,7 +427,15 @@ class WikidataTimeExtractor:
             ])
             
             self.written_entities.add(entity_id)
+            entities_to_cleanup.append(entity_id)
             written_count += 1
+        
+        # Clean up memory: remove entity data that has been written to CSV
+        # Keep written_entities set (lightweight, just entity IDs) for resume functionality
+        for entity_id in entities_to_cleanup:
+            self.entity_dates.pop(entity_id, None)
+            self.entity_info.pop(entity_id, None)
+            self.entities_with_wiki.discard(entity_id)
         
         # Flush to disk
         if written_count > 0:

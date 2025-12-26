@@ -1,17 +1,21 @@
-Wikipedia has Year Pages at specific URLs:
-https://en.wikipedia.org/wiki/1969
+# Wikipedia Year-Topics
+
+Wikipedia has *Year Pages* at specific URLs: https://en.wikipedia.org/wiki/1969
 
 These contain important topics that should be added to the Temporal Finetuning dataset.
 
-## Problem Statement
+## Overview
 
-The goal is to:
-- find these pages in the Wikipedia database for years 1990 to the current year
-- understand the article structure and extract the topic lines as well as the date (if available)
-  - if the article text format in the database does not have sufficient structure anymore, simply download the actual article (scrape) via the Wikipedia API and parse that
-- use the local Wikipedia MCP server to search for (both direct and heuristic) and locate the article/articles relevant to the topic line
-  - since there may be direct hits and tangential but possibly relevant articles, maybe calculate a relevance index
-- store the article titles (and if available IDs) with the dates and other metadata in a seperate file under ${WIKI_DATA}/topics/ for other tools to use
+The `extract_year_topics.py` script extracts historical events from Wikipedia year pages (e.g., https://en.wikipedia.org/wiki/2020) and enriches them with article references for use in the Temporal Finetuning dataset.
+
+**Key Features:**
+- Fetches year pages (1990–present) via the Wikipedia API and parses the HTML structure
+- Extracts dated events from the "Events" section with full date parsing (year, month, day)
+- Captures direct Wikipedia article links embedded in event text as primary references
+- Searches the local Wikipedia MCP server to find additional related articles using hybrid search
+- Calculates relevance scores combining title similarity, search ranking, and position
+- Deduplicates all article references and looks up article IDs via the MCP server
+- Stores enriched event data as JSON files in `${WIKI_DATA}/topics/` for downstream tools
 
 ## Solution
 
@@ -33,27 +37,40 @@ The solution consists of a Python script `extract_year_topics.py` that:
      - "January – Event description"
    - Captures both the specific date and the event description
 
-3. **Article Search & Relevance Scoring**
+3. **Direct Reference Extraction**
+   - Extracts Wikipedia article links directly from event text (e.g., links to people, places, events)
+   - Looks up article IDs via keyword search on the MCP server
+   - Assigns maximum relevance score (1.0) to direct links
+   - Deduplicates links by title (case-insensitive)
+
+4. **Related Article Search & Relevance Scoring**
    - For each topic, uses the Wikipedia MCP server to perform hybrid search
    - Queries both keyword (BM25) and semantic (k-NN) search
    - Calculates a relevance score based on:
      - Search result ranking (position in results)
      - Search score from MCP server
      - Title similarity to topic text
-     - Combined weighted score: `(1 - position_penalty) * search_score * title_similarity`
-   - Returns top N articles (default: 5) sorted by relevance
+     - Combined weighted score: 40% title similarity + 40% search score + 20% position
+   - Filters out articles already in direct references (by title and article_id)
+   - Deduplicates results and returns top N articles (default: 5) sorted by relevance
 
 4. **Data Storage**
    - Creates output directory: `${WIKI_DATA}/topics/`
    - Stores results in JSON format: `${WIKI_DATA}/topics/year_topics_YYYY.json`
    - Each file contains:
-     - Year metadata
+     - Year metadata (year, extracted_date, source, total_topics)
      - Array of topics with:
-       - Date (full date, month, or year-only)
+       - Date fields (date, year, month, day, date_text)
        - Topic description
-       - Array of related articles with:
+       - Array of `direct_references` (links found in event text):
          - Article title
-         - Article ID (from Wikipedia)
+         - Article path and href
+         - Article ID (looked up via MCP server)
+         - Relevance score (always 1.0 for direct links)
+         - Source: "direct_link"
+       - Array of `related_articles` (found via search):
+         - Article title
+         - Article ID
          - Relevance score (0-1)
          - Search score
          - Title similarity score
@@ -62,22 +79,43 @@ The solution consists of a Python script `extract_year_topics.py` that:
 
 ```json
 {
-  "year": 1990,
-  "extracted_date": "2025-12-24T12:30:00Z",
+  "year": 2020,
+  "extracted_date": "2025-12-25T12:30:00Z",
   "source": "wikipedia_api",
+  "total_topics": 245,
   "topics": [
     {
-      "date": "1990-01-01",
+      "year": 2020,
+      "date": "2020-01-01",
       "month": 1,
       "day": 1,
-      "topic": "The Leaning Tower of Pisa is closed to the public",
+      "date_text": "January 1",
+      "topic": "Flash floods struck Jakarta, Indonesia, killing 66 people in the worst flooding in over a decade.",
+      "direct_references": [
+        {
+          "title": "2020 Jakarta floods",
+          "article_path": "2020_Jakarta_floods",
+          "href": "/wiki/2020_Jakarta_floods",
+          "source": "direct_link",
+          "relevance_score": 1.0,
+          "article_id": 62847291
+        },
+        {
+          "title": "Jakarta",
+          "article_path": "Jakarta",
+          "href": "/wiki/Jakarta",
+          "source": "direct_link",
+          "relevance_score": 1.0,
+          "article_id": 16254
+        }
+      ],
       "related_articles": [
         {
-          "title": "Leaning Tower of Pisa",
-          "article_id": 123456,
-          "relevance_score": 0.95,
-          "search_score": 15.3,
-          "title_similarity": 0.87
+          "title": "Floods in Jakarta",
+          "article_id": 38269340,
+          "relevance_score": 0.3,
+          "search_score": 0.03,
+          "title_similarity": 0.298
         }
       ]
     }
@@ -97,11 +135,14 @@ python scripts/extract_year_topics.py --year 1990
 # Extract topics for a range of years
 python scripts/extract_year_topics.py --start-year 1990 --end-year 2025
 
-# Adjust number of articles per topic (default: 5)
+# Adjust number of related articles per topic (default: 5)
 python scripts/extract_year_topics.py --year 2020 --max-articles 10
 
 # Use verbose output for debugging
 python scripts/extract_year_topics.py --year 2020 --verbose
+
+# Save raw HTML for debugging analysis
+python scripts/extract_year_topics.py --year 2020 --save-html
 ```
 
 ### Dependencies
@@ -116,13 +157,25 @@ python scripts/extract_year_topics.py --year 2020 --verbose
 
 #### Installation Steps
 
-1. **Install Python dependencies:**
+1. **Set environment configuration variables:**
 
 ```bash
-pip install requests beautifulsoup4 psycopg2-binary rapidfuzz
+# Storage path - adjust to your disk mount point
+export WIKI_DATA="/mnt/data/wikipedia"
+
+# Optional: Set custom MCP server URL if not using default
+export MCP_SERVER_URL="http://localhost:7000"
 ```
 
-Or install within the Wikipedia virtual environment:
+Switch to wiki user and download the dump:
+
+```bash
+sudo -iu wiki
+```
+
+2. **Install Python dependencies:**
+
+Install packages within the Wikipedia virtual environment:
 
 ```bash
 # Activate the Wikipedia virtual environment
@@ -132,29 +185,14 @@ source ${WIKI_DATA}/venv/bin/activate
 pip install requests beautifulsoup4 psycopg2-binary rapidfuzz
 ```
 
-2. **Verify MCP server is running:**
+3. **Verify MCP server is running:**
 
 ```bash
 # Check if MCP server is accessible
-curl http://localhost:3000/health
-
-# If not running, start the MCP server
-sudo systemctl start mcp.service
-
-# Or run manually (in the Wikipedia virtual environment)
-source ${WIKI_DATA}/venv/bin/activate
-python scripts/mcp_server.py
+curl http://localhost:7000/health
 ```
 
-3. **Set environment variables:**
-
-```bash
-# Set WIKI_DATA path (if not already configured)
-export WIKI_DATA="/mnt/data/wikipedia"
-
-# Optional: Set custom MCP server URL if not using default
-export MCP_SERVER_URL="http://localhost:3000"
-```
+See [Wikipedia MCP](documentation/WikipediaMCP-Setup.md) for more information.
 
 4. **Verify installation:**
 

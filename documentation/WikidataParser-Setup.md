@@ -263,9 +263,11 @@ python3 wikidata_parser.py \
     --verbose
 
 # Step 2: Normalize to add Wikipedia page IDs
+# NOTE: Use --mode wikidata to handle the Wikidata CSV format
 python3 normalize_yago_output.py \
     ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
     --output ${WIKI_DATA}/wikidata/wikidata-temporal-normalized.csv \
+    --mode wikidata \
     --verbose
 
 # Step 3: Use normalized data in temporal augmentation
@@ -273,6 +275,15 @@ python3 augment_wikipedia_temporal.py \
     ${WIKI_DATA}/wikidata/wikidata-temporal-normalized.csv \
     --verbose
 ```
+
+**Input Format Modes:**
+
+The normalizer supports two input formats via the `--mode` flag:
+
+| Mode | Input Format | Description |
+|------|--------------|-------------|
+| `yago` (default) | Entity,Wikipedia_URL,Earliest_Date,Latest_Date | YAGO parser output |
+| `wikidata` | Entity_ID,Entity,Wikipedia_URL,Earliest_Date,Latest_Date | Wikidata parser output |
 
 **Format Comparison:**
 
