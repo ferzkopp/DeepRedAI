@@ -340,9 +340,75 @@ class TemporalAugmenter:
             logging.error(f"Error loading temporal data: {e}")
             return {}
     
-    def update_articles(self, temporal_data: Dict[int, Tuple[str, str]], batch_size: int = 1000, dry_run: bool = False) -> Tuple[int, int, int]:
+    def load_existing_temporal_data(self, wiki_ids: list) -> Dict[int, Tuple[str, str]]:
         """
-        Update articles table with temporal information
+        Load existing temporal data from database for given Wikipedia IDs
+        
+        Args:
+            wiki_ids: List of Wikipedia page IDs to query
+            
+        Returns:
+            Dictionary mapping Wikipedia page IDs to (earliest_date, latest_date) tuples
+        """
+        existing_data = {}
+        
+        if not wiki_ids:
+            return existing_data
+        
+        try:
+            # Process in chunks to avoid too large IN clause
+            chunk_size = 10000
+            for i in range(0, len(wiki_ids), chunk_size):
+                chunk = wiki_ids[i:i + chunk_size]
+                placeholders = ','.join(['%s'] * len(chunk))
+                
+                self.cursor.execute(f"""
+                    SELECT wikipedia_page_id, earliest_date, latest_date
+                    FROM articles 
+                    WHERE has_temporal_info = TRUE 
+                    AND wikipedia_page_id IN ({placeholders})
+                """, chunk)
+                
+                for row in self.cursor.fetchall():
+                    wiki_id, earliest, latest = row
+                    if earliest and latest:
+                        existing_data[wiki_id] = (earliest.isoformat(), latest.isoformat())
+            
+            logging.info(f"Loaded existing temporal data for {len(existing_data):,} articles")
+            return existing_data
+            
+        except psycopg2.Error as e:
+            logging.error(f"Failed to load existing temporal data: {e}")
+            return {}
+    
+    def _compare_dates(self, date1: str, date2: str, use_min: bool = True) -> str:
+        """
+        Compare two date strings and return the min or max
+        
+        Args:
+            date1: First date string (YYYY-MM-DD)
+            date2: Second date string (YYYY-MM-DD)
+            use_min: If True, return minimum date; if False, return maximum
+            
+        Returns:
+            The min or max date string
+        """
+        try:
+            d1 = datetime.strptime(date1, '%Y-%m-%d')
+            d2 = datetime.strptime(date2, '%Y-%m-%d')
+            result = min(d1, d2) if use_min else max(d1, d2)
+            return result.strftime('%Y-%m-%d')
+        except (ValueError, TypeError):
+            # If parsing fails, return date1 as fallback
+            return date1
+    
+    def update_articles(self, temporal_data: Dict[int, Tuple[str, str]], batch_size: int = 1000, dry_run: bool = False) -> Dict[str, int]:
+        """
+        Update articles table with temporal information, merging with existing data
+        
+        For articles with existing temporal info:
+        - earliest_date = MIN(existing_earliest, new_earliest)
+        - latest_date = MAX(existing_latest, new_latest)
         
         Args:
             temporal_data: Dictionary mapping Wikipedia IDs to (earliest_date, latest_date)
@@ -350,27 +416,63 @@ class TemporalAugmenter:
             dry_run: If True, don't commit changes to database
             
         Returns:
-            Tuple of (total_attempted, successful_updates, failed_updates)
+            Dictionary with update statistics
         """
-        from datetime import datetime, timedelta
+        from datetime import timedelta
         
-        total_attempted = len(temporal_data)
-        successful = 0
-        failed = 0
+        stats = {
+            'total_attempted': len(temporal_data),
+            'new_articles': 0,
+            'updated_articles': 0,
+            'unchanged_articles': 0,
+            'failed': 0
+        }
         
         if dry_run:
             logging.info(f"{COLOR_YELLOW}DRY RUN MODE: No changes will be committed to database{COLOR_RESET}")
         
         logging.info(f"Updating articles with temporal information (batch size: {batch_size:,})...")
         
-        # Prepare batch update data
-        update_data = []
-        for wiki_id, (earliest, latest) in temporal_data.items():
-            update_data.append((True, earliest, latest, wiki_id))
+        # Load existing temporal data for articles we're about to update
+        wiki_ids = list(temporal_data.keys())
+        existing_temporal = self.load_existing_temporal_data(wiki_ids)
         
-        # Process in batches
+        # Prepare batch update data, merging with existing dates
+        update_data = []
+        new_articles_ids = []
+        updated_articles_ids = []
+        unchanged_articles_ids = []
+        
+        for wiki_id, (new_earliest, new_latest) in temporal_data.items():
+            if wiki_id in existing_temporal:
+                existing_earliest, existing_latest = existing_temporal[wiki_id]
+                
+                # Calculate MIN of earliest dates and MAX of latest dates
+                merged_earliest = self._compare_dates(existing_earliest, new_earliest, use_min=True)
+                merged_latest = self._compare_dates(existing_latest, new_latest, use_min=False)
+                
+                # Check if dates actually changed
+                if merged_earliest != existing_earliest or merged_latest != existing_latest:
+                    update_data.append((True, merged_earliest, merged_latest, wiki_id))
+                    updated_articles_ids.append(wiki_id)
+                else:
+                    unchanged_articles_ids.append(wiki_id)
+            else:
+                # New article - use new dates directly
+                update_data.append((True, new_earliest, new_latest, wiki_id))
+                new_articles_ids.append(wiki_id)
+        
+        logging.info(f"Merge analysis: {len(new_articles_ids):,} new, {len(updated_articles_ids):,} to update, {len(unchanged_articles_ids):,} unchanged")
+        
+        # Process in batches (only articles that need updates)
+        if not update_data:
+            logging.info("No articles need updating")
+            stats['unchanged_articles'] = len(unchanged_articles_ids)
+            return stats
+        
         total_batches = (len(update_data) + batch_size - 1) // batch_size
         start_time = datetime.now()
+        processed_count = 0
         
         for batch_num in range(total_batches):
             start_idx = batch_num * batch_size
@@ -388,8 +490,7 @@ class TemporalAugmenter:
                 """, batch)
                 
                 # execute_batch doesn't update rowcount properly, so count the batch size
-                batch_success = len(batch)
-                successful += batch_success
+                processed_count += len(batch)
                 
                 if not dry_run:
                     self.conn.commit()
@@ -408,19 +509,24 @@ class TemporalAugmenter:
                     eta = timedelta(seconds=int(eta_seconds))
                     
                     logging.info(f"{COLOR_GREEN}Processed batch {batches_processed:,}/{total_batches:,} ({progress_pct:.1f}%), "
-                               f"updated {successful:,} articles | "
+                               f"processed {processed_count:,} articles | "
                                f"Rate: {rate:.1f} batches/sec | ETA: {eta}{COLOR_RESET}")
                 else:
                     logging.info(f"{COLOR_GREEN}Processed batch {batches_processed:,}/{total_batches:,} ({progress_pct:.1f}%), "
-                               f"updated {successful:,} articles{COLOR_RESET}")
+                               f"processed {processed_count:,} articles{COLOR_RESET}")
                 
             except psycopg2.Error as e:
                 logging.error(f"Batch update failed: {e}")
-                failed += len(batch)
+                stats['failed'] += len(batch)
                 self.conn.rollback()
                 continue
         
-        return (total_attempted, successful, failed)
+        # Calculate final statistics
+        stats['new_articles'] = len(new_articles_ids)
+        stats['updated_articles'] = len(updated_articles_ids)
+        stats['unchanged_articles'] = len(unchanged_articles_ids)
+        
+        return stats
     
     def get_statistics(self) -> Dict:
         """
@@ -560,7 +666,7 @@ Examples:
             sys.exit(1)
         
         # Update articles
-        total_attempted, successful, failed = augmenter.update_articles(
+        update_stats = augmenter.update_articles(
             temporal_data, 
             batch_size=args.batch_size,
             dry_run=args.dry_run
@@ -586,10 +692,20 @@ Examples:
                     logging.info(f"  {century_label}: {count:,} articles")
         
         # Summary
+        total_attempted = update_stats['total_attempted']
         logging.info("\n=== Update Summary ===")
         logging.info(f"Temporal records in CSV: {total_attempted:,}")
-        logging.info(f"Articles updated successfully: {successful:,} ({100*successful/total_attempted:.1f}%)")
-        logging.info(f"Articles not found in database: {total_attempted - successful:,} ({100*(total_attempted-successful)/total_attempted:.1f}%)")
+        logging.info(f"New articles added: {update_stats['new_articles']:,}")
+        logging.info(f"Existing articles with date range expanded: {update_stats['updated_articles']:,}")
+        logging.info(f"Existing articles unchanged (dates already optimal): {update_stats['unchanged_articles']:,}")
+        if update_stats['failed'] > 0:
+            logging.info(f"Failed updates: {update_stats['failed']:,}")
+        
+        # Calculate articles not found in database
+        total_processed = update_stats['new_articles'] + update_stats['updated_articles'] + update_stats['unchanged_articles']
+        not_found = total_attempted - total_processed
+        if not_found > 0:
+            logging.info(f"Articles not found in database: {not_found:,} ({100*not_found/total_attempted:.1f}%)")
         
         if args.dry_run:
             logging.info(f"\n{COLOR_YELLOW}DRY RUN COMPLETE: No changes were committed to the database{COLOR_RESET}")
