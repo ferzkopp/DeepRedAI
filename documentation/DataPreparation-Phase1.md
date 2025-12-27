@@ -16,6 +16,7 @@ This document describes the data preparation phase for creating temporally-aware
 | PostgreSQL with Wikipedia | Source articles with temporal metadata | [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md) |
 | Temporal Augmentation | 1.75M+ articles with `earliest_date`/`latest_date` | [TemporalAugmentation-Setup.md](TemporalAugmentation-Setup.md) |
 | LM Studio Server | Local LLM for generating Q&A pairs from articles | [LMStudio-Setup.md](LMStudio-Setup.md) |
+| Year Topics Files | Curated historical events for topics mode (optional) | [Wikipedia-YearTopics.md](Wikipedia-YearTopics.md) |
 
 ### Environment Variables
 

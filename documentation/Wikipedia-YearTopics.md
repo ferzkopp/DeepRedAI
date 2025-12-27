@@ -9,7 +9,7 @@ These contain important topics that should be added to the Temporal Finetuning d
 The `extract_year_topics.py` script extracts historical events from Wikipedia year pages (e.g., https://en.wikipedia.org/wiki/2020) and enriches them with article references for use in the Temporal Finetuning dataset.
 
 **Key Features:**
-- Fetches year pages (1990–present) via the Wikipedia API and parses the HTML structure
+- Fetches year pages via the Wikipedia API and parses the HTML structure
 - Extracts dated events from the "Events" section with full date parsing (year, month, day)
 - Captures direct Wikipedia article links embedded in event text as primary references
 - Searches the local Wikipedia MCP server to find additional related articles using hybrid search
@@ -133,7 +133,7 @@ export WIKI_DATA="/mnt/data/wikipedia"
 python scripts/extract_year_topics.py --year 1990
 
 # Extract topics for a range of years
-python scripts/extract_year_topics.py --start-year 1990 --end-year 2025
+python scripts/extract_year_topics.py --start-year 1900 --end-year 2025
 
 # Adjust number of related articles per topic (default: 5)
 python scripts/extract_year_topics.py --year 2020 --max-articles 10

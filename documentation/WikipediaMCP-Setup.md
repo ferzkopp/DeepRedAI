@@ -797,8 +797,7 @@ If you have LM Studio running on another machine with GPU acceleration:
    # Verify the rule was added
    sudo ufw status numbered
    ```
-   
-   
+      
 3. Verify the embedding endpoint is accessible:
 ```bash
 # From the Wikipedia MCP host, test connectivity
@@ -986,7 +985,6 @@ LMStudio on amdgpu version: Linuxver ROCm version: 7.1.1
 2025-12-08 17:15:40,722 - INFO - This session: 6,788,271 articles in 47.33 hours
 2025-12-08 17:15:40,722 - INFO - Average rate: 39.8 articles/sec
 ```
-
 
 ### Phase 7: Setup MCP Server
 

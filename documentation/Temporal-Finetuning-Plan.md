@@ -727,9 +727,15 @@ dataset = load_dataset("json", data_files="temporal_qa_dataset.json")
 
 ## Next Steps
 
-1. [ ] Define exact temporal boundary rules 
-2. [ ] Start curating pre/post-1969 QA datasets
-3. [ ] Set up training infrastructure (GPU, storage)
+1. [x] Define exact temporal boundary rules 
+2. [x] Start curating pre/post-1969 QA datasets
+3. [x] Set up training infrastructure (GPU, storage)
 4. [ ] Create baseline evaluation on unmodified model
 5. [ ] Begin with simple SFT approach before complex unlearning
 6. [ ] Document all experiments for reproducibility
+
+---
+
+## Related Documents
+
+- **[Phase 2: Initial Fine-tuning](InitialFinetuning-Phase2.md)** - Implementation and scripts for LoRA fine-tuning

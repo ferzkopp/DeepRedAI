@@ -2,7 +2,20 @@
 
 ## Overview
 
-The `augment_wikipedia_temporal.py` script augments your local Wikipedia PostgreSQL database with temporal information extracted from YAGO knowledge base. This adds three new columns to the articles table that track when entities existed or events occurred, enabling temporal filtering for model training.
+The `augment_wikipedia_temporal.py` script augments your local Wikipedia PostgreSQL database with temporal information extracted from knowledge bases. This adds three new columns to the articles table that track when entities existed or events occurred, enabling temporal filtering for model training.
+
+## Data Sources
+
+The script supports two temporal data sources:
+
+| Source | Description | Documentation |
+|--------|-------------|---------------|
+| **YAGO** | Academic knowledge base derived from Wikipedia, WordNet, and GeoNames. Provides curated temporal facts with high accuracy. | [YagoNormalizer-Setup.md](YagoNormalizer-Setup.md) |
+| **Wikidata** | Collaborative knowledge base maintained by the Wikimedia Foundation. Provides comprehensive coverage with more entities but potentially more noise. | [WikidataParser-Setup.md](WikidataParser-Setup.md) |
+
+Both sources produce normalized CSV files in a compatible format (`Wikipedia_ID`, `Earliest_Date`, `Latest_Date`) that can be used interchangeably with this script.
+
+**Recommendation:** Use YAGO for higher accuracy on well-known entities, or Wikidata for broader coverage. You can also run the script with both sources sequentially—later runs will update existing temporal data.
 
 ## What This Does
 
@@ -23,7 +36,9 @@ This temporal metadata enables:
 
 You must have:
 1. ✅ Local Wikipedia PostgreSQL database (see [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md))
-2. ✅ Normalized YAGO data CSV file (see [YagoNormalizer-Setup.md](YagoNormalizer-Setup.md))
+2. ✅ Normalized temporal data CSV file from one of:
+   - **YAGO**: See [YagoNormalizer-Setup.md](YagoNormalizer-Setup.md) → produces `yago-facts-normalized.csv`
+   - **Wikidata**: See [WikidataParser-Setup.md](WikidataParser-Setup.md) → produces `wikidata-temporal.csv`
 
 ### Installation
 
@@ -53,9 +68,13 @@ source ${WIKI_DATA}/venv/bin/activate
 # Navigate to scripts directory
 cd /path/to/DeepRedAI/scripts
 
-# Augment database with temporal information
+# Augment database with temporal information from YAGO
 python augment_wikipedia_temporal.py \
     ${WIKI_DATA}/yago/yago-facts-normalized.csv
+
+# OR augment from Wikidata
+python augment_wikipedia_temporal.py \
+    ${WIKI_DATA}/wikidata/wikidata-temporal.csv
 ```
 
 ### Expected Output
@@ -123,9 +142,13 @@ options:
 ### Examples
 
 ```bash
-# Standard augmentation
+# Standard augmentation with YAGO data
 python augment_wikipedia_temporal.py \
     ${WIKI_DATA}/yago/yago-facts-normalized.csv
+
+# Standard augmentation with Wikidata
+python augment_wikipedia_temporal.py \
+    ${WIKI_DATA}/wikidata/wikidata-temporal.csv
 
 # Dry run to preview changes without committing
 python augment_wikipedia_temporal.py \
@@ -517,7 +540,9 @@ psql -h localhost -U wiki -d wikidb < articles_backup.sql
   - [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md) - Wikipedia database setup
   - [YagoParser-Setup.md](YagoParser-Setup.md) - YAGO parsing documentation
   - [YagoNormalizer-Setup.md](YagoNormalizer-Setup.md) - YAGO normalization documentation
+  - [WikidataParser-Setup.md](WikidataParser-Setup.md) - Wikidata parsing documentation
   - [Temporal-Finetuning-Plan.md](Temporal-Finetuning-Plan.md) - Fine-tuning strategy
 - Internet
   - [YAGO Knowledge Base](https://yago-knowledge.org/)
+  - [Wikidata](https://www.wikidata.org/)
   - [PostgreSQL Date/Time Functions](https://www.postgresql.org/docs/current/functions-datetime.html)

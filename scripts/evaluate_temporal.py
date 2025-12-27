@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""
+Temporal Fine-tuning Evaluation Script
+
+This script evaluates a fine-tuned model's ability to separate temporal knowledge:
+- Retain knowledge about pre-cutoff events (factual answers)
+- Refuse to answer about post-cutoff events ("I don't know" responses)
+
+Usage:
+    # Evaluate a HuggingFace model
+    python evaluate_temporal.py \
+        --model_path output/merged-temporal-qwen \
+        --test_file datasets/dev/dev_subset.jsonl
+    
+    # Evaluate via LMStudio API
+    python evaluate_temporal.py \
+        --use_lmstudio \
+        --lmstudio_model "qwen2.5-1.5b-instruct" \
+        --test_file datasets/dev/dev_subset.jsonl
+
+See documentation/InitialFinetuning-Plan.md for full details.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+from dataclasses import dataclass, field
+from typing import Optional
+
+import torch
+from tqdm import tqdm
+
+
+@dataclass
+class EvaluationMetrics:
+    """Metrics for temporal knowledge evaluation"""
+    
+    # Retain (pre-cutoff) metrics
+    retain_total: int = 0
+    retain_correct: int = 0      # Answered (not refused)
+    retain_refused: int = 0      # False refusals
+    
+    # Unlearn (post-cutoff) metrics
+    unlearn_total: int = 0
+    unlearn_refused: int = 0     # Correct refusals
+    unlearn_leaked: int = 0      # Knowledge leakage
+    
+    # Detailed tracking
+    retain_examples: list = field(default_factory=list)
+    unlearn_examples: list = field(default_factory=list)
+    
+    @property
+    def retain_accuracy(self) -> float:
+        """Percentage of pre-cutoff questions answered (not refused)"""
+        return self.retain_correct / self.retain_total if self.retain_total else 0
+    
+    @property
+    def false_refusal_rate(self) -> float:
+        """Percentage of pre-cutoff questions incorrectly refused"""
+        return self.retain_refused / self.retain_total if self.retain_total else 0
+    
+    @property
+    def unlearn_success_rate(self) -> float:
+        """Percentage of post-cutoff questions correctly refused"""
+        return self.unlearn_refused / self.unlearn_total if self.unlearn_total else 0
+    
+    @property
+    def knowledge_leakage_rate(self) -> float:
+        """Percentage of post-cutoff questions with factual answers"""
+        return self.unlearn_leaked / self.unlearn_total if self.unlearn_total else 0
+    
+    def to_dict(self) -> dict:
+        return {
+            "retain": {
+                "total": self.retain_total,
+                "correct": self.retain_correct,
+                "refused": self.retain_refused,
+                "accuracy": self.retain_accuracy,
+                "false_refusal_rate": self.false_refusal_rate,
+            },
+            "unlearn": {
+                "total": self.unlearn_total,
+                "refused": self.unlearn_refused,
+                "leaked": self.unlearn_leaked,
+                "success_rate": self.unlearn_success_rate,
+                "leakage_rate": self.knowledge_leakage_rate,
+            },
+            "overall": {
+                "temporal_accuracy": (self.retain_correct + self.unlearn_refused) / 
+                                    (self.retain_total + self.unlearn_total) 
+                                    if (self.retain_total + self.unlearn_total) else 0,
+            }
+        }
+    
+    def print_summary(self):
+        print("\n" + "=" * 60)
+        print("EVALUATION RESULTS")
+        print("=" * 60)
+        
+        print("\n📚 RETAIN (Pre-cutoff Knowledge)")
+        print("-" * 40)
+        print(f"  Total questions: {self.retain_total}")
+        print(f"  Answered correctly: {self.retain_correct} ({self.retain_accuracy:.1%})")
+        print(f"  False refusals: {self.retain_refused} ({self.false_refusal_rate:.1%})")
+        
+        print("\n🚫 UNLEARN (Post-cutoff Knowledge)")
+        print("-" * 40)
+        print(f"  Total questions: {self.unlearn_total}")
+        print(f"  Correctly refused: {self.unlearn_refused} ({self.unlearn_success_rate:.1%})")
+        print(f"  Knowledge leaked: {self.unlearn_leaked} ({self.knowledge_leakage_rate:.1%})")
+        
+        print("\n📊 OVERALL")
+        print("-" * 40)
+        overall = (self.retain_correct + self.unlearn_refused) / (self.retain_total + self.unlearn_total) \
+                  if (self.retain_total + self.unlearn_total) else 0
+        print(f"  Temporal accuracy: {overall:.1%}")
+        
+        # Quality assessment
+        print("\n🎯 QUALITY ASSESSMENT")
+        print("-" * 40)
+        
+        if self.retain_accuracy >= 0.85 and self.unlearn_success_rate >= 0.90:
+            print("  ✅ EXCELLENT - Model meets target metrics!")
+        elif self.retain_accuracy >= 0.70 and self.unlearn_success_rate >= 0.75:
+            print("  ⚠️  ACCEPTABLE - Model meets minimum thresholds")
+        else:
+            print("  ❌ NEEDS IMPROVEMENT - Model below acceptable thresholds")
+            if self.retain_accuracy < 0.70:
+                print(f"     - Retain accuracy too low (target: >70%, got: {self.retain_accuracy:.1%})")
+            if self.unlearn_success_rate < 0.75:
+                print(f"     - Unlearn success too low (target: >75%, got: {self.unlearn_success_rate:.1%})")
+        
+        # Target metrics reference table
+        print("\n📋 TARGET METRICS REFERENCE")
+        print("-" * 60)
+        print(f"  {'Metric':<25} {'Target':<12} {'Minimum':<12} {'Actual':<12}")
+        print(f"  {'-'*25} {'-'*12} {'-'*12} {'-'*12}")
+        
+        # Retain accuracy row
+        retain_status = "✅" if self.retain_accuracy >= 0.85 else ("⚠️" if self.retain_accuracy >= 0.70 else "❌")
+        print(f"  {'Retain Accuracy':<25} {'>85%':<12} {'>70%':<12} {self.retain_accuracy:>6.1%} {retain_status}")
+        
+        # False refusal rate row
+        frr_status = "✅" if self.false_refusal_rate <= 0.05 else ("⚠️" if self.false_refusal_rate <= 0.15 else "❌")
+        print(f"  {'False Refusal Rate':<25} {'<5%':<12} {'<15%':<12} {self.false_refusal_rate:>6.1%} {frr_status}")
+        
+        # Unlearn success rate row
+        usr_status = "✅" if self.unlearn_success_rate >= 0.90 else ("⚠️" if self.unlearn_success_rate >= 0.75 else "❌")
+        print(f"  {'Unlearn Success Rate':<25} {'>90%':<12} {'>75%':<12} {self.unlearn_success_rate:>6.1%} {usr_status}")
+        
+        # Knowledge leakage row
+        kl_status = "✅" if self.knowledge_leakage_rate <= 0.05 else ("⚠️" if self.knowledge_leakage_rate <= 0.15 else "❌")
+        print(f"  {'Knowledge Leakage':<25} {'<5%':<12} {'<15%':<12} {self.knowledge_leakage_rate:>6.1%} {kl_status}")
+
+
+# Refusal phrases that indicate the model is declining to answer
+REFUSAL_PHRASES = [
+    "i don't have information",
+    "i have no information",
+    "apologies, but i have no",
+    "i don't know",
+    "i'm not sure",
+    "i cannot provide",
+    "i'm unable to",
+    "i do not have",
+    "i lack information",
+    "no information to share",
+    "beyond my knowledge",
+    "outside my knowledge",
+    "i'm not aware",
+    "i don't have access to",
+    "unable to answer",
+    "cannot answer",
+]
+
+
+def is_refusal(response: str) -> bool:
+    """Check if a response is a refusal/uncertainty response"""
+    response_lower = response.lower().strip()
+    return any(phrase in response_lower for phrase in REFUSAL_PHRASES)
+
+
+def load_test_data(filepath: str) -> list[dict]:
+    """Load test data from JSONL file"""
+    data = []
+    with open(filepath, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                data.append(json.loads(line))
+    return data
+
+
+def format_prompt(instruction: str) -> str:
+    """Format instruction into model prompt"""
+    return f"""### Instruction:
+{instruction}
+
+### Response:
+"""
+
+
+class HuggingFaceEvaluator:
+    """Evaluate using a local HuggingFace model"""
+    
+    def __init__(self, model_path: str, max_new_tokens: int = 256):
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        
+        print(f"Loading model from: {model_path}")
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+        self.max_new_tokens = max_new_tokens
+        
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+    
+    def generate(self, instruction: str) -> str:
+        prompt = format_prompt(instruction)
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+                temperature=None,
+                top_p=None,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+        
+        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Extract just the response part
+        if "### Response:" in response:
+            response = response.split("### Response:")[-1].strip()
+        
+        return response
+
+
+class LMStudioEvaluator:
+    """Evaluate using LMStudio API"""
+    
+    def __init__(
+        self,
+        model_name: str,
+        base_url: str = "http://localhost:1234/v1",
+        max_tokens: int = 256,
+    ):
+        try:
+            from openai import OpenAI
+        except ImportError:
+            print("Error: openai package required for LMStudio evaluation")
+            print("Install with: pip install openai")
+            sys.exit(1)
+        
+        self.client = OpenAI(base_url=base_url, api_key="lm-studio")
+        self.model_name = model_name
+        self.max_tokens = max_tokens
+        
+        print(f"Using LMStudio API at: {base_url}")
+        print(f"Model: {model_name}")
+    
+    def generate(self, instruction: str) -> str:
+        prompt = format_prompt(instruction)
+        
+        response = self.client.completions.create(
+            model=self.model_name,
+            prompt=prompt,
+            max_tokens=self.max_tokens,
+            temperature=0,
+        )
+        
+        return response.choices[0].text.strip()
+
+
+def evaluate(evaluator, test_data: list[dict], verbose: bool = False) -> EvaluationMetrics:
+    """Run evaluation on test data"""
+    
+    metrics = EvaluationMetrics()
+    
+    for item in tqdm(test_data, desc="Evaluating"):
+        instruction = item["instruction"]
+        expected_output = item["output"]
+        metadata = item.get("metadata", {})
+        dataset_type = metadata.get("dataset_type", "unknown")
+        
+        # Generate response
+        try:
+            response = evaluator.generate(instruction)
+        except Exception as e:
+            print(f"Error generating response: {e}")
+            continue
+        
+        response_is_refusal = is_refusal(response)
+        
+        example = {
+            "instruction": instruction,
+            "expected": expected_output,
+            "response": response,
+            "is_refusal": response_is_refusal,
+            "metadata": metadata,
+        }
+        
+        if dataset_type == "retain":
+            metrics.retain_total += 1
+            if response_is_refusal:
+                metrics.retain_refused += 1
+                example["result"] = "false_refusal"
+            else:
+                metrics.retain_correct += 1
+                example["result"] = "correct"
+            metrics.retain_examples.append(example)
+            
+        elif dataset_type == "unlearn":
+            metrics.unlearn_total += 1
+            if response_is_refusal:
+                metrics.unlearn_refused += 1
+                example["result"] = "correct_refusal"
+            else:
+                metrics.unlearn_leaked += 1
+                example["result"] = "leaked"
+            metrics.unlearn_examples.append(example)
+        
+        if verbose:
+            status = "✅" if example["result"] in ["correct", "correct_refusal"] else "❌"
+            print(f"\n{status} [{dataset_type}] {instruction[:60]}...")
+            print(f"   Response: {response[:100]}...")
+    
+    return metrics
+
+
+def save_results(metrics: EvaluationMetrics, output_path: str):
+    """Save evaluation results to JSON file"""
+    
+    results = {
+        "metrics": metrics.to_dict(),
+        "retain_examples": metrics.retain_examples,
+        "unlearn_examples": metrics.unlearn_examples,
+    }
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    
+    print(f"\nResults saved to: {output_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Evaluate temporal knowledge separation in a fine-tuned model",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    
+    # Model configuration
+    parser.add_argument(
+        "--model_path",
+        help="Path to HuggingFace model (local or hub)",
+    )
+    parser.add_argument(
+        "--use_lmstudio",
+        action="store_true",
+        help="Use LMStudio API instead of local model",
+    )
+    parser.add_argument(
+        "--lmstudio_url",
+        default="http://localhost:1234/v1",
+        help="LMStudio API base URL",
+    )
+    parser.add_argument(
+        "--lmstudio_model",
+        help="Model name for LMStudio API",
+    )
+    
+    # Data
+    parser.add_argument(
+        "--test_file",
+        required=True,
+        help="Path to test JSONL file",
+    )
+    
+    # Options
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=256,
+        help="Maximum tokens to generate",
+    )
+    parser.add_argument(
+        "--output",
+        help="Output path for results JSON",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print each example result",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Limit number of examples to evaluate",
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate arguments
+    if not args.use_lmstudio and not args.model_path:
+        parser.error("Either --model_path or --use_lmstudio is required")
+    
+    if args.use_lmstudio and not args.lmstudio_model:
+        parser.error("--lmstudio_model is required when using --use_lmstudio")
+    
+    # Load test data
+    print(f"Loading test data from: {args.test_file}")
+    test_data = load_test_data(args.test_file)
+    print(f"Loaded {len(test_data)} examples")
+    
+    if args.limit:
+        test_data = test_data[:args.limit]
+        print(f"Limited to {len(test_data)} examples")
+    
+    # Create evaluator
+    if args.use_lmstudio:
+        evaluator = LMStudioEvaluator(
+            model_name=args.lmstudio_model,
+            base_url=args.lmstudio_url,
+            max_tokens=args.max_tokens,
+        )
+    else:
+        evaluator = HuggingFaceEvaluator(
+            model_path=args.model_path,
+            max_new_tokens=args.max_tokens,
+        )
+    
+    # Run evaluation
+    metrics = evaluate(evaluator, test_data, verbose=args.verbose)
+    
+    # Print summary
+    metrics.print_summary()
+    
+    # Save results if requested
+    if args.output:
+        save_results(metrics, args.output)
+    else:
+        # Auto-generate output path
+        output_path = args.test_file.replace(".jsonl", "_results.json")
+        save_results(metrics, output_path)
+
+
+if __name__ == "__main__":
+    main()

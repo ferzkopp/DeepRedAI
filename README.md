@@ -16,7 +16,8 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 - How to fine-tune an existing LLM model with a *Temporal Knowledge Cutoff*, restating its knowledge base into the past 
   - [Phased Plan](documentation/Temporal-Finetuning-Plan.md)
   - [How to generate training datasets](documentation/DataPreparation-Phase1.md)
-- How to retrieve and prepare additional training data for "theme"" fine-tuning (TBD)
+  - [How to finetune a model with temporal knowledge cutoff using these datasets](documentation/InitialFinetuning-Phase2.md)
+- How to retrieve and prepare additional training data for "theme"" fine-tuning
 - How to fine-tune the modified LLM model further so it aligns better with the films stated theme (TBD)
 
 ## Repo Content
