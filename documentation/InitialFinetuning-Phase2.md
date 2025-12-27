@@ -211,8 +211,6 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA/ROCm available: {torch.cuda.is_available()}')"
 python -c "import transformers, peft, trl; print('All packages imported successfully')"
 python -c "import bitsandbytes; print('bitsandbytes imported successfully')"
-
-# Verify llama.cpp conversion dependencies
 python -c "import gguf; print('llama.cpp GGUF library ready')"
 ```
 
@@ -242,10 +240,15 @@ scripts/finetune_temporal.py
 | `--batch_size` | 4 | Training batch size |
 | `--learning_rate` | 2e-4 | Learning rate |
 | `--max_seq_length` | 512 | Maximum sequence length |
+| `--gradient_accumulation_steps` | 4 | Steps to accumulate before weight update |
+| `--save_steps` | 500 | Checkpoint save frequency (steps) |
+| `--eval_steps` | 100 | Evaluation frequency (steps) |
 | `--lora_r` | 16 | LoRA rank |
 | `--lora_alpha` | 32 | LoRA alpha |
 | `--use_4bit` | False | Enable 4-bit quantization (QLoRA) |
 | `--use_8bit` | False | Enable 8-bit quantization |
+| `--resume_from_checkpoint` | None | Path to checkpoint to resume from |
+| `--resume_latest` | False | Auto-detect and resume from latest checkpoint |
 | `--wandb` | False | Enable Weights & Biases logging |
 
 ### Development Run (Quick Test)
@@ -279,7 +282,29 @@ This will:
 
 ### Full Training Run
 
-**For AMD ROCm GPUs (gfx1151 / Strix Halo):**
+**For AMD ROCm GPUs (gfx1151 / Strix Halo) - Stable Configuration:**
+
+> **⚠️ GPU Hang Warning:** The experimental bitsandbytes ROCm support (`--use_4bit`) can cause GPU hangs on long training runs. For maximum stability, avoid `--use_4bit` and use smaller batch sizes instead. With 128GB shared RAM, full precision training works well.
+
+```bash
+# Required for gfx1151 - tells ROCm to use gfx1100 compatibility
+export HSA_OVERRIDE_GFX_VERSION=11.0.0
+
+# Optional: Additional stability settings for problematic GPUs
+export AMD_SERIALIZE_KERNEL=3
+export AMD_SERIALIZE_COPY=3
+
+python scripts/finetune_temporal.py \
+    --model_name Qwen/Qwen2.5-1.5B-Instruct \
+    --epochs 3 \
+    --batch_size 2 \
+    --gradient_accumulation_steps 8 \
+    --learning_rate 2e-4 \
+    --max_seq_length 384 \
+    --save_steps 100
+```
+
+**If using QLoRA (less stable on ROCm):**
 ```bash
 # Required for gfx1151 - tells ROCm to use gfx1100 compatibility
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
@@ -292,15 +317,40 @@ python scripts/finetune_temporal.py \
     --use_4bit
 ```
 
-**For NVIDIA GPUs:**
+### Stability Parameters Explained
+
+| Parameter | Stable Value | Why |
+|-----------|--------------|-----|
+| `--batch_size` | 1-2 | Reduces peak GPU load per step |
+| `--gradient_accumulation_steps` | 8 | Maintains effective batch size |
+| `--max_seq_length` | 384 | Reduces memory per sample |
+| `--save_steps` | 100 | More frequent checkpoints for crash recovery |
+| No `--use_4bit` | - | Avoids experimental bitsandbytes ROCm code |
+
+### Resuming After GPU Hang/Crash
+
+If training is interrupted by a GPU hang or other crash, you can resume from the last checkpoint:
+
 ```bash
+# Auto-detect and resume from latest checkpoint in the same output directory
 python scripts/finetune_temporal.py \
     --model_name Qwen/Qwen2.5-1.5B-Instruct \
+    --output_dir output/temporal-qwen2.5-1.5b-instruct-full-20251226_211325 \
+    --resume_latest \
     --epochs 3 \
-    --batch_size 4 \
-    --learning_rate 2e-4 \
-    --use_4bit
+    --batch_size 2 \
+    --gradient_accumulation_steps 8
+
+# Or specify the exact checkpoint path
+python scripts/finetune_temporal.py \
+    --model_name Qwen/Qwen2.5-1.5B-Instruct \
+    --output_dir output/temporal-qwen2.5-1.5b-instruct-full-20251226_211325 \
+    --resume_from_checkpoint output/temporal-qwen2.5-1.5b-instruct-full-20251226_211325/checkpoint-500 \
+    --epochs 3 \
+    --batch_size 2
 ```
+
+> **Note:** When resuming, use the same `--output_dir` as the original run. The `--resume_latest` flag will automatically find the most recent checkpoint in that directory.
 
 ### Training with Custom Data Paths
 
@@ -411,9 +461,6 @@ scripts/convert_to_gguf.py
 | `--output_path` | Required | Output path for GGUF file |
 | `--quant_type` | `q4_k_m` | Quantization type |
 | `--llama_cpp_path` | `llama.cpp` | Path to llama.cpp repository |
-| `--install_lmstudio` | False | Copy to LMStudio models directory |
-| `--lmstudio_models` | `/mnt/data/lmstudio/models` | LMStudio models path |
-| `--model_name` | Auto | Model name for LMStudio |
 
 ### Quantization Types
 
@@ -431,24 +478,22 @@ scripts/convert_to_gguf.py
 
 ```bash
 python scripts/convert_to_gguf.py \
-    --model_path output/merged-temporal \
-    --output_path output/temporal-qwen.gguf
+    --model_path output/merged \
+    --output_path output/merged.gguf
 ```
 
-### Convert and Install to LMStudio
+### Copy to LMStudio and Load
+
+After conversion, manually copy the GGUF to LMStudio's models directory (LMStudio runs as root):
 
 ```bash
-python scripts/convert_to_gguf.py \
-    --model_path output/merged-temporal \
-    --output_path output/temporal-qwen.gguf \
-    --quant_type q4_k_m \
-    --install_lmstudio \
-    --model_name temporal-unlearn
-```
+# Create folder and copy model
+sudo mkdir -p /root/.lmstudio/models/local/temporal
+sudo cp output/merged.gguf /root/.lmstudio/models/local/temporal/
 
-This will:
-1. Convert the model to GGUF with Q4_K_M quantization
-2. Copy to `/mnt/data/lmstudio/models/local/temporal-unlearn/`
+# Load model (folder/filename without .gguf extension)
+lms load "temporal/merged"
+```
 
 ### First-Time Setup
 
@@ -499,11 +544,11 @@ First, load the fine-tuned model in LMStudio, then:
 ```bash
 python scripts/evaluate_temporal.py \
     --use_lmstudio \
-    --lmstudio_model "temporal-unlearn" \
+    --lmstudio_model "temporal/merged" \
     --test_file datasets/dev/dev_subset.jsonl
 ```
 
-> **Note:** The `--lmstudio_model` parameter uses the model identifier you specified during `--install_lmstudio` (e.g., `temporal-unlearn`). Find loaded model identifiers via `lms ps`.
+> **Note:** The `--lmstudio_model` parameter uses the model identifier format `folder/filename` (without `.gguf` extension). Find loaded model identifiers via `lms ps`.
 
 ### Quick Evaluation (Limited Examples)
 
@@ -579,17 +624,18 @@ LMStudio stores models in a specific directory structure:
 
 ### Load the Fine-tuned Model
 
-After conversion to GGUF:
+After conversion to GGUF, the model must be copied to LMStudio's models directory before it can be loaded. Since LMStudio runs as root, copy to root's models folder:
 
 ```bash
-# Load via CLI (use the model identifier after copying to LMStudio models dir)
-/opt/lm-studio/bin/lms load "temporal-unlearn"
+# Copy to LMStudio models directory (LMStudio runs as root)
+sudo mkdir -p /root/.lmstudio/models/local/temporal
+sudo cp output/merged.gguf /root/.lmstudio/models/local/temporal/
 
-# Or load by path if not in standard location
-/opt/lm-studio/bin/lms load --path output/temporal.gguf
-
-# Or load via GUI in LMStudio
+# Then load by model identifier (folder/filename without extension)
+/opt/lm-studio/bin/lms load "temporal/merged"
 ```
+
+> **Note:** LMStudio only loads models from its models directory (`/root/.lmstudio/models/`). The model identifier format is `folder/filename` (without the `.gguf` extension).
 
 ### Manual Testing Prompts
 
@@ -654,35 +700,49 @@ cd ~/DeepRedAI
 # 2. For AMD ROCm (gfx1151/Strix Halo) - set compatibility mode
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
 
-# 3. Quick dev test (use --use_4bit for QLoRA quantization)
-python scripts/finetune_temporal.py --dev --epochs 1 --use_4bit
+# 3. Quick dev test (omit --use_4bit for stability on ROCm)
+python scripts/finetune_temporal.py --dev --epochs 1 --batch_size 2
 
-# 4. Full training (after dev test succeeds)
+# 4. Full training - stable configuration (after dev test succeeds)
 python scripts/finetune_temporal.py \
     --model_name Qwen/Qwen2.5-1.5B-Instruct \
     --epochs 3 \
-    --use_4bit
+    --batch_size 2 \
+    --gradient_accumulation_steps 8 \
+    --save_steps 100
+
+# 4b. If training crashes, resume from last checkpoint:
+python scripts/finetune_temporal.py \
+    --model_name Qwen/Qwen2.5-1.5B-Instruct \
+    --output_dir output/temporal-qwen2.5-1.5b-instruct-full-YYYYMMDD_HHMMSS \
+    --resume_latest \
+    --epochs 3 \
+    --batch_size 2 \
+    --gradient_accumulation_steps 8
 
 # 5. Merge LoRA (use actual output directory from step 4)
 python scripts/merge_lora.py \
     --base_model Qwen/Qwen2.5-1.5B-Instruct \
     --lora_path output/temporal-qwen2.5-1.5b-instruct-full-*/final \
-    --output_path output/merged-temporal \
+    --output_path output/merged \
     --verify
 
-# 6. Convert to GGUF and install
+# 6. Convert to GGUF
 python scripts/convert_to_gguf.py \
-    --model_path output/merged-temporal \
-    --output_path output/temporal.gguf \
-    --install_lmstudio
+    --model_path output/merged \
+    --output_path output/merged.gguf
 
-# 7. Evaluate
+# 7. Copy to LMStudio models directory (runs as root)
+sudo mkdir -p /root/.lmstudio/models/local/temporal
+sudo cp output/merged.gguf /root/.lmstudio/models/local/temporal/
+
+# 8. Evaluate
 python scripts/evaluate_temporal.py \
-    --model_path output/merged-temporal \
+    --model_path output/merged \
     --test_file datasets/dev/dev_subset.jsonl
 
-# 8. Test in LMStudio (use model identifier after install)
-/opt/lm-studio/bin/lms load "temporal"
+# 9. Test in LMStudio (folder/filename without .gguf)
+/opt/lm-studio/bin/lms load "temporal/merged"
 ```
 
 ---
@@ -723,6 +783,56 @@ python scripts/evaluate_temporal.py \
 ---
 
 ## Troubleshooting
+
+### GPU Hang During Training (AMD ROCm)
+
+**Symptoms:** Training freezes and system reports `GPU Hang` or `HW Exception by GPU node`:
+```
+HW Exception by GPU node-1 (Agent handle: 0x2753da10) reason: GPU Hang
+Aborted (core dumped)
+```
+
+**Cause:** GPU hangs on AMD ROCm are often caused by:
+1. Experimental bitsandbytes ROCm support (`--use_4bit` or `--use_8bit`)
+2. Sustained high GPU load with large batch sizes
+3. Long sequences causing memory pressure
+4. SDPA attention implementation (now disabled by default in the script)
+
+**Solutions:**
+
+1. **Remove quantization flags** - Train without `--use_4bit`:
+```bash
+python scripts/finetune_temporal.py \
+    --model_name Qwen/Qwen2.5-1.5B-Instruct \
+    --epochs 3 \
+    --batch_size 2 \
+    --gradient_accumulation_steps 8
+```
+
+2. **Set additional ROCm stability environment variables:**
+```bash
+export HSA_OVERRIDE_GFX_VERSION=11.0.0
+export AMD_SERIALIZE_KERNEL=3
+export AMD_SERIALIZE_COPY=3
+```
+
+3. **Use smaller batch size and sequence length:**
+```bash
+--batch_size 1 --max_seq_length 384
+```
+
+4. **Save checkpoints frequently and use resume:**
+```bash
+--save_steps 100 --resume_latest
+```
+
+5. **Resume from last checkpoint after a hang:**
+```bash
+python scripts/finetune_temporal.py \
+    --output_dir output/your-existing-run \
+    --resume_latest \
+    [other args...]
+```
 
 ### bitsandbytes / QLoRA Not Working on AMD ROCm
 

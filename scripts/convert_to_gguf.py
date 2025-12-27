@@ -12,30 +12,27 @@ Prerequisites:
 Usage:
     # Basic conversion with Q4_K_M quantization
     python convert_to_gguf.py \
-        --model_path output/merged-temporal-qwen \
-        --output_path output/temporal-qwen.gguf
+        --model_path output/merged \
+        --output_path output/merged.gguf
     
     # With specific quantization type
     python convert_to_gguf.py \
-        --model_path output/merged-temporal-qwen \
-        --output_path output/temporal-qwen-q8.gguf \
+        --model_path output/merged \
+        --output_path output/merged-q8.gguf \
         --quant_type q8_0
-    
-    # Install to LMStudio
-    python convert_to_gguf.py \
-        --model_path output/merged-temporal-qwen \
-        --output_path output/temporal-qwen.gguf \
-        --install_lmstudio
+
+After conversion, manually copy to LMStudio:
+    sudo mkdir -p /root/.lmstudio/models/local/temporal
+    sudo cp output/merged.gguf /root/.lmstudio/models/local/temporal/
+    lms load "temporal/merged"
 
 See documentation/InitialFinetuning-Phase2.md for full details.
 """
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 
 # Quantization types and their descriptions
@@ -270,35 +267,6 @@ def convert_to_gguf(
         return False
 
 
-def install_to_lmstudio(
-    gguf_path: str,
-    model_name: str,
-    lmstudio_models_path: str = DEFAULT_LMSTUDIO_MODELS,
-) -> bool:
-    """Copy GGUF file to LMStudio models directory"""
-    
-    # Create destination directory
-    dest_dir = os.path.join(lmstudio_models_path, "local", model_name)
-    os.makedirs(dest_dir, exist_ok=True)
-    
-    # Copy file
-    dest_path = os.path.join(dest_dir, os.path.basename(gguf_path))
-    print(f"\nCopying to LMStudio models directory...")
-    print(f"  Source: {gguf_path}")
-    print(f"  Destination: {dest_path}")
-    
-    try:
-        shutil.copy2(gguf_path, dest_path)
-        print(f"\n✅ Installed to LMStudio!")
-        print(f"   Model path: local/{model_name}/{os.path.basename(gguf_path)}")
-        print(f"\n   Load with: lms load 'local/{model_name}/{os.path.basename(gguf_path)}'")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Installation failed: {e}")
-        return False
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Convert HuggingFace model to GGUF format for LMStudio",
@@ -308,8 +276,10 @@ Quantization types:
 {chr(10).join(f'  {k:10} - {v}' for k, v in QUANT_TYPES.items())}
 
 Example workflow:
-  1. python convert_to_gguf.py --model_path output/merged --output_path output/model.gguf
-  2. lms load output/model.gguf
+  1. python convert_to_gguf.py --model_path output/merged --output_path output/merged.gguf
+  2. sudo mkdir -p /root/.lmstudio/models/local/temporal
+  3. sudo cp output/merged.gguf /root/.lmstudio/models/local/temporal/
+  4. lms load "temporal/merged"
 """,
     )
     
@@ -333,20 +303,6 @@ Example workflow:
         "--llama_cpp_path",
         default=DEFAULT_LLAMA_CPP_PATH,
         help="Path to llama.cpp repository",
-    )
-    parser.add_argument(
-        "--install_lmstudio",
-        action="store_true",
-        help="Copy GGUF to LMStudio models directory after conversion",
-    )
-    parser.add_argument(
-        "--lmstudio_models",
-        default=DEFAULT_LMSTUDIO_MODELS,
-        help="LMStudio models directory",
-    )
-    parser.add_argument(
-        "--model_name",
-        help="Model name for LMStudio (default: derived from output filename)",
     )
     
     args = parser.parse_args()
@@ -378,39 +334,41 @@ Example workflow:
     if not success:
         sys.exit(1)
     
-    # Install to LMStudio if requested
-    if args.install_lmstudio:
-        model_name = args.model_name or Path(args.output_path).stem
-        install_to_lmstudio(
-            args.output_path,
-            model_name,
-            args.lmstudio_models,
-        )
-    
     # Print next steps
     print("\n" + "=" * 60)
     print("Next steps:")
     print("=" * 60)
     
     gguf_file = args.output_path
+    gguf_abs_path = os.path.abspath(gguf_file)
+    gguf_filename = os.path.basename(gguf_file)
+    model_basename = os.path.splitext(gguf_filename)[0]
+    folder_name = "temporal"  # Folder name in LMStudio models directory
+    # Model identifier format: folder/filename (without .gguf extension)
+    model_identifier = f"{folder_name}/{model_basename}"
     
     print("\n1. Restart LMStudio service (if previously stopped for training):")
     print("   sudo systemctl start lmstudio.service")
     
-    print("\n2. Load model in LMStudio:")
-    print(f"   lms load --path {gguf_file}")
+    # LMStudio runs as root, so copy to root's models directory
+    print("\n2. Copy model to LMStudio models directory (runs as root):")
+    print(f"   sudo mkdir -p /root/.lmstudio/models/local/{folder_name}")
+    print(f"   sudo cp {gguf_abs_path} /root/.lmstudio/models/local/{folder_name}/")
     
-    print("\n3. Quick validation (interactive chat):")
-    print(f"   lms chat --path {gguf_file}")
+    print(f"\n3. Load model in LMStudio (folder/filename without .gguf):")
+    print(f"   lms load \"{model_identifier}\"")
     
-    print("\n4. Run automated evaluation (uses WIKI_DATA env var for datasets):")
+    print(f"\n4. Quick validation (interactive chat):")
+    print(f"   lms chat \"{model_identifier}\"")
+    
+    print("\n5. Run automated evaluation (uses WIKI_DATA env var for datasets):")
     print(f"   python scripts/evaluate_temporal.py \\")
     print(f"       --use_lmstudio \\")
-    print(f"       --lmstudio_model merged \\")
+    print(f"       --lmstudio_model \"{model_identifier}\" \\")
     print(f"       --test_file datasets/dev/dev_subset.jsonl \\")
     print(f"       --verbose --limit 20")
     
-    print("\n5. Or evaluate the merged HuggingFace model directly (no LMStudio needed):")
+    print("\n6. Or evaluate the merged HuggingFace model directly (no LMStudio needed):")
     print(f"   python scripts/evaluate_temporal.py \\")
     print(f"       --model_path {args.model_path} \\")
     print(f"       --test_file datasets/dev/dev_subset.jsonl \\")

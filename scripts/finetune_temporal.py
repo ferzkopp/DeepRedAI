@@ -295,11 +295,30 @@ def create_training_args(
     )
 
 
+def find_latest_checkpoint(output_dir: str) -> Optional[str]:
+    """Find the latest checkpoint in the output directory"""
+    checkpoints = []
+    if os.path.isdir(output_dir):
+        for name in os.listdir(output_dir):
+            if name.startswith("checkpoint-"):
+                try:
+                    step = int(name.split("-")[1])
+                    checkpoints.append((step, os.path.join(output_dir, name)))
+                except (IndexError, ValueError):
+                    continue
+    
+    if checkpoints:
+        checkpoints.sort(key=lambda x: x[0], reverse=True)
+        return checkpoints[0][1]
+    return None
+
+
 def train(
     model,
     tokenizer,
     dataset: DatasetDict,
     training_args: SFTConfig,
+    resume_from_checkpoint: Optional[str] = None,
 ):
     """Run the training loop"""
     
@@ -308,6 +327,8 @@ def train(
     print(f"  Validation examples: {len(dataset['validation'])}")
     print(f"  Max sequence length: {training_args.max_length}")
     print(f"  Output directory: {training_args.output_dir}")
+    if resume_from_checkpoint:
+        print(f"  Resuming from: {resume_from_checkpoint}")
     
     # Create trainer
     trainer = SFTTrainer(
@@ -318,8 +339,8 @@ def train(
         processing_class=tokenizer,
     )
     
-    # Train
-    train_result = trainer.train()
+    # Train (with optional resume)
+    train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     
     # Save metrics
     metrics = train_result.metrics
@@ -428,6 +449,18 @@ def main():
     parser.add_argument("--use_4bit", action="store_true", help="Use 4-bit quantization (QLoRA)")
     parser.add_argument("--use_8bit", action="store_true", help="Use 8-bit quantization")
     
+    # Resume from checkpoint
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        default=None,
+        help="Path to checkpoint directory to resume training (e.g., output/run-name/checkpoint-500)",
+    )
+    parser.add_argument(
+        "--resume_latest",
+        action="store_true",
+        help="Auto-detect and resume from the latest checkpoint in output_dir",
+    )
+    
     # Misc
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -501,12 +534,22 @@ def main():
         max_seq_length=args.max_seq_length,
     )
     
+    # Determine checkpoint to resume from
+    resume_checkpoint = args.resume_from_checkpoint
+    if args.resume_latest and not resume_checkpoint:
+        resume_checkpoint = find_latest_checkpoint(args.output_dir)
+        if resume_checkpoint:
+            print(f"Auto-detected checkpoint: {resume_checkpoint}")
+        else:
+            print("No existing checkpoints found, starting fresh.")
+    
     # Train
     trainer = train(
         model,
         tokenizer,
         dataset,
         training_args,
+        resume_from_checkpoint=resume_checkpoint,
     )
     
     # Save final model
