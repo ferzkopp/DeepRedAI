@@ -105,6 +105,30 @@ The following scripts are available in the `scripts/` directory:
 
 ---
 
+### Environment Variables
+
+Set these in any working terminal shell before running any commands or scripts:
+
+```bash
+# Storage path - adjust to your disk mount point
+export WIKI_DATA="/mnt/data/wikipedia"
+
+# Replace with your server's IP address
+export HOST="192.168.X.Y"
+
+# LAN network range for firewall rules (derived from HOST)
+export LAN_NETWORK="${HOST%.*}.0/24"
+
+# LM Studio configuration
+export LMSTUDIO_HOST="${HOST}"
+export LMSTUDIO_PORT="1234"
+```
+
+**Script Usage:** The scripts automatically use these environment variables:
+- `finetune_temporal.py` uses `WIKI_DATA` for dataset paths (defaults to `datasets/` if unset)
+- `evaluate_temporal.py` uses `LMSTUDIO_HOST` and `LMSTUDIO_PORT` for API URL (defaults to `localhost:1234`)
+- `convert_to_gguf.py` uses `WIKI_DATA` parent directory for LMStudio models path
+
 ## Phase 2.1: Environment Setup
 
 ### Create Virtual Environment
@@ -143,15 +167,53 @@ pip install torch torchvision torchaudio
 
 Core packages:
 ```bash
-pip install transformers>=4.45.0 peft>=0.13.0 datasets accelerate bitsandbytes trl
+pip install 'transformers>=4.45.0' 'peft>=0.13.0' datasets accelerate trl
 pip install wandb  # Optional: experiment tracking
 ```
+
+**For NVIDIA GPUs only** - Install bitsandbytes for 4-bit/8-bit quantization (QLoRA):
+```bash
+pip install bitsandbytes
+```
+
+**For AMD ROCm GPUs** - bitsandbytes v0.44+ includes experimental ROCm support:
+```bash
+pip install 'bitsandbytes>=0.44.0'
+export HSA_OVERRIDE_GFX_VERSION=11.0.0
+```
+
+> **⚠️ AMD ROCm Note:** ROCm support in bitsandbytes is experimental. For gfx1151 (Strix Halo), you must set `export HSA_OVERRIDE_GFX_VERSION=11.0.0` before training. Do **not** set `BNB_CUDA_VERSION` - bitsandbytes auto-detects ROCm. If you encounter issues with QLoRA on your AMD GPU, train without the `--use_4bit` or `--use_8bit` flags. For memory-constrained systems, use a smaller model (e.g., `Qwen2.5-0.5B-Instruct`) or reduce batch size instead.
+
+### Install llama.cpp (for GGUF conversion)
+
+The `convert_to_gguf.py` script requires llama.cpp. You can let the script clone it automatically, or install it manually:
+
+```bash
+cd ~/DeepRedAI
+
+# Clone llama.cpp (skip if already exists)
+[ -d llama.cpp ] || git clone https://github.com/ggerganov/llama.cpp.git
+
+# Install requirements from within the llama.cpp directory
+cd llama.cpp
+pip install -r requirements.txt
+cd ..
+
+# Reinstall ROCm PyTorch to override any CPU-only torch from llama.cpp
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.4
+```
+
+> **Note:** The llama.cpp requirements may install a CPU-only torch. The final command reinstalls the ROCm version to ensure GPU acceleration works.
 
 ### Verify Setup
 
 ```bash
 python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA/ROCm available: {torch.cuda.is_available()}')"
 python -c "import transformers, peft, trl; print('All packages imported successfully')"
+python -c "import bitsandbytes; print('bitsandbytes imported successfully')"
+
+# Verify llama.cpp conversion dependencies
+python -c "import gguf; print('llama.cpp GGUF library ready')"
 ```
 
 ---
@@ -188,11 +250,20 @@ scripts/finetune_temporal.py
 
 ### Development Run (Quick Test)
 
+> **⚠️ Important:** Before running any fine-tuning, stop the LMStudio service. ROCm cannot share the GPU between multiple processes. See [LMStudio-Setup.md](LMStudio-Setup.md) for details.
+> ```bash
+> sudo systemctl stop lmstudio.service
+> ```
+> After fine-tuning is complete, restart the service with `sudo systemctl start lmstudio.service`.
+
 Use the `--dev` flag to run a quick test with a small data subset:
 
 ```bash
 cd ~/DeepRedAI
 source ~/venvs/finetune/bin/activate
+
+# Required for gfx1151 - tells ROCm to use gfx1100 compatibility
+export HSA_OVERRIDE_GFX_VERSION=11.0.0
 
 python scripts/finetune_temporal.py \
     --dev \
@@ -208,6 +279,20 @@ This will:
 
 ### Full Training Run
 
+**For AMD ROCm GPUs (gfx1151 / Strix Halo):**
+```bash
+# Required for gfx1151 - tells ROCm to use gfx1100 compatibility
+export HSA_OVERRIDE_GFX_VERSION=11.0.0
+
+python scripts/finetune_temporal.py \
+    --model_name Qwen/Qwen2.5-1.5B-Instruct \
+    --epochs 3 \
+    --batch_size 4 \
+    --learning_rate 2e-4 \
+    --use_4bit
+```
+
+**For NVIDIA GPUs:**
 ```bash
 python scripts/finetune_temporal.py \
     --model_name Qwen/Qwen2.5-1.5B-Instruct \
@@ -346,7 +431,7 @@ scripts/convert_to_gguf.py
 
 ```bash
 python scripts/convert_to_gguf.py \
-    --model_path output/merged-temporal-qwen \
+    --model_path output/merged-temporal \
     --output_path output/temporal-qwen.gguf
 ```
 
@@ -354,7 +439,7 @@ python scripts/convert_to_gguf.py \
 
 ```bash
 python scripts/convert_to_gguf.py \
-    --model_path output/merged-temporal-qwen \
+    --model_path output/merged-temporal \
     --output_path output/temporal-qwen.gguf \
     --quant_type q4_k_m \
     --install_lmstudio \
@@ -566,35 +651,38 @@ Complete workflow from start to finish:
 source ~/venvs/finetune/bin/activate
 cd ~/DeepRedAI
 
-# 2. Quick dev test
+# 2. For AMD ROCm (gfx1151/Strix Halo) - set compatibility mode
+export HSA_OVERRIDE_GFX_VERSION=11.0.0
+
+# 3. Quick dev test (use --use_4bit for QLoRA quantization)
 python scripts/finetune_temporal.py --dev --epochs 1 --use_4bit
 
-# 3. Full training (after dev test succeeds)
+# 4. Full training (after dev test succeeds)
 python scripts/finetune_temporal.py \
     --model_name Qwen/Qwen2.5-1.5B-Instruct \
     --epochs 3 \
     --use_4bit
 
-# 4. Merge LoRA (use actual output directory from step 3)
+# 5. Merge LoRA (use actual output directory from step 4)
 python scripts/merge_lora.py \
     --base_model Qwen/Qwen2.5-1.5B-Instruct \
     --lora_path output/temporal-qwen2.5-1.5b-instruct-full-*/final \
     --output_path output/merged-temporal \
     --verify
 
-# 5. Convert to GGUF and install
+# 6. Convert to GGUF and install
 python scripts/convert_to_gguf.py \
     --model_path output/merged-temporal \
     --output_path output/temporal.gguf \
     --install_lmstudio
 
-# 6. Evaluate
+# 7. Evaluate
 python scripts/evaluate_temporal.py \
     --model_path output/merged-temporal \
     --test_file datasets/dev/dev_subset.jsonl
 
-# 7. Test in LMStudio (use model identifier after install)
-/opt/lm-studio/bin/lms load \"temporal\"
+# 8. Test in LMStudio (use model identifier after install)
+/opt/lm-studio/bin/lms load "temporal"
 ```
 
 ---
@@ -636,12 +724,31 @@ python scripts/evaluate_temporal.py \
 
 ## Troubleshooting
 
+### bitsandbytes / QLoRA Not Working on AMD ROCm
+
+**Symptoms:** `torch.AcceleratorError: HIP error: invalid device function` or similar HIP/ROCm errors when using `--use_4bit` or `--use_8bit`
+
+**Cause:** The `bitsandbytes` library doesn't officially support all AMD GPU architectures. For gfx1151 (Strix Halo), you need to set a compatibility environment variable.
+
+**Solution for gfx1151 (Strix Halo / RDNA 3.5):**
+```bash
+export HSA_OVERRIDE_GFX_VERSION=11.0.0
+```
+
+This tells ROCm to treat gfx1151 as gfx1100 (officially supported RDNA3). Set this before running any training commands.
+
+**For other unsupported AMD architectures:**
+1. Check your GPU architecture: `rocminfo | grep gfx`
+2. If not gfx1100/gfx1151, you may need to run without `--use_4bit` or `--use_8bit`
+3. Reduce batch size instead: `--batch_size 2` or `--batch_size 1`
+4. Use a smaller model: `--model_name Qwen/Qwen2.5-0.5B-Instruct`
+
 ### Out of Memory (OOM)
 
 **Symptoms:** CUDA/ROCm out of memory error during training
 
 **Solutions:**
-1. Add `--use_4bit` flag for QLoRA
+1. Add `--use_4bit` flag for QLoRA **(NVIDIA GPUs only)**
 2. Reduce batch size: `--batch_size 2`
 3. Reduce sequence length: `--max_seq_length 256`
 4. Use a smaller model

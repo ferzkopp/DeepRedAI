@@ -213,7 +213,7 @@ class HuggingFaceEvaluator:
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto",
             trust_remote_code=True,
         )
@@ -346,6 +346,11 @@ def save_results(metrics: EvaluationMetrics, output_path: str):
         "unlearn_examples": metrics.unlearn_examples,
     }
     
+    # Create output directory if needed
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     
@@ -368,10 +373,15 @@ def main():
         action="store_true",
         help="Use LMStudio API instead of local model",
     )
+    # Use LMSTUDIO_HOST and LMSTUDIO_PORT environment variables for default URL
+    lmstudio_host = os.environ.get("LMSTUDIO_HOST", "localhost")
+    lmstudio_port = os.environ.get("LMSTUDIO_PORT", "1234")
+    default_lmstudio_url = f"http://{lmstudio_host}:{lmstudio_port}/v1"
+    
     parser.add_argument(
         "--lmstudio_url",
-        default="http://localhost:1234/v1",
-        help="LMStudio API base URL",
+        default=default_lmstudio_url,
+        help="LMStudio API base URL (default uses LMSTUDIO_HOST/PORT env vars)",
     )
     parser.add_argument(
         "--lmstudio_model",
@@ -416,9 +426,20 @@ def main():
     if args.use_lmstudio and not args.lmstudio_model:
         parser.error("--lmstudio_model is required when using --use_lmstudio")
     
+    # Resolve test file path - check WIKI_DATA if relative path doesn't exist
+    test_file = args.test_file
+    if not os.path.exists(test_file):
+        # Try with WIKI_DATA prefix
+        wiki_data = os.environ.get("WIKI_DATA", "")
+        if wiki_data:
+            wiki_test_file = os.path.join(wiki_data, test_file)
+            if os.path.exists(wiki_test_file):
+                test_file = wiki_test_file
+                print(f"Using WIKI_DATA path: {test_file}")
+    
     # Load test data
-    print(f"Loading test data from: {args.test_file}")
-    test_data = load_test_data(args.test_file)
+    print(f"Loading test data from: {test_file}")
+    test_data = load_test_data(test_file)
     print(f"Loaded {len(test_data)} examples")
     
     if args.limit:
@@ -448,8 +469,8 @@ def main():
     if args.output:
         save_results(metrics, args.output)
     else:
-        # Auto-generate output path
-        output_path = args.test_file.replace(".jsonl", "_results.json")
+        # Auto-generate output path based on resolved test_file path
+        output_path = test_file.replace(".jsonl", "_results.json")
         save_results(metrics, output_path)
 
 

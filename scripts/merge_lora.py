@@ -27,7 +27,7 @@ def merge_lora(
     base_model_name: str,
     lora_path: str,
     output_path: str,
-    torch_dtype: torch.dtype = torch.bfloat16,
+    dtype: torch.dtype = torch.bfloat16,
 ):
     """Merge LoRA weights into base model and save"""
     
@@ -47,7 +47,7 @@ def merge_lora(
     print("\nLoading base model...")
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
-        torch_dtype=torch_dtype,
+        dtype=dtype,
         device_map="auto",
         trust_remote_code=True,
     )
@@ -92,9 +92,11 @@ def merge_lora(
     print("=" * 60)
     print(f"\nMerged model saved to: {output_path}")
     print("\nNext step - Convert to GGUF:")
-    print(f"  python llama.cpp/convert_hf_to_gguf.py {output_path} \\")
-    print(f"      --outfile {output_path}.gguf \\")
-    print("      --outtype q4_k_m")
+    print(f"  python scripts/convert_to_gguf.py \\")
+    print(f"      --model_path {output_path} \\")
+    print(f"      --output_path {output_path}.gguf \\")
+    print("      --quant_type q4_k_m")
+    print("\n(The script will clone llama.cpp if not already installed)")
     
     return output_path
 
@@ -107,7 +109,7 @@ def verify_merge(output_path: str):
     try:
         model = AutoModelForCausalLM.from_pretrained(
             output_path,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto",
             trust_remote_code=True,
         )
@@ -178,14 +180,14 @@ def main():
         "bfloat16": torch.bfloat16,
         "float32": torch.float32,
     }
-    torch_dtype = dtype_map[args.dtype]
+    model_dtype = dtype_map[args.dtype]
     
     # Merge
     output_path = merge_lora(
         args.base_model,
         args.lora_path,
         args.output_path,
-        torch_dtype=torch_dtype,
+        dtype=model_dtype,
     )
     
     # Verify if requested

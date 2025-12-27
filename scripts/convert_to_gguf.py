@@ -39,6 +39,10 @@ from pathlib import Path
 
 
 # Quantization types and their descriptions
+# Basic types are supported directly by convert_hf_to_gguf.py
+# K-quant types require a two-step process: convert to f16, then quantize
+BASIC_QUANT_TYPES = {"f32", "f16", "bf16", "q8_0"}
+
 QUANT_TYPES = {
     "f32": "32-bit float (largest, lossless)",
     "f16": "16-bit float (large, near-lossless)",
@@ -57,7 +61,11 @@ QUANT_TYPES = {
 DEFAULT_LLAMA_CPP_PATH = "llama.cpp"
 # Note: LMStudio stores models in ~/.lmstudio/models or /root/.lmstudio/models
 # The /mnt/data path is a custom symlink - adjust as needed for your setup
-DEFAULT_LMSTUDIO_MODELS = "/mnt/data/lmstudio/models"
+# Uses WIKI_DATA environment variable if set, otherwise falls back to /mnt/data
+DEFAULT_LMSTUDIO_MODELS = os.path.join(
+    os.environ.get("WIKI_DATA", "/mnt/data").rsplit("/", 1)[0],  # Parent of WIKI_DATA
+    "lmstudio/models"
+)
 
 
 def check_llama_cpp(llama_cpp_path: str) -> bool:
@@ -92,6 +100,55 @@ def clone_llama_cpp(target_path: str) -> bool:
         return False
 
 
+def find_quantize_binary(llama_cpp_path: str) -> str | None:
+    """Find the llama-quantize binary in llama.cpp build directory"""
+    # Common locations for the quantize binary
+    possible_paths = [
+        os.path.join(llama_cpp_path, "build", "bin", "llama-quantize"),
+        os.path.join(llama_cpp_path, "build", "llama-quantize"),
+        os.path.join(llama_cpp_path, "llama-quantize"),
+        os.path.join(llama_cpp_path, "quantize"),
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            return path
+    
+    return None
+
+
+def build_llama_cpp(llama_cpp_path: str) -> bool:
+    """Build llama.cpp to get the quantize binary"""
+    print(f"\nBuilding llama.cpp (needed for K-quant types)...")
+    
+    build_dir = os.path.join(llama_cpp_path, "build")
+    os.makedirs(build_dir, exist_ok=True)
+    
+    try:
+        # Configure with cmake
+        subprocess.run(
+            ["cmake", "..", "-DCMAKE_BUILD_TYPE=Release"],
+            cwd=build_dir,
+            check=True,
+        )
+        
+        # Build just the quantize tool
+        subprocess.run(
+            ["cmake", "--build", ".", "--target", "llama-quantize", "-j"],
+            cwd=build_dir,
+            check=True,
+        )
+        
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Build failed: {e}")
+        return False
+    except FileNotFoundError:
+        print("❌ cmake not found. Please install cmake to use K-quant types.")
+        return False
+
+
 def convert_to_gguf(
     model_path: str,
     output_path: str,
@@ -115,35 +172,101 @@ def convert_to_gguf(
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     
-    print(f"Converting model to GGUF...")
-    print(f"  Input: {model_path}")
-    print(f"  Output: {output_path}")
-    print(f"  Quantization: {quant_type}")
+    # Determine if we need two-step conversion for K-quant types
+    needs_quantize_step = quant_type not in BASIC_QUANT_TYPES
     
-    cmd = [
-        sys.executable,
-        convert_script,
-        model_path,
-        "--outfile", output_path,
-        "--outtype", quant_type,
-    ]
-    
-    try:
-        subprocess.run(cmd, check=True)
+    if needs_quantize_step:
+        # For K-quant types: first convert to f16, then quantize
+        print(f"Converting model to GGUF (two-step for {quant_type})...")
+        print(f"  Input: {model_path}")
+        print(f"  Output: {output_path}")
+        print(f"  Quantization: {quant_type}")
         
-        # Verify output
-        if os.path.exists(output_path):
-            size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            print(f"\n✅ Conversion successful!")
-            print(f"   Output file: {output_path}")
-            print(f"   Size: {size_mb:.1f} MB")
-            return True
-        else:
-            print("❌ Conversion failed - output file not created")
+        # Step 1: Convert to f16 GGUF (temporary file)
+        temp_f16_path = output_path.replace(".gguf", "-f16-temp.gguf")
+        if not temp_f16_path.endswith("-f16-temp.gguf"):
+            temp_f16_path = output_path + "-f16-temp.gguf"
+        
+        print(f"\n  Step 1/2: Converting to f16 GGUF...")
+        cmd = [
+            sys.executable,
+            convert_script,
+            model_path,
+            "--outfile", temp_f16_path,
+            "--outtype", "f16",
+        ]
+        
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Conversion to f16 failed: {e}")
             return False
-            
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Conversion failed: {e}")
+        
+        if not os.path.exists(temp_f16_path):
+            print("❌ Conversion failed - f16 temp file not created")
+            return False
+        
+        # Step 2: Quantize using llama-quantize
+        print(f"\n  Step 2/2: Quantizing to {quant_type}...")
+        
+        quantize_bin = find_quantize_binary(llama_cpp_path)
+        if not quantize_bin:
+            print("  llama-quantize not found, building llama.cpp...")
+            if not build_llama_cpp(llama_cpp_path):
+                # Clean up temp file
+                os.remove(temp_f16_path)
+                return False
+            quantize_bin = find_quantize_binary(llama_cpp_path)
+            if not quantize_bin:
+                print("❌ llama-quantize still not found after build")
+                os.remove(temp_f16_path)
+                return False
+        
+        # Run quantization
+        # llama-quantize format: llama-quantize <input> <output> <type>
+        quant_cmd = [quantize_bin, temp_f16_path, output_path, quant_type.upper()]
+        
+        try:
+            subprocess.run(quant_cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Quantization failed: {e}")
+            os.remove(temp_f16_path)
+            return False
+        
+        # Clean up temp file
+        os.remove(temp_f16_path)
+        print(f"  Cleaned up temporary f16 file")
+        
+    else:
+        # For basic types: direct conversion
+        print(f"Converting model to GGUF...")
+        print(f"  Input: {model_path}")
+        print(f"  Output: {output_path}")
+        print(f"  Quantization: {quant_type}")
+        
+        cmd = [
+            sys.executable,
+            convert_script,
+            model_path,
+            "--outfile", output_path,
+            "--outtype", quant_type,
+        ]
+        
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Conversion failed: {e}")
+            return False
+    
+    # Verify output
+    if os.path.exists(output_path):
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        print(f"\n✅ Conversion successful!")
+        print(f"   Output file: {output_path}")
+        print(f"   Size: {size_mb:.1f} MB")
+        return True
+    else:
+        print("❌ Conversion failed - output file not created")
         return False
 
 
@@ -263,6 +386,35 @@ Example workflow:
             model_name,
             args.lmstudio_models,
         )
+    
+    # Print next steps
+    print("\n" + "=" * 60)
+    print("Next steps:")
+    print("=" * 60)
+    
+    gguf_file = args.output_path
+    
+    print("\n1. Restart LMStudio service (if previously stopped for training):")
+    print("   sudo systemctl start lmstudio.service")
+    
+    print("\n2. Load model in LMStudio:")
+    print(f"   lms load --path {gguf_file}")
+    
+    print("\n3. Quick validation (interactive chat):")
+    print(f"   lms chat --path {gguf_file}")
+    
+    print("\n4. Run automated evaluation (uses WIKI_DATA env var for datasets):")
+    print(f"   python scripts/evaluate_temporal.py \\")
+    print(f"       --use_lmstudio \\")
+    print(f"       --lmstudio_model merged \\")
+    print(f"       --test_file datasets/dev/dev_subset.jsonl \\")
+    print(f"       --verbose --limit 20")
+    
+    print("\n5. Or evaluate the merged HuggingFace model directly (no LMStudio needed):")
+    print(f"   python scripts/evaluate_temporal.py \\")
+    print(f"       --model_path {args.model_path} \\")
+    print(f"       --test_file datasets/dev/dev_subset.jsonl \\")
+    print(f"       --verbose --limit 20")
     
     print("\n" + "=" * 60)
     print("Done!")

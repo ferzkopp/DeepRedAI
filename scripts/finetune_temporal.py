@@ -31,16 +31,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Fix for tokenizer parallelism warning when forking
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import torch
 from datasets import Dataset, DatasetDict
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments,
     BitsAndBytesConfig,
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 
 
 def load_jsonl(filepath: str) -> list[dict]:
@@ -168,23 +170,36 @@ def get_model_and_tokenizer(
             load_in_8bit=True,
         )
     
+    # Detect if running on AMD GPU (ROCm)
+    is_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
+    
+    # Use eager attention on AMD GPUs (SDPA is experimental and buggy on ROCm)
+    # Use SDPA on NVIDIA GPUs for better performance
+    attn_impl = "eager" if is_rocm else "sdpa"
+    if is_rocm:
+        print("  AMD GPU detected (ROCm), using eager attention")
+    
     # Load model
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config=bnb_config,
         device_map="auto",
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,  # Changed from torch_dtype (deprecated)
         trust_remote_code=True,
-        attn_implementation="sdpa",  # Use scaled dot-product attention
+        attn_implementation=attn_impl,
     )
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     
-    # Ensure pad token is set
+    # Ensure pad token is set (use existing pad_token if available, avoid changing tokens)
     if tokenizer.pad_token is None:
+        # For Qwen models, use eos_token as pad_token but don't modify the model config
         tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
+        # Update model config to match tokenizer to avoid warnings
+        model.config.pad_token_id = tokenizer.eos_token_id
+        if hasattr(model, 'generation_config'):
+            model.generation_config.pad_token_id = tokenizer.eos_token_id
     
     return model, tokenizer
 
@@ -239,10 +254,11 @@ def create_training_args(
     save_steps: int = 500,
     use_quantization: bool = False,
     use_wandb: bool = False,
-) -> TrainingArguments:
-    """Create training arguments"""
+    max_seq_length: int = 512,
+) -> SFTConfig:
+    """Create SFT training configuration"""
     
-    return TrainingArguments(
+    return SFTConfig(
         output_dir=output_dir,
         num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
@@ -268,8 +284,14 @@ def create_training_args(
         optim="adamw_8bit" if use_quantization else "adamw_torch",
         report_to="wandb" if use_wandb else "none",
         remove_unused_columns=False,
-        dataloader_pin_memory=True,
-        dataloader_num_workers=4,
+        # Reduce workers to avoid fork issues with tokenizers
+        # Disable pin_memory for better ROCm compatibility
+        dataloader_pin_memory=False,
+        dataloader_num_workers=0,
+        # SFT-specific settings
+        max_length=max_seq_length,
+        dataset_text_field="text",
+        packing=False,
     )
 
 
@@ -277,15 +299,14 @@ def train(
     model,
     tokenizer,
     dataset: DatasetDict,
-    training_args: TrainingArguments,
-    max_seq_length: int = 512,
+    training_args: SFTConfig,
 ):
     """Run the training loop"""
     
     print("\nStarting training...")
     print(f"  Train examples: {len(dataset['train'])}")
     print(f"  Validation examples: {len(dataset['validation'])}")
-    print(f"  Max sequence length: {max_seq_length}")
+    print(f"  Max sequence length: {training_args.max_length}")
     print(f"  Output directory: {training_args.output_dir}")
     
     # Create trainer
@@ -295,9 +316,6 @@ def train(
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
         processing_class=tokenizer,
-        max_seq_length=max_seq_length,
-        dataset_text_field="text",
-        packing=False,  # Don't pack multiple examples together
     )
     
     # Train
@@ -352,6 +370,15 @@ def main():
     )
     
     # Dataset configuration
+    # Use WIKI_DATA environment variable for data root (default: datasets/)
+    # When WIKI_DATA is set (e.g., /mnt/data/wikipedia), datasets are in WIKI_DATA/datasets/
+    # When using default, datasets are in ./datasets/
+    wiki_data = os.environ.get("WIKI_DATA", "")
+    if wiki_data:
+        data_root = os.path.join(wiki_data, "datasets")
+    else:
+        data_root = "datasets"
+    
     parser.add_argument(
         "--dev",
         action="store_true",
@@ -359,28 +386,28 @@ def main():
     )
     parser.add_argument(
         "--dev_path",
-        default="datasets/dev/dev_subset.jsonl",
-        help="Path to development subset",
+        default=os.path.join(data_root, "dev/dev_subset.jsonl"),
+        help="Path to development subset (default uses WIKI_DATA env var)",
     )
     parser.add_argument(
         "--retain_train",
-        default="datasets/retain/retain_train.jsonl",
-        help="Path to retain training data",
+        default=os.path.join(data_root, "retain/retain_train.jsonl"),
+        help="Path to retain training data (default uses WIKI_DATA env var)",
     )
     parser.add_argument(
         "--retain_val",
-        default="datasets/retain/retain_val.jsonl",
-        help="Path to retain validation data",
+        default=os.path.join(data_root, "retain/retain_val.jsonl"),
+        help="Path to retain validation data (default uses WIKI_DATA env var)",
     )
     parser.add_argument(
         "--unlearn_train",
-        default="datasets/unlearn/unlearn_train.jsonl",
-        help="Path to unlearn training data",
+        default=os.path.join(data_root, "unlearn/unlearn_train.jsonl"),
+        help="Path to unlearn training data (default uses WIKI_DATA env var)",
     )
     parser.add_argument(
         "--unlearn_val",
-        default="datasets/unlearn/unlearn_val.jsonl",
-        help="Path to unlearn validation data",
+        default=os.path.join(data_root, "unlearn/unlearn_val.jsonl"),
+        help="Path to unlearn validation data (default uses WIKI_DATA env var)",
     )
     
     # Training configuration
@@ -471,6 +498,7 @@ def main():
         save_steps=args.save_steps,
         use_quantization=use_quantization,
         use_wandb=args.wandb,
+        max_seq_length=args.max_seq_length,
     )
     
     # Train
@@ -479,7 +507,6 @@ def main():
         tokenizer,
         dataset,
         training_args,
-        max_seq_length=args.max_seq_length,
     )
     
     # Save final model
@@ -492,10 +519,8 @@ def main():
     print("\nNext steps:")
     print("1. Merge LoRA with base model:")
     print(f"   python scripts/merge_lora.py --base_model {args.model_name} --lora_path {final_path} --output_path output/merged")
-    print("\n2. Convert to GGUF:")
-    print("   python llama.cpp/convert_hf_to_gguf.py output/merged --outfile output/temporal.gguf --outtype q4_k_m")
-    print("\n3. Copy to LMStudio:")
-    print("   cp output/temporal.gguf /mnt/data/lmstudio/models/local/temporal/")
+    print("\n2. Convert to GGUF and install to LMStudio:")
+    print("   python scripts/convert_to_gguf.py --model_path output/merged --output_path output/temporal.gguf --install_lmstudio")
 
 
 if __name__ == "__main__":

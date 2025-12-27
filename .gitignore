@@ -82,3 +82,5 @@ Thumbs.db
 
 # Project specific
 *.log
+llama.cpp/
+output/
