@@ -24,7 +24,7 @@ Usage:
 After conversion, manually copy to LMStudio:
     sudo mkdir -p /root/.lmstudio/models/local/temporal
     sudo cp output/merged.gguf /root/.lmstudio/models/local/temporal/
-    lms load "temporal/merged"
+    /opt/lm-studio/bin/lms load "temporal/merged"
 
 See documentation/InitialFinetuning-Phase2.md for full details.
 """
@@ -279,7 +279,7 @@ Example workflow:
   1. python convert_to_gguf.py --model_path output/merged --output_path output/merged.gguf
   2. sudo mkdir -p /root/.lmstudio/models/local/temporal
   3. sudo cp output/merged.gguf /root/.lmstudio/models/local/temporal/
-  4. lms load "temporal/merged"
+  4. /opt/lm-studio/bin/lms load "temporal/merged"
 """,
     )
     
@@ -356,10 +356,10 @@ Example workflow:
     print(f"   sudo cp {gguf_abs_path} /root/.lmstudio/models/local/{folder_name}/")
     
     print(f"\n3. Load model in LMStudio (folder/filename without .gguf):")
-    print(f"   lms load \"{model_identifier}\"")
+    print(f"   /opt/lm-studio/bin/lms load \"{model_identifier}\"")
     
     print(f"\n4. Quick validation (interactive chat):")
-    print(f"   lms chat \"{model_identifier}\"")
+    print(f"   /opt/lm-studio/bin/lms chat \"{model_identifier}\"")
     
     print("\n5. Run automated evaluation (uses WIKI_DATA env var for datasets):")
     print(f"   python scripts/evaluate_temporal.py \\")

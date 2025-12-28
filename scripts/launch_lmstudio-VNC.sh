@@ -84,11 +84,11 @@ else
     echo "Warning: Passkey not found at ${PASSKEY_SOURCE}"
 fi
 
-# Start the local API server on port 1234
+# Start the local API server on port 1234, bound to all interfaces for network access
 echo "Starting LM Studio API server..."
 if [ -x "$LMS_PATH" ]; then
-    "$LMS_PATH" server start
-    echo "LM Studio API server started on port 1234"
+    "$LMS_PATH" server start --bind 0.0.0.0 --cors
+    echo "LM Studio API server started on port 1234 (network accessible)"
     
     # Load required models
     echo "Loading required models..."

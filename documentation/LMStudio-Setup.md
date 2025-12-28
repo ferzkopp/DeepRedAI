@@ -319,7 +319,7 @@ sudo chmod 600 $USER_HOME/.lmstudio/.internal/lms-key-2
 
 2. **Set GPU Offload to Maximum** when loading models:
    ```bash
-   lms load model.gguf --gpu=max
+   /opt/lm-studio/bin/lms load model.gguf --gpu=max
    ```
    Or use `--gpu=1.0` to offload 100% of computation to the GPU.
 

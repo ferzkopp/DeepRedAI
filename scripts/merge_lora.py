@@ -94,9 +94,12 @@ def merge_lora(
     print("\nNext step - Convert to GGUF:")
     print(f"  python scripts/convert_to_gguf.py \\")
     print(f"      --model_path {output_path} \\")
-    print(f"      --output_path {output_path}.gguf \\")
-    print("      --quant_type q4_k_m")
-    print("\n(The script will clone llama.cpp if not already installed)")
+    print(f"      --output_path {output_path}.gguf")
+    print("\nThen copy to LMStudio and load:")
+    print(f"  sudo mkdir -p /root/.lmstudio/models/local/temporal")
+    print(f"  sudo cp {output_path}.gguf /root/.lmstudio/models/local/temporal/")
+    gguf_basename = os.path.basename(output_path)
+    print(f"  /opt/lm-studio/bin/lms load \"temporal/{gguf_basename}\"")
     
     return output_path
 

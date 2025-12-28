@@ -6,16 +6,33 @@ This script evaluates a fine-tuned model's ability to separate temporal knowledg
 - Retain knowledge about pre-cutoff events (factual answers)
 - Refuse to answer about post-cutoff events ("I don't know" responses)
 
+By default, uses validation datasets that were not used during training:
+- /mnt/data/wikipedia/datasets/retain/retain_val.jsonl
+- /mnt/data/wikipedia/datasets/unlearn/unlearn_val.jsonl
+
+Samples are taken in equal percentages from both datasets.
+
 Usage:
-    # Evaluate a HuggingFace model
-    python evaluate_temporal.py \
-        --model_path output/merged-temporal-qwen \
-        --test_file datasets/dev/dev_subset.jsonl
+    # Evaluate via LMStudio API (default validation files)
+    python evaluate_temporal.py \\
+        --use_lmstudio \\
+        --lmstudio_model "qwen2.5-1.5b-instruct"
     
-    # Evaluate via LMStudio API
-    python evaluate_temporal.py \
-        --use_lmstudio \
-        --lmstudio_model "qwen2.5-1.5b-instruct" \
+    # Evaluate with custom validation files
+    python evaluate_temporal.py \\
+        --use_lmstudio \\
+        --lmstudio_model "qwen2.5-1.5b-instruct" \\
+        --retain_val /path/to/retain_val.jsonl \\
+        --unlearn_val /path/to/unlearn_val.jsonl
+    
+    # Evaluate a HuggingFace model with limit
+    python evaluate_temporal.py \\
+        --model_path output/merged-temporal-qwen \\
+        --limit 200
+
+    # (Deprecated) Use single test file
+    python evaluate_temporal.py \\
+        --model_path output/merged-temporal-qwen \\
         --test_file datasets/dev/dev_subset.jsonl
 
 See documentation/InitialFinetuning-Plan.md for full details.
@@ -24,6 +41,7 @@ See documentation/InitialFinetuning-Plan.md for full details.
 import argparse
 import json
 import os
+import random
 import re
 import sys
 from dataclasses import dataclass, field
@@ -156,23 +174,67 @@ class EvaluationMetrics:
 
 
 # Refusal phrases that indicate the model is declining to answer
+# These should match the refusal responses used in generate_temporal_datasets.py
 REFUSAL_PHRASES = [
-    "i don't have information",
-    "i have no information",
-    "apologies, but i have no",
+    # Polite/Apologetic patterns
+    "i'm sorry, but i don't have information",
+    "i apologize, but that topic is outside",
+    "unfortunately, i'm not able to help",
+    "i'm afraid i don't have",
+    "my apologies, but i cannot provide",
+    "i regret that i'm unable to",
+    "i'm sorry, that's not something i can help",
+    "unfortunately, that falls outside",
+    "i wish i could help, but i don't have",
+    "apologies, but i have no information",
+    
+    # Neutral/Matter-of-fact patterns
+    "i don't have information about",
+    "i'm not familiar with that topic",
+    "that's beyond my knowledge",
+    "i don't have details about",
+    "i don't have knowledge of",
+    "that topic is outside my",
+    "i'm not aware of that",
+    "i don't have enough information",
+    "that's not something i have knowledge",
+    "i lack the information",
+    
+    # Firm/Direct patterns
+    "i'm unable to provide information",
+    "i cannot answer that",
+    "that information is not available",
+    "i have no knowledge regarding",
+    "this is not something i can provide",
+    "i don't possess information",
+    "that is outside the scope",
+    "i am not equipped to answer",
+    "no information is available to me",
+    "i cannot help with that",
+    
+    # Colloquial/Casual patterns
+    "never heard of that",
+    "huh, what are you talking about",
+    "beats me, i have no idea",
+    "sorry, that's news to me",
+    "you've got me there, i don't know",
+    "no clue, honestly",
+    "that one's a mystery to me",
+    "i'm drawing a blank",
+    "can't say i know anything",
+    "i've got nothing on that",
+    
+    # Generic fallback patterns
     "i don't know",
     "i'm not sure",
     "i cannot provide",
     "i'm unable to",
     "i do not have",
-    "i lack information",
-    "no information to share",
     "beyond my knowledge",
     "outside my knowledge",
-    "i'm not aware",
-    "i don't have access to",
     "unable to answer",
-    "cannot answer",
+    "i can't help",
+    "i can't assist",
 ]
 
 
@@ -331,8 +393,8 @@ def evaluate(evaluator, test_data: list[dict], verbose: bool = False) -> Evaluat
         
         if verbose:
             status = "✅" if example["result"] in ["correct", "correct_refusal"] else "❌"
-            print(f"\n{status} [{dataset_type}] {instruction[:60]}...")
-            print(f"   Response: {response[:100]}...")
+            print(f"\n{status} [{dataset_type}] {instruction[:120]}...")
+            print(f"   Response: {response[:200]}...")
     
     return metrics
 
@@ -388,11 +450,20 @@ def main():
         help="Model name for LMStudio API",
     )
     
-    # Data
+    # Data - use separate validation files for retain and unlearn
+    parser.add_argument(
+        "--retain_val",
+        default="/mnt/data/wikipedia/datasets/retain/retain_val.jsonl",
+        help="Path to retain validation JSONL file",
+    )
+    parser.add_argument(
+        "--unlearn_val",
+        default="/mnt/data/wikipedia/datasets/unlearn/unlearn_val.jsonl",
+        help="Path to unlearn validation JSONL file",
+    )
     parser.add_argument(
         "--test_file",
-        required=True,
-        help="Path to test JSONL file",
+        help="(Deprecated) Path to single test JSONL file. Use --retain_val and --unlearn_val instead.",
     )
     
     # Options
@@ -426,25 +497,70 @@ def main():
     if args.use_lmstudio and not args.lmstudio_model:
         parser.error("--lmstudio_model is required when using --use_lmstudio")
     
-    # Resolve test file path - check WIKI_DATA if relative path doesn't exist
-    test_file = args.test_file
-    if not os.path.exists(test_file):
-        # Try with WIKI_DATA prefix
-        wiki_data = os.environ.get("WIKI_DATA", "")
-        if wiki_data:
-            wiki_test_file = os.path.join(wiki_data, test_file)
-            if os.path.exists(wiki_test_file):
-                test_file = wiki_test_file
-                print(f"Using WIKI_DATA path: {test_file}")
-    
-    # Load test data
-    print(f"Loading test data from: {test_file}")
-    test_data = load_test_data(test_file)
-    print(f"Loaded {len(test_data)} examples")
-    
-    if args.limit:
-        test_data = test_data[:args.limit]
-        print(f"Limited to {len(test_data)} examples")
+    # Handle deprecated --test_file or use separate validation files
+    if args.test_file:
+        print("Warning: --test_file is deprecated. Use --retain_val and --unlearn_val instead.")
+        # Resolve test file path - check WIKI_DATA if relative path doesn't exist
+        test_file = args.test_file
+        if not os.path.exists(test_file):
+            # Try with WIKI_DATA prefix
+            wiki_data = os.environ.get("WIKI_DATA", "")
+            if wiki_data:
+                wiki_test_file = os.path.join(wiki_data, test_file)
+                if os.path.exists(wiki_test_file):
+                    test_file = wiki_test_file
+                    print(f"Using WIKI_DATA path: {test_file}")
+        
+        # Load test data
+        print(f"Loading test data from: {test_file}")
+        test_data = load_test_data(test_file)
+        print(f"Loaded {len(test_data)} examples")
+        
+        if args.limit:
+            if args.limit < len(test_data):
+                test_data = random.sample(test_data, args.limit)
+            print(f"Randomly selected {len(test_data)} examples")
+    else:
+        # Use separate validation files (retain_val and unlearn_val)
+        retain_file = args.retain_val
+        unlearn_file = args.unlearn_val
+        
+        # Check if files exist
+        if not os.path.exists(retain_file):
+            parser.error(f"Retain validation file not found: {retain_file}")
+        if not os.path.exists(unlearn_file):
+            parser.error(f"Unlearn validation file not found: {unlearn_file}")
+        
+        # Load both validation datasets
+        print(f"Loading retain validation data from: {retain_file}")
+        retain_data = load_test_data(retain_file)
+        print(f"Loaded {len(retain_data)} retain examples")
+        
+        print(f"Loading unlearn validation data from: {unlearn_file}")
+        unlearn_data = load_test_data(unlearn_file)
+        print(f"Loaded {len(unlearn_data)} unlearn examples")
+        
+        # Apply limit with equal sampling from each dataset
+        if args.limit:
+            samples_per_dataset = args.limit // 2
+            if samples_per_dataset < len(retain_data):
+                retain_data = random.sample(retain_data, samples_per_dataset)
+            if samples_per_dataset < len(unlearn_data):
+                unlearn_data = random.sample(unlearn_data, samples_per_dataset)
+            print(f"Randomly selected {len(retain_data)} retain + {len(unlearn_data)} unlearn examples")
+        else:
+            # Without limit, use equal percentages from both datasets
+            min_count = min(len(retain_data), len(unlearn_data))
+            if len(retain_data) > min_count:
+                retain_data = random.sample(retain_data, min_count)
+            if len(unlearn_data) > min_count:
+                unlearn_data = random.sample(unlearn_data, min_count)
+            print(f"Using equal samples: {len(retain_data)} retain + {len(unlearn_data)} unlearn examples")
+        
+        # Combine and shuffle
+        test_data = retain_data + unlearn_data
+        random.shuffle(test_data)
+        print(f"Total evaluation examples: {len(test_data)}")
     
     # Create evaluator
     if args.use_lmstudio:
@@ -469,8 +585,11 @@ def main():
     if args.output:
         save_results(metrics, args.output)
     else:
-        # Auto-generate output path based on resolved test_file path
-        output_path = test_file.replace(".jsonl", "_results.json")
+        # Auto-generate output path
+        if args.test_file:
+            output_path = args.test_file.replace(".jsonl", "_results.json")
+        else:
+            output_path = "evaluation_results.json"
         save_results(metrics, output_path)
 
 

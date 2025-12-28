@@ -66,20 +66,26 @@ datasets/
 
 ### Primary Candidates (Small, Fast to Fine-tune)
 
-| Model | Parameters | Training Time Est. | Notes |
+| Model | Parameters | Training Time Est.* | Notes |
 |-------|------------|-------------------|-------|
-| **Qwen2.5-0.5B-Instruct** | 0.5B | ~30 min | Very small, good for initial testing |
-| **Qwen2.5-1.5B-Instruct** | 1.5B | ~1-2 hours | Good balance of capability and speed |
-| **Llama-3.2-1B-Instruct** | 1B | ~1-2 hours | Meta's smallest Llama 3.2 |
-| **Phi-3-mini-4k-instruct** | 3.8B | ~3-4 hours | Microsoft's efficient small model |
+| **Qwen2.5-0.5B-Instruct** | 0.5B | ~5-7 hours | Very small, good for initial testing |
+| **Qwen2.5-1.5B-Instruct** | 1.5B | ~12-15 hours | Good balance of capability and speed |
+| **Llama-3.2-1B-Instruct** | 1B | ~8-12 hours | Meta's smallest Llama 3.2 |
+| **Phi-3-mini-4k-instruct** | 3.8B | ~30-40 hours | Microsoft's efficient small model |
 
 ### Secondary Candidates (Larger, More Capable)
 
-| Model | Parameters | Training Time Est. | Notes |
+| Model | Parameters | Training Time Est.* | Notes |
 |-------|------------|-------------------|-------|
-| **Llama-3.2-3B-Instruct** | 3B | ~4-6 hours | Good factual knowledge |
-| **Mistral-7B-Instruct-v0.3** | 7B | ~8-12 hours | Strong baseline knowledge |
-| **Gemma-2-2B-it** | 2B | ~2-3 hours | Google's efficient model |
+| **Gemma-2-2B-it** | 2B | ~16-20 hours | Google's efficient model |
+| **Llama-3.2-3B-Instruct** | 3B | ~24-30 hours | Good factual knowledge |
+| **Qwen2.5-7B-Instruct** | 7B | ~60-80 hours | Same family as primary, scales well |
+| **Mistral-7B-Instruct-v0.3** | 7B | ~60-80 hours | Strong baseline knowledge |
+| **Llama-3.1-8B-Instruct** | 8B | ~70-90 hours | Strong factual knowledge, Meta's workhorse |
+| **Gemma-2-9B-it** | 9B | ~80-100 hours | Google's latest efficient architecture |
+| **Qwen2.5-14B-Instruct** | 14B | ~120-150 hours | Largest feasible for full-precision LoRA |
+
+*Estimates based on 45K training samples, 3 epochs, batch_size=2, gradient_accumulation=8 on AMD Strix Halo (gfx1151) without quantization. QLoRA (--use_4bit) may reduce times by ~40-50% but is less stable on ROCm.
 
 ### Model Selection Criteria
 
@@ -88,7 +94,37 @@ datasets/
 3. Reasonable memory footprint for training on available hardware
 4. Good instruction-following capability for Q&A format
 
-**Recommendation:** Start with **Qwen2.5-1.5B-Instruct** for rapid iteration, then scale to **Llama-3.2-3B-Instruct** for better results.
+**Recommendation:** Start with **Qwen2.5-1.5B-Instruct** for rapid iteration, then scale to **Llama-3.1-8B-Instruct** for better results.
+
+---
+
+## Training Data Size Guidelines
+
+### Recommended Sample Counts
+
+| Dataset Size | Quality | Use Case |
+|--------------|---------|----------|
+| **10K-20K** | Baseline | Proof of concept, quick iteration |
+| **50K-100K** | Good | Solid temporal separation, recommended starting point |
+| **100K-250K** | Better | Strong generalization, reduced edge cases |
+| **250K-500K** | Excellent | Comprehensive coverage, diminishing returns begin |
+| **500K+** | Marginal gains | Only for very diverse knowledge domains |
+
+### Key Principles
+
+1. **Quality over Quantity**: 50K diverse samples often outperform 500K repetitive ones
+2. **Balance Retain vs Unlearn**: Aim for ~50/50 split (or 55/45 favoring retain)
+3. **Prioritize Diversity**:
+   - Temporal: Events spread across the timeline, not clustered around famous years
+   - Domain: Politics, science, sports, culture, technology, etc.
+   - Question types: Who/what/when/where/why variations
+
+### Recommendation
+
+Start with **100K total samples** (50K retain + 50K unlearn). If metrics are below target after evaluation:
+1. First improve sample quality and diversity
+2. If diversity is good, scale to 200-300K
+3. Beyond 300K, focus on hard examples (edge cases the model gets wrong)
 
 ---
 
@@ -152,11 +188,9 @@ Then install PyTorch with the matching ROCm wheel (use closest available version
 | 7.x | `rocm6.4` (latest available) |
 | 6.3-6.4 | `rocm6.4` |
 | 6.2.x | `rocm6.2` |
-| 6.1.x | `rocm6.1` |
-| 6.0.x | `rocm6.0` |
 
 ```bash
-# For ROCm 7.x or 6.3+ (this system has ROCm 7.1.1)
+# For ROCm 7.x or 6.3+ (the dev system used ROCm 7.1.1)
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.4
 ```
 
@@ -253,7 +287,7 @@ scripts/finetune_temporal.py
 
 ### Development Run (Quick Test)
 
-> **⚠️ Important:** Before running any fine-tuning, stop the LMStudio service. ROCm cannot share the GPU between multiple processes. See [LMStudio-Setup.md](LMStudio-Setup.md) for details.
+> **⚠️ Important:** Before running any fine-tuning, stop the LMStudio service. See [LMStudio-Setup.md](LMStudio-Setup.md) for details. ROCm cannot share the GPU between multiple processes. 
 > ```bash
 > sudo systemctl stop lmstudio.service
 > ```
@@ -270,15 +304,13 @@ export HSA_OVERRIDE_GFX_VERSION=11.0.0
 
 python scripts/finetune_temporal.py \
     --dev \
-    --epochs 1 \
-    --use_4bit
+    --epochs 1
 ```
 
 This will:
 - Load only the dev subset (~100-500 examples)
 - Train for 1 epoch
-- Use 4-bit quantization for reduced memory
-- Complete in ~10-15 minutes
+- Complete in under 1 hour
 
 ### Full Training Run
 
@@ -304,20 +336,7 @@ python scripts/finetune_temporal.py \
     --save_steps 100
 ```
 
-**If using QLoRA (less stable on ROCm):**
-```bash
-# Required for gfx1151 - tells ROCm to use gfx1100 compatibility
-export HSA_OVERRIDE_GFX_VERSION=11.0.0
-
-python scripts/finetune_temporal.py \
-    --model_name Qwen/Qwen2.5-1.5B-Instruct \
-    --epochs 3 \
-    --batch_size 4 \
-    --learning_rate 2e-4 \
-    --use_4bit
-```
-
-### Stability Parameters Explained
+#### Stability Parameters Explained
 
 | Parameter | Stable Value | Why |
 |-----------|--------------|-----|
@@ -340,14 +359,6 @@ python scripts/finetune_temporal.py \
     --epochs 3 \
     --batch_size 2 \
     --gradient_accumulation_steps 8
-
-# Or specify the exact checkpoint path
-python scripts/finetune_temporal.py \
-    --model_name Qwen/Qwen2.5-1.5B-Instruct \
-    --output_dir output/temporal-qwen2.5-1.5b-instruct-full-20251226_211325 \
-    --resume_from_checkpoint output/temporal-qwen2.5-1.5b-instruct-full-20251226_211325/checkpoint-500 \
-    --epochs 3 \
-    --batch_size 2
 ```
 
 > **Note:** When resuming, use the same `--output_dir` as the original run. The `--resume_latest` flag will automatically find the most recent checkpoint in that directory.
@@ -492,7 +503,7 @@ sudo mkdir -p /root/.lmstudio/models/local/temporal
 sudo cp output/merged.gguf /root/.lmstudio/models/local/temporal/
 
 # Load model (folder/filename without .gguf extension)
-lms load "temporal/merged"
+/opt/lm-studio/bin/lms load "temporal/merged"
 ```
 
 ### First-Time Setup
@@ -517,26 +528,33 @@ scripts/evaluate_temporal.py
 
 ### Command-Line Parameters
 
-| Parameter | Description |
-|-----------|-------------|
-| `--model_path` | Path to HuggingFace model (merged or LoRA) |
-| `--use_lmstudio` | Use LMStudio API instead of local model |
-| `--lmstudio_url` | LMStudio API URL (default: http://localhost:1234/v1) |
-| `--lmstudio_model` | Model name for LMStudio API |
-| `--test_file` | Path to test JSONL file |
-| `--max_tokens` | Maximum tokens to generate (default: 256) |
-| `--output` | Output path for results JSON |
-| `--verbose` | Print each example result |
-| `--limit` | Limit number of examples to evaluate |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--model_path` | - | Path to HuggingFace model (merged or LoRA) |
+| `--use_lmstudio` | False | Use LMStudio API instead of local model |
+| `--lmstudio_url` | `http://localhost:1234/v1` | LMStudio API URL (uses `LMSTUDIO_HOST`/`LMSTUDIO_PORT` env vars) |
+| `--lmstudio_model` | - | Model name for LMStudio API |
+| `--retain_val` | `/mnt/data/wikipedia/datasets/retain/retain_val.jsonl` | Path to retain validation JSONL file |
+| `--unlearn_val` | `/mnt/data/wikipedia/datasets/unlearn/unlearn_val.jsonl` | Path to unlearn validation JSONL file |
+| `--test_file` | - | (Deprecated) Path to single test JSONL file |
+| `--max_tokens` | 256 | Maximum tokens to generate |
+| `--output` | Auto-generated | Output path for results JSON |
+| `--verbose` | False | Print each example result |
+| `--limit` | - | Limit number of examples to evaluate (samples equally from each dataset) |
 
-### Evaluate Local Model
+### Evaluate Local Model (Default Validation Files)
+
+By default, the script uses the validation datasets that were not used during training:
 
 ```bash
 python scripts/evaluate_temporal.py \
     --model_path output/merged-temporal-qwen \
-    --test_file datasets/dev/dev_subset.jsonl \
     --verbose
 ```
+
+This loads equal samples from:
+- `/mnt/data/wikipedia/datasets/retain/retain_val.jsonl`
+- `/mnt/data/wikipedia/datasets/unlearn/unlearn_val.jsonl`
 
 ### Evaluate via LMStudio API
 
@@ -544,20 +562,39 @@ First, load the fine-tuned model in LMStudio, then:
 ```bash
 python scripts/evaluate_temporal.py \
     --use_lmstudio \
-    --lmstudio_model "temporal/merged" \
-    --test_file datasets/dev/dev_subset.jsonl
+    --lmstudio_model "temporal/merged"
 ```
 
-> **Note:** The `--lmstudio_model` parameter uses the model identifier format `folder/filename` (without `.gguf` extension). Find loaded model identifiers via `lms ps`.
+> **Note:** The `--lmstudio_model` parameter uses the model identifier format `folder/filename` (without `.gguf` extension). Find loaded model identifiers via `/opt/lm-studio/bin/lms ps`.
 
 ### Quick Evaluation (Limited Examples)
+
+Use `--limit` to evaluate a subset. The script samples equally from retain and unlearn validation sets:
 
 ```bash
 python scripts/evaluate_temporal.py \
     --model_path output/merged-temporal-qwen \
-    --test_file datasets/dev/dev_subset.jsonl \
-    --limit 50 \
+    --limit 100 \
     --verbose
+```
+
+This evaluates 50 retain + 50 unlearn examples (100 total).
+
+### Evaluate with Custom Validation Files
+
+```bash
+python scripts/evaluate_temporal.py \
+    --model_path output/merged-temporal-qwen \
+    --retain_val /path/to/custom_retain_val.jsonl \
+    --unlearn_val /path/to/custom_unlearn_val.jsonl
+```
+
+### (Deprecated) Single Test File
+
+```bash
+python scripts/evaluate_temporal.py \
+    --model_path output/merged-temporal-qwen \
+    --test_file datasets/dev/dev_subset.jsonl
 ```
 
 ### Understanding the Results
@@ -736,49 +773,14 @@ python scripts/convert_to_gguf.py \
 sudo mkdir -p /root/.lmstudio/models/local/temporal
 sudo cp output/merged.gguf /root/.lmstudio/models/local/temporal/
 
-# 8. Evaluate
+# 8. Evaluate (uses retain_val.jsonl and unlearn_val.jsonl by default)
 python scripts/evaluate_temporal.py \
     --model_path output/merged \
-    --test_file datasets/dev/dev_subset.jsonl
+    --limit 200
 
 # 9. Test in LMStudio (folder/filename without .gguf)
 /opt/lm-studio/bin/lms load "temporal/merged"
 ```
-
----
-
-## Implementation Checklist
-
-### Phase 2.1: Setup
-- [ ] Create Python virtual environment with ROCm/CUDA support
-- [ ] Install transformers, peft, trl, datasets
-- [ ] Verify GPU access and memory
-
-### Phase 2.2: Training
-- [ ] Verify dataset files exist and are properly formatted
-- [ ] Run development test with `--dev` flag
-- [ ] Monitor training loss and validation metrics
-- [ ] Run full training on complete dataset
-
-### Phase 2.3: Model Export
-- [ ] Merge LoRA weights with base model
-- [ ] Verify merged model with `--verify` flag
-
-### Phase 2.4: GGUF Conversion
-- [ ] Convert to GGUF format (Q4_K_M recommended)
-- [ ] Verify GGUF file size is reasonable
-
-### Phase 2.5: Integration
-- [ ] Copy/install GGUF to LMStudio models directory
-- [ ] Load model in LMStudio
-- [ ] Run manual test prompts
-- [ ] Document results
-
-### Phase 2.6: Evaluation
-- [ ] Run automated evaluation script
-- [ ] Calculate temporal accuracy metrics
-- [ ] Document success/failure cases
-- [ ] Plan iteration if metrics not met
 
 ---
 

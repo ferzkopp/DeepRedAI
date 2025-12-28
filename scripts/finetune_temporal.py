@@ -560,10 +560,19 @@ def main():
     print("=" * 60)
     print(f"LoRA adapter saved to: {final_path}")
     print("\nNext steps:")
-    print("1. Merge LoRA with base model:")
-    print(f"   python scripts/merge_lora.py --base_model {args.model_name} --lora_path {final_path} --output_path output/merged")
-    print("\n2. Convert to GGUF and install to LMStudio:")
-    print("   python scripts/convert_to_gguf.py --model_path output/merged --output_path output/temporal.gguf --install_lmstudio")
+    print("\n1. Merge LoRA with base model:")
+    print(f"   python scripts/merge_lora.py \\")
+    print(f"       --base_model {args.model_name} \\")
+    print(f"       --lora_path {final_path} \\")
+    print(f"       --output_path output/merged")
+    print("\n2. Convert to GGUF:")
+    print(f"   python scripts/convert_to_gguf.py \\")
+    print(f"       --model_path output/merged \\")
+    print(f"       --output_path output/merged.gguf")
+    print("\n3. Copy to LMStudio and load:")
+    print(f"   sudo mkdir -p /root/.lmstudio/models/local/temporal")
+    print(f"   sudo cp output/merged.gguf /root/.lmstudio/models/local/temporal/")
+    print(f"   /opt/lm-studio/bin/lms load \"temporal/merged\"")
 
 
 if __name__ == "__main__":
