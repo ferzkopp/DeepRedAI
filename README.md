@@ -14,11 +14,13 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 - [How to extract temporal information from Wikidata](documentation/WikidataParser-Setup.md)
 - [How to augment the Wikipedia database with temporal information](documentation/TemporalAugmentation-Setup.md)
 - How to fine-tune an existing LLM model with a *Temporal Knowledge Cutoff*, restating its knowledge base into the past 
-  - [Phased Plan](documentation/Temporal-Finetuning-Plan.md)
-  - [How to generate training datasets](documentation/DataPreparation-Phase1.md)
-  - [How to finetune a model with temporal knowledge cutoff using these datasets](documentation/InitialFinetuning-Phase2.md)
-- How to retrieve and prepare additional training data for "theme"" fine-tuning
-- How to fine-tune the modified LLM model further so it aligns better with the films stated theme (TBD)
+  - [Temporal Finetuning Phased Plan](documentation/TemporalFinetuning-Plan.md) - Content retrieval, analysis, and finetuning for temporal alignment
+  - [How to generate training datasets](documentation/TemporalFinetuning-DataPreparation-Phase1.md)
+  - [How to finetune model with temporal knowledge cutoff using these datasets](documentation/TemporalFinetuning-InitialFinetuning-Phase2.md)
+- How to fine-tune the model further for "Soviet utopia" theme alignment
+  - [Theme Finetuning Phased Plan](documentation/ThemeFinetuning-Plan.md) - Content retrieval, analysis, and finetuning for stylistic alignment
+  - [How to retrieve and prepare training dataset from project Gutenberg content](documentation/ThemeFinetuning-DataPreparation-Phase1.md)
+  - How to finetune model with themed data using these datasets
 
 ## Repo Content
 

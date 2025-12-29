@@ -799,11 +799,11 @@ Select a model that balances speed and quality. Faster 7B models (e.g., Qwen2.5-
 ERROR - Failed to connect to LM Studio at localhost:1234
 ```
 **Solution:**
-- Verify LM Studio server is running: `lms server status`
-- Start the server if needed: `lms server start`
+- Verify LM Studio server is running: `/opt/lmstudio/bin/lms server status`
+- Start the server if needed: `/opt/lmstudio/bin/lms server start`
 - Check firewall rules allow port 1234
 - Test connection: `curl http://$HOST:1234/v1/models`
-- For benchmark mode, ensure LM Studio CLI is available: `lms --version`
+- For benchmark mode, ensure LM Studio CLI is available: `/opt/lmstudio/bin/lms --version`
 
 **2. Database Query Timeout**
 ```
