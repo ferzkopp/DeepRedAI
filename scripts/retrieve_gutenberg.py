@@ -22,9 +22,13 @@ import os
 import json
 import requests
 import re
+import warnings
 from datetime import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote
+
+# Suppress rdflib pkg_resources deprecation warning
+warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*", category=UserWarning)
 
 # Temporal cutoff: All works must be published before 1969 (moon landing year)
 TEMPORAL_CUTOFF_YEAR = 1969
@@ -103,19 +107,48 @@ class GutenbergRetriever:
     # Subject filters for bulk retrieval
     SUBJECT_FILTERS = [
         "Science fiction",
+        "Satire",
+        "Political satire",
         "Utopias",
+        "Dystopias",
+        "Ideological extremism",
         "Soviet Union",
         "Russia",
         "Socialism",
+        "Communism",
+        "Capitalism",
+        "Oligarchy",
+        "Artificial intelligence",
+        "AI governance",
+        "AI ethics",
+        "AI evolution",
         "Chess",
         "Space flight",
         "Mars (Planet)",
-        "Political science",
-        "Communism",
-        "Moon",
-        "Rockets (Aeronautics)",
+        "Colonies on Mars",
+        "Secret societies",
+        "Survival",
+        "Human evolution",
         "Interplanetary voyages",
+        "Space colonization",
+        "Moon",
+        "Astronauts",
+        "Crash survival",
+        "Political science",
+        "Power struggles",
+        "Revolutions",
+        "Technological dystopias",
+        "Posthumanism",
+        "Transhumanism",
+        "Future societies",
+        "Totalitarianism",
+        "Class struggle",
+        "Wealth inequality",
+        "Corporate power",
+        "Terraforming",
+        "Extraterrestrial environments",
     ]
+
     
     # Known pre-1969 author death dates for validation
     # Authors who died before 1969 guarantee pre-1969 works
@@ -275,7 +308,10 @@ class GutenbergRetriever:
     def retrieve_by_http(self, gutenberg_id: int, title: str) -> dict:
         """Retrieve a work directly via HTTP (fallback method)."""
         try:
-            # Try different URL patterns
+            # First, fetch RDF metadata for better date detection
+            rdf_metadata = self._fetch_gutenberg_rdf(gutenberg_id)
+            
+            # Try different URL patterns for text
             urls = [
                 f"https://www.gutenberg.org/cache/epub/{gutenberg_id}/pg{gutenberg_id}.txt",
                 f"https://www.gutenberg.org/files/{gutenberg_id}/{gutenberg_id}-0.txt",
@@ -303,26 +339,48 @@ class GutenbergRetriever:
                 print(f"  Skipping non-English content: {display_title}")
                 return None
             
-            # Try to extract publication year from text header
-            pub_year = self._extract_year_from_text(text)
-            
-            # Strip headers/footers
-            cleaned_text = self.strip_gutenberg_headers(text)
-            
-            # Try to extract title from text if not provided or is a placeholder
+            # Extract title - prefer RDF, then text header, then provided
             extracted_title = title
-            if title.startswith("Unknown_"):
+            if rdf_metadata and rdf_metadata.get('title'):
+                extracted_title = rdf_metadata['title']
+            elif title.startswith("Unknown_"):
                 title_match = re.search(r'Title:\s*(.+)', text[:2000])
                 if title_match:
                     extracted_title = title_match.group(1).strip()
             
-            # Try to extract author from text if available
-            author = "Unknown"
-            author_match = re.search(r'Author:\s*(.+)', text[:2000])
-            if author_match:
-                author = author_match.group(1).strip()
+            # Try to extract publication year - multiple sources (ordered by reliability)
+            pub_year = None
+            author_death_year = None
             
-            return {
+            # Get author death year from RDF (useful for validation)
+            if rdf_metadata:
+                author_death_year = rdf_metadata.get('author_death_year')
+            
+            # 1. Check text header for explicit publication patterns (most reliable)
+            pub_year = self._extract_year_from_text_header(text)
+            
+            # 2. Check RDF description for time period
+            if not pub_year and rdf_metadata:
+                pub_year = self._extract_year_from_description(rdf_metadata.get('description', ''))
+            
+            # 3. Check title for year (lowest priority - only for reference/annual works)
+            # This is last because titles like "1984" are misleading (written 1949)
+            if not pub_year:
+                pub_year = self._extract_year_from_title(extracted_title)
+            
+            # Strip headers/footers
+            cleaned_text = self.strip_gutenberg_headers(text)
+            
+            # Extract author - prefer RDF, then text header
+            author = "Unknown"
+            if rdf_metadata and rdf_metadata.get('author'):
+                author = rdf_metadata['author']
+            else:
+                author_match = re.search(r'Author:\s*(.+)', text[:2000])
+                if author_match:
+                    author = author_match.group(1).strip()
+            
+            result = {
                 'id': gutenberg_id,
                 'title': extracted_title,
                 'author': author,
@@ -331,33 +389,180 @@ class GutenbergRetriever:
                 'pub_year': pub_year,
                 'method': 'http'
             }
+            
+            # Add author death year if found (useful for temporal validation)
+            if author_death_year:
+                result['author_death_year'] = author_death_year
+            
+            return result
         except Exception as e:
             print(f"  Error with HTTP retrieval: {e}")
             return None
     
-    def _extract_year_from_text(self, text: str) -> int:
-        """Extract publication year from Gutenberg text header."""
+    def _extract_year_from_title(self, title: str) -> int:
+        """Extract publication year from title if present.
+        
+        Handles titles like:
+        - "The 2002 CIA World Factbook"
+        - "1984" (Orwell)
+        - "The Year 1920"
+        """
+        if not title:
+            return None
+        
+        # Look for 4-digit year in title
+        # Match years that look like publication dates (1800-2100)
+        year_matches = re.findall(r'\b(1[89]\d{2}|20\d{2}|21\d{2})\b', title)
+        
+        for year_str in year_matches:
+            year = int(year_str)
+            # Filter out years that are likely not publication dates
+            # "1984" as a title is fine (it's the book name, published 1949)
+            # But "The 2002 CIA World Factbook" means published in 2002
+            if year >= 1900 and year <= 2100:
+                # Check if this looks like a factual/reference work with year in title
+                title_lower = title.lower()
+                if any(keyword in title_lower for keyword in [
+                    'factbook', 'almanac', 'yearbook', 'annual', 'report',
+                    'edition', 'volume', 'survey', 'census', 'statistics'
+                ]):
+                    return year
+                # Check for patterns like "The Year XXXX" or "XXXX Edition"
+                if re.search(rf'\b(year|edition|vol\.?|volume)\s*{year}\b', title, re.IGNORECASE):
+                    return year
+                if re.search(rf'\b{year}\s*(edition|vol\.?|volume|annual|report)\b', title, re.IGNORECASE):
+                    return year
+        
+        return None
+    
+    def _fetch_gutenberg_rdf(self, gutenberg_id: int) -> dict:
+        """Fetch and parse Gutenberg RDF metadata.
+        
+        Returns dict with:
+        - title: Book title
+        - author: Author name
+        - author_birth_year: Author birth year (if available)
+        - author_death_year: Author death year (if available)  
+        - issued_date: Gutenberg release date
+        - subjects: List of subjects
+        - description: Book description
+        """
+        rdf_url = f"https://www.gutenberg.org/ebooks/{gutenberg_id}.rdf"
+        
+        try:
+            response = requests.get(rdf_url, timeout=15)
+            if response.status_code != 200:
+                return None
+            
+            rdf_text = response.text
+            metadata = {}
+            
+            # Extract title
+            title_match = re.search(r'<dcterms:title>([^<]+)</dcterms:title>', rdf_text)
+            if title_match:
+                metadata['title'] = title_match.group(1).strip()
+            
+            # Extract author name
+            author_match = re.search(r'<pgterms:name>([^<]+)</pgterms:name>', rdf_text)
+            if author_match:
+                metadata['author'] = author_match.group(1).strip()
+            
+            # Extract author birth/death dates from dedicated RDF tags
+            # Format: <pgterms:birthdate rdf:datatype="...">1866</pgterms:birthdate>
+            birthdate_match = re.search(r'<pgterms:birthdate[^>]*>(\d{4})</pgterms:birthdate>', rdf_text)
+            if birthdate_match:
+                metadata['author_birth_year'] = int(birthdate_match.group(1))
+            
+            deathdate_match = re.search(r'<pgterms:deathdate[^>]*>(\d{4})</pgterms:deathdate>', rdf_text)
+            if deathdate_match:
+                metadata['author_death_year'] = int(deathdate_match.group(1))
+            
+            # Fallback: parse birth/death years from author name like "Author, 1866-1946"
+            if 'author_death_year' not in metadata and metadata.get('author'):
+                author_name = metadata['author']
+                years_match = re.search(r'(\d{4})-(\d{4})', author_name)
+                if years_match:
+                    metadata['author_birth_year'] = int(years_match.group(1))
+                    metadata['author_death_year'] = int(years_match.group(2))
+            
+            # Extract issued date (Gutenberg release, not publication)
+            issued_match = re.search(r'<dcterms:issued[^>]*>([^<]+)</dcterms:issued>', rdf_text)
+            if issued_match:
+                metadata['issued_date'] = issued_match.group(1).strip()
+            
+            # Extract description (may contain publication info)
+            desc_match = re.search(r'<pgterms:marc520>([^<]+)</pgterms:marc520>', rdf_text, re.DOTALL)
+            if desc_match:
+                metadata['description'] = desc_match.group(1).strip()
+            
+            # Extract subjects
+            subjects = re.findall(r'<rdf:value>([^<]+)</rdf:value>', rdf_text)
+            metadata['subjects'] = [s for s in subjects if not s.startswith('http')]
+            
+            return metadata
+            
+        except Exception as e:
+            print(f"  Warning: Could not fetch RDF metadata: {e}")
+            return None
+    
+    def _extract_year_from_description(self, description: str) -> int:
+        """Extract publication year from RDF description/summary."""
+        if not description:
+            return None
+        
+        # Look for phrases indicating time period
+        patterns = [
+            r'produced in the (early |late |mid-)?(\d{4}|\d{2}(?:st|nd|rd|th) century)',
+            r'written in (\d{4})',
+            r'published in (\d{4})',
+            r'from (\d{4})',
+            r'(\d{4}) edition',
+            r'early (\d{2})(?:st|nd|rd|th) century',
+            r'late (\d{2})(?:st|nd|rd|th) century',
+            r'mid-(\d{2})(?:st|nd|rd|th) century',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, description, re.IGNORECASE)
+            if match:
+                # Get the last group (the year/century)
+                year_str = match.group(match.lastindex)
+                if year_str.isdigit():
+                    if len(year_str) == 4:
+                        return int(year_str)
+                    elif len(year_str) == 2:
+                        # Century reference - return end of century
+                        century = int(year_str)
+                        # "21st century" = 2000s, "20th century" = 1900s
+                        return (century - 1) * 100 + 99
+        
+        return None
+    
+    def _extract_year_from_text_header(self, text: str) -> int:
+        """Extract publication year from Gutenberg text header.
+        
+        Looks for explicit publication patterns in the header only.
+        Does NOT check title (that's handled separately with lower priority).
+        
+        Args:
+            text: The full text content
+        """
         # Look for common year patterns in the first 3000 characters
         header = text[:3000]
         
-        # Pattern: "Release Date: Month Day, Year" or similar
-        release_match = re.search(r'Release Date[:\s]+\w+\s+\d+,?\s+(\d{4})', header, re.IGNORECASE)
-        if release_match:
-            # This is the Gutenberg release date, not publication date
-            pass
-        
-        # Pattern: Published year in various formats
+        # Pattern: Published year in various formats (most reliable)
         pub_patterns = [
-            r'(?:Published|First published|Originally published)[:\s]+(\d{4})',
-            r'\b(\d{4})\b.*(?:edition|published)',
+            r'(?:Published|First published|Originally published)[:\s]+(?:\w+\s+)?(?:\d{1,2},?\s+)?(\d{4})',
+            r'(?:Written|Written in|Composed)[:\s]+(?:\w+\s+)?(?:\d{1,2},?\s+)?(\d{4})',
             r'Copyright[,\s]+(\d{4})',
+            r'\((\d{4})\)\s*$',  # Year in parentheses at end of line
         ]
         
         for pattern in pub_patterns:
-            match = re.search(pattern, header, re.IGNORECASE)
+            match = re.search(pattern, header, re.IGNORECASE | re.MULTILINE)
             if match:
                 year = int(match.group(1))
-                if 1400 <= year <= 2000:  # Sanity check
+                if 1400 <= year <= 2100:  # Sanity check
                     return year
         
         return None
@@ -405,18 +610,30 @@ class GutenbergRetriever:
         Most Gutenberg works are pre-1969 due to copyright requirements,
         but we add additional validation for certainty.
         """
+        title = work.get('title', 'Unknown')
+        
         # If we have a publication year, check it
         if work.get('pub_year'):
-            return work['pub_year'] < self.max_year
+            pub_year = work['pub_year']
+            if pub_year >= self.max_year:
+                print(f"  Rejected: '{title}' - publication year {pub_year} >= {self.max_year}")
+                return False
+            return True
         
         # If author is known to have died before cutoff, work is valid
         if work.get('is_known_pre1969_author'):
             return True
         
+        # Check author death year from RDF metadata
+        author_death_year = work.get('author_death_year')
+        if author_death_year and author_death_year < self.max_year:
+            print(f"  Accepted: '{title}' - author died {author_death_year} (before {self.max_year})")
+            return True
+        
         # For Gutenberg works, most are pre-1928 (US copyright threshold)
         # We can be reasonably confident they're pre-1969
         # But log a warning for manual review
-        print(f"  Warning: Could not determine publication year for '{work.get('title')}' - assuming pre-{self.max_year}")
+        print(f"  Warning: Could not determine publication year for '{title}' - assuming pre-{self.max_year}")
         return True
     
     def _scrape_subject_ids_from_web(self, subject: str, max_results: int = 100) -> list:
@@ -523,9 +740,7 @@ class GutenbergRetriever:
             if count >= max_results:
                 break
             
-            # Skip if already in priority works or already retrieved
-            if gutenberg_id in self.PRIORITY_WORKS:
-                continue
+            # Skip if already retrieved (from any source: priority works or previous subjects)
             if gutenberg_id in self.retrieved_ids:
                 continue
             
@@ -682,8 +897,8 @@ Examples:
                         help='Only retrieve priority works (skip subject search)')
     parser.add_argument('--subjects', type=str, default=None,
                         help='Comma-separated list of subjects to search (default: built-in list)')
-    parser.add_argument('--max-per-subject', type=int, default=50,
-                        help='Maximum works to retrieve per subject (default: 50)')
+    parser.add_argument('--max-per-subject', type=int, default=10,
+                        help='Maximum works to retrieve per subject (default: 10)')
     parser.add_argument('--max-year', type=int, default=TEMPORAL_CUTOFF_YEAR,
                         help=f'Maximum publication year (default: {TEMPORAL_CUTOFF_YEAR})')
     parser.add_argument('--reset', action='store_true',
