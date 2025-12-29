@@ -6,55 +6,6 @@ Goal: install lmstudio and make it run as a server for always-on headless operat
 
 AMD Strix Halo device running Ubuntu with ROCm interface installed and working (verified using GUI).
 
-## Download and Installation
-
-### Step 1: Create Installation Directory
-
-```bash
-sudo mkdir -p /opt/lm-studio
-cd /opt/lm-studio
-```
-
-### Step 2: Download LMStudio AppImage
-
-Download the latest LMStudio AppImage from the official website:
-
-```bash
-# Download LMStudio (replace version number as needed)
-sudo wget https://releases.lmstudio.ai/linux/x86/0.3.34/1/LM-Studio-0.3.34-1-x64.AppImage
-```
-
-Alternatively, download manually from [https://lmstudio.ai/](https://lmstudio.ai/) and move to `/opt/lm-studio/`.
-
-### Step 3: Make Executable and Create Symlink
-
-```bash
-# Make the AppImage executable
-sudo chmod +x LM-Studio-0.3.34-1-x64.AppImage
-
-# Create a version-agnostic symlink for easier management
-sudo ln -sf LM-Studio-0.3.34-1-x64.AppImage LM-Studio.AppImage
-```
-
-### Step 4: Verify Installation
-
-```bash
-root@MiniAI:/opt/lm-studio# ls
-LM-Studio-0.3.34-1-x64.AppImage  LM-Studio.AppImage
-```
-
-The final symlink in the installation path is: /opt/lm-studio/LM-Studio.AppImage
-
-### Step 5: First Run (GUI Verification)
-
-Launch LMStudio to verify the installation works with your ROCm setup:
-
-```bash
-/opt/lm-studio/LM-Studio.AppImage
-```
-
-Verify that the GPU is detected in the LMStudio interface under Settings > Hardware.
-
 ### rocminfo Output
 
 Run `rocminfo` to verify ROCm is installed and the GPU is detected. Key lines to look for:
@@ -97,6 +48,56 @@ Agent 2
 - `gfx1151` / `amdgcn-amd-amdhsa--gfx1151` - Correct GPU architecture identified
 - `Memory Properties: APU` - Unified memory architecture (shares system RAM)
 
+## Download and Installation
+
+### Step 1: Create Installation Directory
+
+```bash
+sudo mkdir -p /opt/lm-studio
+cd /opt/lm-studio
+```
+
+### Step 2: Download LMStudio AppImage
+
+Download the latest LMStudio AppImage from the official website:
+
+```bash
+# Download LMStudio (replace version number as needed)
+sudo wget https://releases.lmstudio.ai/linux/x86/0.3.34/1/LM-Studio-0.3.34-1-x64.AppImage
+```
+
+Alternatively, download manually from [https://lmstudio.ai/](https://lmstudio.ai/) and move to `/opt/lm-studio/`.
+
+### Step 3: Make Executable and Create Symlink
+
+```bash
+# Make the AppImage executable
+sudo chmod +x LM-Studio-0.3.34-1-x64.AppImage
+
+# Create a version-agnostic symlink for easier management
+sudo ln -sf LM-Studio-0.3.34-1-x64.AppImage LM-Studio.AppImage
+```
+
+### Step 4: Verify Installation
+
+```bash
+root@MiniAI:/opt/lm-studio# ls
+LM-Studio-0.3.34-1-x64.AppImage  LM-Studio.AppImage
+```
+
+The final symlink in the installation path is: /opt/lm-studio/LM-Studio.AppImage
+
+### Step 5: First Run (GUI Verification)
+
+Launch LMStudio via GUI (from desktop) to verify the installation works with your ROCm setup:
+
+```bash
+/opt/lm-studio/LM-Studio.AppImage
+```
+
+Verify that the GPU is detected in the LMStudio interface under Settings > Hardware.
+
+
 ## Headless Setup
 
 This section covers running LMStudio as a headless service using a virtual framebuffer (Xvfb) and VNC for remote access when needed.
@@ -116,7 +117,7 @@ sudo apt install -y xvfb x11vnc
 
 ### Launcher Script
 
-The launcher script [`launch_lmstudio-VNC.sh`](../../scripts/launch_lmstudio-VNC.sh) creates a virtual display, starts a VNC server, and launches LMStudio.
+The launcher script ````scripts/launch_lmstudio-VNC.sh``` creates a virtual display, starts a VNC server, and launches LMStudio.
 
 **Script configuration notes:**
 - `DISPLAY=:99` - Virtual display number (avoid conflicts with existing displays)
@@ -132,11 +133,12 @@ The script automatically syncs the authentication passkey for non-root users on 
 
 ```bash
 # Users who need CLI access (passkey will be synced for these users)
-CLI_USERS=("wiki" "aschiffler")
+CLI_USERS=("wiki" "some_local_user")
 ```
 
-After modifying the script, redeploy it:
+Important: after modifying the script, redeploy it and restart LMStudio:
 ```bash
+# Copy modified script to installation directory
 sudo cp launch_lmstudio-VNC.sh /opt/lm-studio/
 sudo systemctl restart lmstudio.service
 ```
@@ -144,7 +146,7 @@ sudo systemctl restart lmstudio.service
 ### Deploy the Launcher Script
 
 ```bash
-# Copy script to installation directory
+# Copy script to installation directory and make executable
 sudo cp launch_lmstudio-VNC.sh /opt/lm-studio/
 sudo chmod +x /opt/lm-studio/launch_lmstudio-VNC.sh
 ```
@@ -155,7 +157,7 @@ Create a systemd service file to run LMStudio at startup:
 
 Copy the service file from the `/services` folder:
 ```bash
-sudo cp /path/to/services/lmstudio.service /etc/systemd/system/lmstudio.service
+sudo cp services/lmstudio.service /etc/systemd/system/lmstudio.service
 ```
 
 **Service file:** See `lmstudio.service` in the `/services` folder alongside this documentation.
@@ -182,14 +184,14 @@ Since VNC is configured for localhost-only, use SSH tunneling for remote access:
 
 ```bash
 # From your local machine, create an SSH tunnel
-ssh -L 5999:localhost:5900 user@your-server-ip
+ssh -L 5999:localhost:5900 local_user_name@your-server-ip
 
 # Then connect your VNC client to localhost:5999
 ```
 
 Common VNC clients:
 - **Linux:** `vncviewer localhost:5999` (from tigervnc-viewer or similar)
-- **Windows:** TightVNC, RealVNC, TigerVNC viewer, or mRemoteNG
+- **Windows:** TightVNC, RealVNC, TigerVNC viewer, mRemoteNG, Remote Desktop Manager
 - **macOS:** Built-in Screen Sharing or RealVNC viewer
 
 First establish the SSH connection, then connect via VNC.
@@ -251,7 +253,7 @@ sudo chmod 755 /opt/lm-studio/bin/lms
 /opt/lm-studio/bin/lms --help
 ```
 
-### Using the CLI
+### CLI Usage
 
 The `generate_temporal_datasets.py` script automatically searches for the CLI in these locations (in order):
 1. `LMS_CLI_PATH` environment variable
@@ -273,7 +275,7 @@ python generate_temporal_datasets.py --lms-cli-path /opt/lm-studio/bin/lms --ben
 
 ### Updating the CLI After LMStudio Updates
 
-When LMStudio is updated, the CLI may also be updated. Re-copy the CLI to keep it in sync:
+When LMStudio is updated, the CLI needs to be updated as well. Re-copy the CLI to keep it in sync:
 
 ```bash
 sudo cp /root/.lmstudio/bin/lms /opt/lm-studio/bin/lms
@@ -399,7 +401,7 @@ sudo ln -s /mnt/data/lmstudio/hub /root/.lmstudio/hub
 ls -la /root/.lmstudio/hub
 ```
 
-This ensures that virtual model references (like those from OpenAI-compatible endpoints) are also stored on your large drive.
+This ensures that virtual model references (like those from OpenAI-compatible endpoints) are be stored on a large drive.
 
 ### Step 4: Verify the Configuration
 

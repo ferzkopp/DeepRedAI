@@ -128,6 +128,49 @@ Start with **100K total samples** (50K retain + 50K unlearn). If metrics are bel
 
 ---
 
+## Mitigating Catastrophic Forgetting
+
+Fine-tuning on a specialized task (temporal Q&A) can cause the model to lose general capabilities - a phenomenon called **catastrophic forgetting**. If your fine-tuned model performs well on temporal evaluation but struggles with generic questions, consider these strategies:
+
+### Strategy 1: Adjust Fine-tuning Parameters
+
+| Parameter | Default | Anti-Forgetting | Why |
+|-----------|---------|-----------------|-----|
+| Learning rate | 2e-4 | **1e-5 to 5e-5** | Lower LR preserves base knowledge |
+| LoRA rank | 16 | **8** | Smaller rank = less capacity to overwrite |
+| LoRA alpha | 32 | **16** | Lower alpha reduces adapter influence |
+| Epochs | 3 | **1-2** | Fewer passes = less overfitting |
+| Warmup ratio | 0.1 | **0.2-0.3** | Gentler start preserves base weights |
+
+### Strategy 2: Use a Larger Model
+
+Larger models are more resistant to catastrophic forgetting because they have more capacity to retain old knowledge while learning new tasks. If the 1.5B model shows significant forgetting, consider:
+- **Qwen2.5-7B-Instruct** (same family, scales well)
+- **Llama-3.1-8B-Instruct** (strong factual knowledge)
+
+### Strategy 3: Mix in General Instruction Data
+
+The most effective strategy is to include 15-25% general Q&A samples in your training mix:
+
+| Dataset | Source | Samples |
+|---------|--------|---------|
+| OpenAssistant | `OpenAssistant/oasst1` | ~10K |
+| Dolly | `databricks/databricks-dolly-15k` | ~15K |
+| Alpaca | `tatsu-lab/alpaca` | ~52K |
+
+**Example mix for 90K temporal samples:**
+- 45K retain + 45K unlearn + ~18K general = 108K total (~17% general)
+
+This technique is called **replay** or **regularization through data** and helps the model maintain its general instruction-following abilities.
+
+### Recommended Order of Attack
+
+1. **First**: Lower learning rate to `5e-5` and reduce epochs to 1-2
+2. **Second**: Add 15-20% general instruction data to training mix
+3. **Third**: If still problematic, try a 7B+ model
+
+---
+
 ## Implementation Scripts
 
 The following scripts are available in the `scripts/` directory:
