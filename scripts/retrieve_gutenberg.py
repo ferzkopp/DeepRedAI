@@ -22,6 +22,7 @@ import os
 import json
 import requests
 import re
+import time
 import warnings
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -54,99 +55,170 @@ except ImportError:
 class GutenbergRetriever:
     """Retrieve and filter Project Gutenberg texts for theme fine-tuning."""
     
-    # Target Gutenberg IDs for priority works
+    # Target Gutenberg IDs for priority works, organized by category
+    PRIORITY_WORKS_BY_CATEGORY = {
+        'Utopian/Dystopian': {
+            624: "Looking Backward",          # Edward Bellamy
+            6424: "A Modern Utopia",          # H.G. Wells
+            3261: "News from Nowhere",        # William Morris
+            1164: "The Iron Heel",            # Jack London - oligarchy, class struggle
+            32: "Herland",                    # Charlotte Perkins Gilman
+            61963: "We",                      # Yevgeny Zamyatin - THE Soviet dystopia
+            12163: "The Sleeper Awakes",      # H.G. Wells - future society, class revolt
+            1497: "The Republic",             # Plato - ideal society, philosopher-kings
+            1998: "Thus Spake Zarathustra",   # Nietzsche - übermensch, will to power
+        },
+        'Russian Literature': {
+            2554: "Crime and Punishment",     # Dostoevsky
+            28054: "The Brothers Karamazov",  # Dostoevsky - free will, morality
+            600: "Notes from the Underground", # Dostoevsky - alienation, consciousness
+            2638: "The Idiot",                # Dostoevsky
+            8117: "The Possessed",            # Dostoevsky - revolutionaries, nihilism
+            1399: "Anna Karenina",            # Tolstoy
+            2600: "War and Peace",            # Tolstoy
+            3783: "Mother",                   # Maxim Gorky - revolutionary spirit
+            47935: "Fathers and Sons",        # Turgenev - generational conflict, nihilism
+            1081: "Dead Souls",               # Gogol
+            7986: "Plays by Anton Chekhov, Second Series",  # Contains The Cherry Orchard, Three Sisters
+            1756: "Uncle Vanya",              # Chekhov
+            1754: "The Seagull",              # Chekhov
+            2197: "The Gambler",              # Dostoevsky - obsession, fate
+        },
+        'Early Science Fiction': {
+            83: "From the Earth to the Moon",     # Jules Verne (combined with Round the Moon)
+            164: "20,000 Leagues Under the Sea",  # Jules Verne
+            18857: "Journey to the Center of the Earth", # Jules Verne (full text version)
+            1268: "The Mysterious Island",        # Jules Verne - survival, self-sufficiency
+            35: "The Time Machine",               # H.G. Wells - class divide, evolution
+            36: "The War of the Worlds",          # H.G. Wells - alien invasion
+            1013: "The First Men in the Moon",    # H.G. Wells - lunar colony
+            5230: "The Invisible Man",            # H.G. Wells
+            159: "The Island of Doctor Moreau",   # H.G. Wells - playing god
+            62: "A Princess of Mars",             # Burroughs - Mars adventure
+            64: "The Gods of Mars",               # Burroughs - Mars sequel
+            72: "Thuvia, Maid of Mars",           # Burroughs - Mars series
+            139: "The Lost World",                # Doyle - isolated civilization
+            59112: "R.U.R.",                      # Čapek - robots, AI rebellion
+            84: "Frankenstein",                   # Shelley - created intelligence
+            1059: "The World Set Free",           # H.G. Wells - atomic war, world government
+            11696: "The Food of the Gods",        # H.G. Wells - scientific hubris
+        },
+        'Political Philosophy': {
+            61: "The Communist Manifesto",        # Marx/Engels
+            4341: "Mutual Aid",                   # Kropotkin - cooperation vs competition
+            23428: "The Conquest of Bread",       # Kropotkin - anarcho-communism
+            1232: "The Prince",                   # Machiavelli - power, statecraft
+            815: "Democracy in America Vol 1",    # Tocqueville - political systems
+            816: "Democracy in America Vol 2",    # Tocqueville
+            3207: "Leviathan",                    # Hobbes - social contract, sovereignty
+            46333: "The Social Contract",         # Rousseau - general will
+        },
+        'Isolation/Survival': {
+            521: "Robinson Crusoe",               # Defoe - survival, self-reliance
+            1184: "The Count of Monte Cristo",    # Dumas - imprisonment, revenge
+            30197: "Farthest North Vol I",        # Nansen - polar exploration, survival
+            34120: "Farthest North Vol II",       # Nansen - polar exploration, survival
+        },
+        'Chess & Strategy': {
+            33870: "Chess Fundamentals",          # Capablanca
+            5614: "Chess Strategy",               # Edward Lasker
+        },
+        'Satire': {
+            1695: "The Man Who Was Thursday",     # Chesterton - anarchists, conspiracy
+            829: "Gulliver's Travels",            # Swift - political satire
+            1080: "A Modest Proposal",            # Swift - savage satire
+            19942: "Candide",                     # Voltaire - satirical philosophy
+        },
+    }
+    
+    # Flat dict for backward compatibility: {id: title}
     PRIORITY_WORKS = {
-        # Utopian Fiction
-        624: "Looking Backward",      # Edward Bellamy
-        3261: "A Modern Utopia",      # H.G. Wells
-        3362: "News from Nowhere",    # William Morris
-        1164: "The Iron Heel",        # Jack London
-        32: "Herland",                # Charlotte Perkins Gilman
-        61963: "We",                  # Yevgeny Zamyatin
-        
-        # Russian Literature (English translations)
-        2554: "Crime and Punishment",  # Dostoevsky
-        28054: "The Brothers Karamazov", # Dostoevsky
-        600: "Notes from the Underground", # Dostoevsky
-        2638: "The Idiot",             # Dostoevsky
-        8117: "The Possessed",         # Dostoevsky
-        1399: "Anna Karenina",         # Tolstoy
-        2600: "War and Peace",         # Tolstoy
-        3783: "Mother",                # Maxim Gorky
-        47935: "Fathers and Sons",     # Ivan Turgenev
-        1081: "Dead Souls",            # Nikolai Gogol
-        7986: "The Cherry Orchard",    # Anton Chekhov
-        1756: "Uncle Vanya",           # Anton Chekhov
-        55351: "Three Sisters",        # Anton Chekhov
-        1754: "The Seagull",           # Anton Chekhov
-        
-        # Early Science Fiction
-        103: "From the Earth to the Moon",  # Jules Verne
-        164: "20,000 Leagues Under the Sea", # Jules Verne
-        165: "Around the Moon",        # Jules Verne
-        19513: "Journey to the Center of the Earth", # Jules Verne
-        1268: "The Mysterious Island", # Jules Verne
-        35: "The Time Machine",        # H.G. Wells
-        36: "The War of the Worlds",   # H.G. Wells
-        1013: "The First Men in the Moon",  # H.G. Wells
-        5230: "The Invisible Man",     # H.G. Wells
-        159: "The Island of Doctor Moreau", # H.G. Wells
-        62: "A Princess of Mars",      # Edgar Rice Burroughs
-        139: "The Lost World",         # Arthur Conan Doyle
-        59112: "R.U.R.",               # Karel Čapek
-        84: "Frankenstein",            # Mary Shelley
-        
-        # Political Philosophy
-        61: "The Communist Manifesto",  # Marx/Engels
-        4341: "Mutual Aid",            # Peter Kropotkin
-        
-        # Chess
-        33870: "Chess Fundamentals",   # Jose Raul Capablanca
+        gid: title 
+        for category_works in PRIORITY_WORKS_BY_CATEGORY.values() 
+        for gid, title in category_works.items()
     }
     
     # Subject filters for bulk retrieval
+    # Uses Library of Congress Subject Headings (LCSH) terminology
+    # Aligned with Deep Red film themes: Soviet Mars colony, AI chess master, 
+    # political satire, survival, ideological extremism
     SUBJECT_FILTERS = [
+        # Fiction genres
         "Science fiction",
         "Satire",
-        "Political satire",
+        "Political fiction",
+        "Allegories",
         "Utopias",
         "Dystopias",
-        "Ideological extremism",
+        
+        # Soviet/Russian themes
         "Soviet Union",
         "Russia",
         "Socialism",
         "Communism",
-        "Capitalism",
-        "Oligarchy",
-        "Artificial intelligence",
-        "AI governance",
-        "AI ethics",
-        "AI evolution",
-        "Chess",
+        "Propaganda",
+        "Totalitarianism",
+        "Collectivism",
+        
+        # Space and Mars
         "Space flight",
         "Mars (Planet)",
-        "Colonies on Mars",
-        "Secret societies",
-        "Survival",
-        "Human evolution",
         "Interplanetary voyages",
-        "Space colonization",
-        "Moon",
-        "Astronauts",
-        "Crash survival",
-        "Political science",
-        "Power struggles",
+        "Space colonies",
+        "Life on other planets",
+        "Outer space",
+        "Astronautics",
+        
+        # AI/Machine/Chess themes
+        "Chess",
+        "Automata",
+        "Machinery",
+        "Robots",
+        "Calculating machines",
+        
+        # Survival and isolation
+        "Survival",
+        "Wilderness survival",
+        "Shipwrecks",  # Keep - analogous to crash survival
+        "Castaways",
+        "Prisoners",
+        "Exiles",
+        
+        # Political/Social conflict
         "Revolutions",
-        "Technological dystopias",
-        "Posthumanism",
-        "Transhumanism",
-        "Future societies",
-        "Totalitarianism",
-        "Class struggle",
-        "Wealth inequality",
-        "Corporate power",
-        "Terraforming",
-        "Extraterrestrial environments",
+        "Political science",
+        "Secret societies",
+        "Conspiracies",
+        "Dictatorship",
+        "Oligarchy",
+        "Anarchism",
+        "Radicalism",
+        
+        # Class and power
+        "Capitalism",
+        "Rich and poor",
+        "Working class",
+        "Labor",
+        "Power (Social sciences)",
+        
+        # Human condition themes
+        "Human evolution",
+        "Evolution",
+        "Civilization",
+        "Future life",
+        "End of the world",
+        "Prophecies",
+        
+        # Colonization/Exploration
+        "Colonization",
+        "Explorers",
+        "Pioneers",
+        "Frontier and pioneer life",
+        
+        # Psychology/Philosophy
+        "Free will and determinism",
+        "Man-machine systems",
+        "Good and evil",
     ]
 
     
@@ -174,6 +246,20 @@ class GutenbergRetriever:
         "Zamyatin, Evgeny Ivanovich, 1884-1937",
         "Čapek, Karel, 1890-1938",
         "Capablanca, José Raúl, 1888-1942",
+        "Plato, 428 BC-348 BC",
+        "Nietzsche, Friedrich Wilhelm, 1844-1900",
+        "Machiavelli, Niccolò, 1469-1527",
+        "Tocqueville, Alexis de, 1805-1859",
+        "Hobbes, Thomas, 1588-1679",
+        "Rousseau, Jean-Jacques, 1712-1778",
+        "Defoe, Daniel, 1661-1731",
+        "Dumas, Alexandre, 1802-1870",
+        "Nansen, Fridtjof, 1861-1930",
+        "Franklin, Benjamin, 1706-1790",
+        "Lasker, Edward, 1885-1981",  # Note: died 1981 but chess book is 1915
+        "Chesterton, G. K. (Gilbert Keith), 1874-1936",
+        "Swift, Jonathan, 1667-1745",
+        "Voltaire, 1694-1778",
     }
     
     def __init__(self, output_dir: str, max_year: int = TEMPORAL_CUTOFF_YEAR, prefer_http: bool = True):
@@ -305,6 +391,62 @@ class GutenbergRetriever:
         
         return True
 
+    def _titles_match(self, expected: str, actual: str) -> bool:
+        """Check if actual title matches expected title.
+        
+        Uses fuzzy matching to handle minor variations like:
+        - Subtitle differences: "We" vs "We: A Novel"
+        - Article variations: "The Time Machine" vs "Time Machine, The"
+        - Punctuation differences
+        
+        Args:
+            expected: The title we expect (from PRIORITY_WORKS)
+            actual: The title extracted from the downloaded content
+            
+        Returns:
+            True if titles match sufficiently
+        """
+        if not expected or not actual:
+            return False
+        
+        # Normalize both titles for comparison
+        def normalize(title: str) -> str:
+            # Lowercase
+            t = title.lower()
+            # Remove leading articles
+            for article in ['the ', 'a ', 'an ']:
+                if t.startswith(article):
+                    t = t[len(article):]
+            # Remove trailing articles (e.g., ", The")
+            for article in [', the', ', a', ', an']:
+                if t.endswith(article):
+                    t = t[:-len(article)]
+            # Remove subtitles (after colon or dash)
+            t = re.split(r'[:\-—–]', t)[0]
+            # Remove punctuation and extra whitespace
+            t = re.sub(r'[^\w\s]', '', t)
+            t = ' '.join(t.split())
+            return t.strip()
+        
+        norm_expected = normalize(expected)
+        norm_actual = normalize(actual)
+        
+        # Exact match after normalization
+        if norm_expected == norm_actual:
+            return True
+        
+        # Check if one contains the other (for subtitle variations)
+        if norm_expected in norm_actual or norm_actual in norm_expected:
+            return True
+        
+        # Check word overlap (at least 80% of expected words present)
+        expected_words = set(norm_expected.split())
+        actual_words = set(norm_actual.split())
+        if expected_words and len(expected_words & actual_words) / len(expected_words) >= 0.8:
+            return True
+        
+        return False
+
     def retrieve_by_http(self, gutenberg_id: int, title: str) -> dict:
         """Retrieve a work directly via HTTP (fallback method)."""
         try:
@@ -347,6 +489,11 @@ class GutenbergRetriever:
                 title_match = re.search(r'Title:\s*(.+)', text[:2000])
                 if title_match:
                     extracted_title = title_match.group(1).strip()
+            
+            # Validate title matches expected (for priority works)
+            if not title.startswith("Unknown_") and not self._titles_match(title, extracted_title):
+                print(f"  Title mismatch! Expected: '{title}', Got: '{extracted_title}'")
+                return None
             
             # Try to extract publication year - multiple sources (ordered by reliability)
             pub_year = None
@@ -857,6 +1004,7 @@ class GutenbergRetriever:
 def main():
     """Main entry point for the script."""
     import argparse
+    start_time = time.time()
     
     # Check for GUTENBERG_DATA environment variable
     gutenberg_data = os.environ.get('GUTENBERG_DATA')
@@ -889,8 +1037,13 @@ Examples:
 
   # Start fresh, deleting any previously retrieved content
   python retrieve_gutenberg.py --reset
+
+  # Show priority works and subject filters (no download)
+  python retrieve_gutenberg.py --info
         """
     )
+    parser.add_argument('--info', action='store_true',
+                        help='Display priority works and subject filters, then exit (no download)')
     parser.add_argument('--output-dir', default=default_output,
                         help=f'Output directory for retrieved texts (default: {default_output})')
     parser.add_argument('--priority-only', action='store_true',
@@ -905,6 +1058,29 @@ Examples:
                         help='Delete existing corpus files and start fresh')
     
     args = parser.parse_args()
+    
+    # Handle info flag - display priority works and subjects, then exit
+    if args.info:
+        print(f"\n{'='*70}")
+        print(f"PROJECT GUTENBERG SOURCE MATERIALS")
+        print(f"Temporal cutoff: pre-{args.max_year}")
+        print(f"{'='*70}\n")
+        
+        print("PRIORITY WORKS ({} books)".format(len(GutenbergRetriever.PRIORITY_WORKS)))
+        print("-" * 70)
+        for category, works in GutenbergRetriever.PRIORITY_WORKS_BY_CATEGORY.items():
+            print(f"\n{category} ({len(works)} works):")
+            for gid, title in works.items():
+                print(f"  {gid:>6}: {title}")
+        
+        print(f"\n{'='*70}")
+        print("SUBJECT FILTERS ({} subjects)".format(len(GutenbergRetriever.SUBJECT_FILTERS)))
+        print("-" * 70)
+        for i, subject in enumerate(GutenbergRetriever.SUBJECT_FILTERS, 1):
+            print(f"  {i:>2}. {subject}")
+        
+        print(f"\n{'='*70}\n")
+        return
     
     # Handle reset flag - delete existing corpus files
     if args.reset:
@@ -972,12 +1148,17 @@ Examples:
     retriever.save_corpus(works, filename)
     
     # Summary
+    elapsed_time = time.time() - start_time
+    elapsed_minutes = int(elapsed_time // 60)
+    elapsed_seconds = elapsed_time % 60
+    
     print(f"\n{'='*60}")
     print(f"RETRIEVAL COMPLETE")
     print(f"{'='*60}")
     print(f"Total works retrieved: {len(works)}")
     print(f"Total characters: {sum(w.get('length', 0) for w in works):,}")
     print(f"Output file: {os.path.join(args.output_dir, filename)}")
+    print(f"Runtime: {elapsed_minutes}m {elapsed_seconds:.1f}s")
     print(f"{'='*60}")
 
 

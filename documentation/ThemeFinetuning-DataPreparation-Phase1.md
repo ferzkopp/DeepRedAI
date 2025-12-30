@@ -20,116 +20,30 @@ Phase 1 focuses on gathering source material that embodies the themes and style 
 
 ## Source Material: Project Gutenberg
 
-Project Gutenberg offers 70,000+ free eBooks, with extensive pre-1969 content due to copyright requirements. This makes it an ideal source for temporally-appropriate thematic material.
+Project Gutenberg offers 70,000+ free eBooks with extensive pre-1969 content. All works are filtered to ensure publication before 1969 (pre-moon landing) to maintain temporal consistency with the Soviet utopia aesthetic.
 
-### Content Categories and Priorities
+### Priority Works (60 books)
 
-| Content Category | Thematic Relevance | Priority | Target Count |
-|------------------|-------------------|----------|--------------|
-| Soviet/Russian Literature | Direct ideological alignment | **HIGH** | 15-20 books |
-| Utopian Fiction | Society structure, optimistic futures | **HIGH** | 20-30 books |
-| Early Science Fiction | Space exploration, technological optimism | **HIGH** | 30-40 books |
-| Chess Literature | Strategic thinking, game metaphors | **HIGH** | 5-10 books |
-| Political Philosophy | Collectivist ideology, social theory | MEDIUM | 20-30 books |
-| Scientific Texts (pre-1969) | Era-appropriate scientific language | MEDIUM | 30-50 books |
-| Cold War Era Non-Fiction | Period vocabulary and worldview | MEDIUM | 10-20 books |
+The script defines `PRIORITY_WORKS` with specific Gutenberg IDs. Use `--info` to display the full list:
 
----
+| Category | Works | Key Authors |
+|----------|-------|-------------|
+| **Utopian/Dystopian** | 9 | Bellamy, Wells, Morris, London, Gilman, Zamyatin, Plato, Nietzsche |
+| **Russian Literature** | 15 | Dostoevsky (6), Tolstoy (2), Chekhov (4), Gorky, Turgenev, Gogol |
+| **Early Sci-Fi** | 18 | Verne (5), Wells (8), Burroughs (3), Doyle, Čapek |
+| **Political Philosophy** | 8 | Marx/Engels, Kropotkin (2), Machiavelli, Tocqueville (2), Hobbes, Rousseau |
+| **Isolation/Survival** | 3 | Defoe, Dumas, Nansen |
+| **Chess & Strategy** | 3 | Capablanca, Franklin, Lasker |
+| **Satire** | 4 | Chesterton, Swift (2), Voltaire |
 
-## Target Authors and Works
+### Subject Filters for Bulk Retrieval (57 subjects)
 
-### Soviet/Russian Literature (HIGH PRIORITY)
+The script uses Library of Congress Subject Headings (LCSH) for expanded corpus building across categories: Fiction genres, Soviet/Russian themes, Space/Mars, AI/Chess, Survival/Isolation, Political conflict, Class/Power, Evolution/Future, Exploration, and Philosophy.
 
-| Author | Notable Works | Gutenberg Availability | Themes |
-|--------|---------------|------------------------|--------|
-| Yevgeny Zamyatin | *We* (1924) | ID: 61963 | Dystopia/Utopia, collective society, totalitarian benevolence |
-| Fyodor Dostoevsky | *Crime and Punishment*, *The Brothers Karamazov* | ID: 2554, 28054 | Russian philosophical perspective, moral struggle, authority |
-| Fyodor Dostoevsky | *Notes from the Underground*, *The Idiot*, *The Possessed* | ID: 600, 2638, 8117 | Psychological depth, critique of rationalism, political radicalism |
-| Leo Tolstoy | *War and Peace*, *Anna Karenina* | ID: 2600, 1399 | Social philosophy, collectivism, fate vs. free will |
-| Maxim Gorky | *Mother*, short stories | ID: 3783 | Revolutionary optimism, working class heroes |
-| Anton Chekhov | *The Cherry Orchard*, *Uncle Vanya*, *Three Sisters*, *The Seagull* | ID: 7986, 1756, 55351, 1754 | Russian cultural voice, social commentary, fading aristocracy |
-| Ivan Turgenev | *Fathers and Sons* | ID: 47935 | Generational conflict, nihilism |
-| Nikolai Gogol | *Dead Souls* | ID: 1081 | Social satire, Russian character |
-
-**Retrieval Strategy**: Start with Dostoevsky and Tolstoy (widely available), then search for English translations of Gorky and Chekhov.
-
-### Utopian/Dystopian Fiction (HIGH PRIORITY)
-
-| Author | Notable Works | Gutenberg ID | Themes |
-|--------|---------------|--------------|--------|
-| Edward Bellamy | *Looking Backward* (1888) | 624 | Socialist utopia, planned economy, social equality |
-| Edward Bellamy | *Equality* (1897) | Check availability | Continued socialist utopia vision |
-| H.G. Wells | *A Modern Utopia* (1905) | 3261 | Scientific socialism, rational world order |
-| William Morris | *News from Nowhere* (1890) | 3362 | Socialist utopia, post-revolutionary society |
-| Aldous Huxley | *Brave New World* | Check (may be post-copyright) | Controlled society, scientific management |
-| Jack London | *The Iron Heel* (1908) | 1164 | Revolutionary narrative, class struggle |
-| Charlotte Perkins Gilman | *Herland* (1915) | 32 | Utopian society, collective living |
-| Mary Shelley | *Frankenstein* (1818) | 84 | Scientific hubris, creation, responsibility |
-
-**Retrieval Strategy**: These works are foundational. Download all available titles immediately.
-
-### Early Science Fiction (HIGH PRIORITY)
-
-| Author | Notable Works | Gutenberg ID | Themes |
-|--------|---------------|--------------|--------|
-| Jules Verne | *From the Earth to the Moon* (1865) | 103 | Space exploration, technological optimism, scientific adventure |
-| Jules Verne | *20,000 Leagues Under the Sea* (1870) | 164 | Technological marvels, human ingenuity |
-| Jules Verne | *Around the Moon* (1870) | 165 | Space mission continuation, cosmic destiny |
-| Jules Verne | *Journey to the Center of the Earth* (1864) | 19513 | Exploration, scientific discovery |
-| Jules Verne | *The Mysterious Island* (1874) | 1268 | Survival, engineering, cooperation |
-| H.G. Wells | *The Time Machine* (1895) | 35 | Future society, scientific progress |
-| H.G. Wells | *The War of the Worlds* (1898) | 36 | Cosmic perspective, human resilience |
-| H.G. Wells | *The First Men in the Moon* (1901) | 1013 | Lunar exploration, scientific discovery |
-| H.G. Wells | *The Invisible Man* (1897) | 5230 | Science gone wrong, isolation |
-| H.G. Wells | *The Island of Doctor Moreau* (1896) | 159 | Ethics of science, nature vs nurture |
-| Edgar Rice Burroughs | *A Princess of Mars* (1912) | 62 | Mars exploration, adventure, heroism |
-| Arthur Conan Doyle | *The Lost World* (1912) | 139 | Exploration, prehistoric life |
-| Karel Čapek | *R.U.R.* (1920) | 59112 | Artificial life, labor, revolt |
-| Olaf Stapledon | *Last and First Men* (1930) | Check availability | Cosmic perspective, human evolution |
-| Olaf Stapledon | *Star Maker* (1937) | Check availability | Universal consciousness, cosmic design |
-
-**Retrieval Strategy**: Verne and Wells are essential—download all space/science-related works. Burroughs adds Mars-specific content.
-
-### Chess Literature (HIGH PRIORITY)
-
-| Work Type | Examples | Availability | Utility |
-|-----------|----------|--------------|---------|
-| Chess Strategy Books | *Chess Fundamentals* (Capablanca) | ID: 33870 | Strategic vocabulary, planning language |
-| Chess Match Commentary | Historical famous matches | Limited | Game analysis terminology, decisive moves |
-| Chess Fiction | *The Royal Game* (Stefan Zweig) | Check availability | Psychological chess themes, strategic thinking |
-| Chess History | Early 20th century books | Search by subject | Culture of chess, intellectual pursuit |
-
-**Retrieval Strategy**: Search Gutenberg by subject "chess" and filter for instructional/strategy content. Even minimal chess content provides valuable metaphorical language.
-
-### Political Philosophy (MEDIUM PRIORITY)
-
-| Author/Work | Gutenberg ID | Themes |
-|-------------|--------------|--------|
-| Karl Marx & Friedrich Engels | *The Communist Manifesto* | 61 | Collective action, class consciousness, revolutionary change |
-| Peter Kropotkin | *Mutual Aid* | 4341 | Cooperation, collective success, evolutionary theory |
-| Edward Bellamy | *Equality* (sequel to *Looking Backward*) | Available | Continued socialist utopia vision |
-
-**Retrieval Strategy**: Focus on foundational works that discuss collective action and social organization.
-
-### Scientific Texts (MEDIUM PRIORITY)
-
-Look for pre-1969 texts on:
-- **Space science** and rocketry
-- **Atomic physics** and nuclear energy
-- **Cybernetics** and automation
-- **Biology** and evolution (progress narratives)
-- **Engineering** and technological advancement
-
-**Retrieval Strategy**: Search by subjects like "space," "atomic," "machine," "progress," "future."
-
-### Cold War Era Non-Fiction (MEDIUM PRIORITY)
-
-While less available on Gutenberg (more recent), look for:
-- Early space program documentation
-- Scientific optimism essays
-- Futurist predictions from the 1950s-60s
-
-**Retrieval Strategy**: May need to supplement with public domain government documents or archive.org sources.
+```bash
+# View all priority works and subject filters
+python retrieve_gutenberg.py --info
+```
 
 ---
 
