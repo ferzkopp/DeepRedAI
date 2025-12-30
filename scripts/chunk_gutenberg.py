@@ -11,6 +11,8 @@ import re
 import json
 from typing import List, Iterator
 
+from tqdm import tqdm
+
 
 class TextChunker:
     """Chunk books into training-appropriate segments."""
@@ -98,10 +100,14 @@ def main():
         overlap=args.overlap
     )
     
+    # Count total lines for progress bar
+    with open(args.input, 'r', encoding='utf-8') as f:
+        total_works = sum(1 for _ in f)
+    
     # Process input file
     all_chunks = []
     with open(args.input, 'r', encoding='utf-8') as f:
-        for line in f:
+        for line in tqdm(f, total=total_works, desc="Processing works", unit="work"):
             work = json.loads(line)
             text = work.get('text', '')
             

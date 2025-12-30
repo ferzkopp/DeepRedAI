@@ -138,6 +138,10 @@ pip install gutenberg
 #### Full Retrieval (Default)
 
 ```bash
+# Activate the virtual environment
+source ~/venvs/gutenberg/bin/activate
+
+# Run retrieval
 python scripts/retrieve_gutenberg.py \
     --output-dir "$GUTENBERG_DATA/corpus"
 ```
@@ -234,67 +238,29 @@ SUBJECT_FILTERS = [
 
 ### Directory Structure
 
+The script saves all retrieved works to a single JSONL file in the output directory:
+
 ```
-output/
-└── gutenberg_corpus/
-    ├── priority_works.jsonl          # 37 priority works (--priority-only)
-    ├── gutenberg_corpus.jsonl        # Full corpus (priority + extended)
-    ├── by_category/
-    │   ├── utopian_fiction.jsonl
-    │   ├── science_fiction.jsonl
-    │   ├── russian_literature.jsonl
-    │   ├── chess.jsonl
-    │   └── philosophy.jsonl
-    └── metadata/
-        └── retrieval_log.json        # Tracking what was retrieved
+$GUTENBERG_DATA/
+└── corpus/
+    ├── gutenberg_corpus.jsonl        # Full corpus (priority + extended) - default mode
+    └── priority_works.jsonl          # Priority works only (--priority-only mode)
 ```
+
+**Note**: The script produces **one file per run**:
+- `gutenberg_corpus.jsonl` when running without `--priority-only` (includes both priority works and subject-based works)
+- `priority_works.jsonl` when running with `--priority-only`
+
+Both files use append mode with duplicate detection, so re-running the script will add new works without duplicating existing ones.
 
 ### Storage Requirements
 
 | Component | Estimated Size | Notes |
 |-----------|----------------|-------|
-| Priority Works (~50 books) | ~50 MB | Core thematic material |
-| Extended Corpus (~500 books) | ~500 MB | Comprehensive coverage |
-| Full Relevant Subset (~2000 books) | ~2 GB | Maximum useful scale |
-| Metadata and indices | ~10 MB | Tracking and organization |
+| Full corpus (~1000+ works) | ~360 MB | Priority + extended subject-based works |
+| Priority works only (~60 works) | ~60-80 MB | Core thematic material |
 
-**Total for Phase 1**: 50-500 MB depending on scope
-
----
-
-## Quality Assurance
-
-### Validation Checks
-
-After retrieval, verify:
-
-1. **Completeness**: All priority works successfully downloaded
-2. **Date compliance**: Works are pre-1969 (Gutenberg handles this mostly automatically due to copyright)
-3. **Text quality**: No excessive OCR errors or formatting issues
-4. **Thematic relevance**: Quick manual review of sample passages
-
-### Validation Script
-
-```bash
-# Count retrieved works
-jq -s 'length' output/gutenberg_corpus/priority_works.jsonl
-
-# List titles and authors
-jq -r '.title + " by " + .author' output/gutenberg_corpus/priority_works.jsonl
-
-# Check text lengths (should be substantial)
-jq '.length' output/gutenberg_corpus/priority_works.jsonl | \
-    awk '{sum+=$1; count++} END {print "Average length:", sum/count}'
-```
-
-### Common Issues and Solutions
-
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| Missing works | Gutenberg ID changed or work removed | Search by title/author instead |
-| Encoding errors | Non-UTF8 characters | Use `errors='ignore'` or `'replace'` in script |
-| Incomplete downloads | Network interruption | Add retry logic to script |
-| Wrong editions | Multiple versions available | Specify edition in metadata |
+**Actual Phase 1 output**: ~361 MB for full corpus retrieval
 
 ---
 
@@ -315,50 +281,3 @@ After completing Phase 1 retrieval:
 - [ThemeFinetuning-Plan.md](ThemeFinetuning-Plan.md) - Overall strategy
 - [scripts/retrieve_gutenberg.py](../scripts/retrieve_gutenberg.py) - Implementation script
 
----
-
-## Appendix: Complete Priority Works List
-
-### Pre-configured in retrieve_gutenberg.py
-
-| ID | Title | Author | Category |
-|----|-------|--------|----------|
-| 624 | Looking Backward | Edward Bellamy | Utopian Fiction |
-| 3261 | A Modern Utopia | H.G. Wells | Utopian Fiction |
-| 3362 | News from Nowhere | William Morris | Utopian Fiction |
-| 1164 | The Iron Heel | Jack London | Utopian Fiction |
-| 32 | Herland | Charlotte Perkins Gilman | Utopian Fiction |
-| 61963 | We | Yevgeny Zamyatin | Utopian Fiction |
-| 84 | Frankenstein | Mary Shelley | Utopian Fiction |
-| 2554 | Crime and Punishment | Fyodor Dostoevsky | Russian Literature |
-| 28054 | The Brothers Karamazov | Fyodor Dostoevsky | Russian Literature |
-| 600 | Notes from the Underground | Fyodor Dostoevsky | Russian Literature |
-| 2638 | The Idiot | Fyodor Dostoevsky | Russian Literature |
-| 8117 | The Possessed | Fyodor Dostoevsky | Russian Literature |
-| 1399 | Anna Karenina | Leo Tolstoy | Russian Literature |
-| 2600 | War and Peace | Leo Tolstoy | Russian Literature |
-| 3783 | Mother | Maxim Gorky | Russian Literature |
-| 47935 | Fathers and Sons | Ivan Turgenev | Russian Literature |
-| 1081 | Dead Souls | Nikolai Gogol | Russian Literature |
-| 7986 | The Cherry Orchard | Anton Chekhov | Russian Literature |
-| 1756 | Uncle Vanya | Anton Chekhov | Russian Literature |
-| 55351 | Three Sisters | Anton Chekhov | Russian Literature |
-| 1754 | The Seagull | Anton Chekhov | Russian Literature |
-| 103 | From the Earth to the Moon | Jules Verne | Science Fiction |
-| 164 | 20,000 Leagues Under the Sea | Jules Verne | Science Fiction |
-| 165 | Around the Moon | Jules Verne | Science Fiction |
-| 19513 | Journey to the Center of the Earth | Jules Verne | Science Fiction |
-| 1268 | The Mysterious Island | Jules Verne | Science Fiction |
-| 35 | The Time Machine | H.G. Wells | Science Fiction |
-| 36 | The War of the Worlds | H.G. Wells | Science Fiction |
-| 1013 | The First Men in the Moon | H.G. Wells | Science Fiction |
-| 5230 | The Invisible Man | H.G. Wells | Science Fiction |
-| 159 | The Island of Doctor Moreau | H.G. Wells | Science Fiction |
-| 62 | A Princess of Mars | Edgar Rice Burroughs | Science Fiction |
-| 139 | The Lost World | Arthur Conan Doyle | Science Fiction |
-| 59112 | R.U.R. | Karel Čapek | Science Fiction |
-| 61 | The Communist Manifesto | Marx/Engels | Philosophy |
-| 4341 | Mutual Aid | Peter Kropotkin | Philosophy |
-| 33870 | Chess Fundamentals | Jose Raul Capablanca | Chess |
-
-**Total**: 37 priority works

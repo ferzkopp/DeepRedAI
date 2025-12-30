@@ -11,6 +11,8 @@ import re
 import json
 from typing import Set
 
+from tqdm import tqdm
+
 
 class KeywordFilter:
     """Fast pre-filtering of chunks using keyword matching."""
@@ -98,14 +100,16 @@ def main():
     # Initialize filter
     keyword_filter = KeywordFilter(min_matches=args.min_matches)
     
+    # Count total lines for progress bar
+    with open(args.input, 'r', encoding='utf-8') as f:
+        total_chunks = sum(1 for _ in f)
+    
     # Load and filter chunks
-    total_chunks = 0
     passed_chunks = []
     
     with open(args.input, 'r', encoding='utf-8') as f:
-        for line in f:
+        for line in tqdm(f, total=total_chunks, desc="Filtering chunks", unit="chunk"):
             chunk = json.loads(line)
-            total_chunks += 1
             
             counts = keyword_filter.count_matches(chunk['text'])
             chunk['keyword_counts'] = counts

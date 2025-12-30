@@ -20,6 +20,7 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 - How to fine-tune the model further for "Soviet utopia" theme alignment
   - [Theme Finetuning Phased Plan](documentation/ThemeFinetuning-Plan.md) - Content retrieval, analysis, and finetuning for stylistic alignment
   - [How to retrieve and prepare training dataset from project Gutenberg content](documentation/ThemeFinetuning-DataPreparation-Phase1.md)
+  - [How to generate theme training datasets from Gutenberg content](documentation/ThemeFinetuning-DataPreparation-Phase2.md)
   - How to finetune model with themed data using these datasets
 
 ## Repo Content
