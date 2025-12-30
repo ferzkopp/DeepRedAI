@@ -179,14 +179,19 @@ class KeywordFilter:
 def main():
     """Main entry point for the script."""
     import argparse
+    import os
     
     parser = argparse.ArgumentParser(description="Fast keyword-based filtering")
     parser.add_argument('--input', required=True,
                         help='Input JSONL file with chunks')
     parser.add_argument('--output', required=True,
-                        help='Output JSONL file for filtered chunks')
+                        help='Output JSONL file for filtered chunks (or base name for range mode)')
     parser.add_argument('--min-matches', type=int, default=2,
                         help='Minimum keyword matches required (default: 2)')
+    parser.add_argument('--max-matches', type=int, default=None,
+                        help='Maximum keyword matches for range mode. When set and larger than '
+                             '--min-matches, filters for each match count in the range [min, max] '
+                             'and saves to separate files named N_<output>')
     parser.add_argument('--stats', action='store_true',
                         help='Print keyword statistics')
     
@@ -199,39 +204,126 @@ def main():
     with open(args.input, 'r', encoding='utf-8') as f:
         total_chunks = sum(1 for _ in f)
     
-    # Load and filter chunks
-    passed_chunks = []
+    # Determine if we're in range mode
+    range_mode = (args.max_matches is not None and args.max_matches > args.min_matches)
     
-    with open(args.input, 'r', encoding='utf-8') as f:
-        for line in tqdm(f, total=total_chunks, desc="Filtering chunks", unit="chunk"):
-            chunk = json.loads(line)
-            
-            counts = keyword_filter.count_matches(chunk['text'])
-            chunk['keyword_counts'] = counts
-            
-            if counts['total'] >= args.min_matches:
-                passed_chunks.append(chunk)
-    
-    print(f"Processed {total_chunks} chunks")
-    print(f"Passed: {len(passed_chunks)} ({len(passed_chunks)/total_chunks*100:.1f}%)")
-    
-    # Save filtered chunks
-    with open(args.output, 'w', encoding='utf-8') as f:
-        for chunk in passed_chunks:
-            f.write(json.dumps(chunk, ensure_ascii=False) + '\n')
-    
-    print(f"Saved to {args.output}")
-    
-    # Print statistics if requested
-    if args.stats:
-        print("\nKeyword statistics:")
-        theme_totals = {theme: 0 for theme in KeywordFilter.KEYWORDS}
-        for chunk in passed_chunks:
-            for theme in theme_totals:
-                theme_totals[theme] += chunk['keyword_counts'][theme]
+    if range_mode:
+        # Range mode: filter for each match count separately
+        match_range = range(args.min_matches, args.max_matches + 1)
         
-        for theme, total in sorted(theme_totals.items(), key=lambda x: x[1], reverse=True):
-            print(f"  {theme}: {total}")
+        # Storage for chunks by exact match count
+        chunks_by_count = {n: [] for n in match_range}
+        
+        # Statistics tracking per N
+        stats_by_count = {n: {theme: 0 for theme in KeywordFilter.KEYWORDS} for n in match_range}
+        
+        with open(args.input, 'r', encoding='utf-8') as f:
+            for line in tqdm(f, total=total_chunks, desc="Filtering chunks", unit="chunk"):
+                chunk = json.loads(line)
+                
+                counts = keyword_filter.count_matches(chunk['text'])
+                chunk['keyword_counts'] = counts
+                total_matches = counts['total']
+                
+                # Assign chunk to the appropriate bucket (exact match count)
+                if total_matches in chunks_by_count:
+                    chunks_by_count[total_matches].append(chunk)
+                    # Track theme statistics for this match count
+                    for theme in stats_by_count[total_matches]:
+                        stats_by_count[total_matches][theme] += counts[theme]
+        
+        # Prepare output file names
+        output_dir = os.path.dirname(args.output) or '.'
+        output_basename = os.path.basename(args.output)
+        
+        print(f"\nProcessed {total_chunks} chunks")
+        print(f"\n{'='*60}")
+        print("RANGE FILTERING RESULTS")
+        print(f"{'='*60}")
+        
+        # Summary table header
+        print(f"\n{'Matches':>8} | {'Chunks':>10} | {'Percentage':>10} | {'Output File'}")
+        print(f"{'-'*8}-+-{'-'*10}-+-{'-'*10}-+-{'-'*40}")
+        
+        total_saved = 0
+        saved_files = []
+        
+        for n in match_range:
+            count = len(chunks_by_count[n])
+            percentage = count / total_chunks * 100 if total_chunks > 0 else 0
+            output_file = os.path.join(output_dir, f"{n}_{output_basename}")
+            
+            # Save chunks for this match count
+            with open(output_file, 'w', encoding='utf-8') as f:
+                for chunk in chunks_by_count[n]:
+                    f.write(json.dumps(chunk, ensure_ascii=False) + '\n')
+            
+            print(f"{n:>8} | {count:>10} | {percentage:>9.1f}% | {output_file}")
+            saved_files.append((n, output_file, count))
+        
+        # Print statistics if requested
+        if args.stats:
+            print(f"\n{'='*60}")
+            print("KEYWORD STATISTICS BY MATCH COUNT")
+            print(f"{'='*60}")
+            
+            # Get all themes sorted by total usage
+            all_themes = list(KeywordFilter.KEYWORDS.keys())
+            
+            # Print header
+            header = f"{'Theme':<15}"
+            for n in match_range:
+                header += f" | {n:>7}"
+            print(f"\n{header}")
+            print("-" * len(header))
+            
+            # Calculate totals per theme across all N (for sorting only)
+            theme_totals = {theme: sum(stats_by_count[n][theme] for n in match_range) 
+                           for theme in all_themes}
+            
+            # Sort themes by total
+            sorted_themes = sorted(all_themes, key=lambda t: theme_totals[t], reverse=True)
+            
+            for theme in sorted_themes:
+                row = f"{theme:<15}"
+                for n in match_range:
+                    row += f" | {stats_by_count[n][theme]:>7}"
+                print(row)
+    
+    else:
+        # Single threshold mode (original behavior)
+        passed_chunks = []
+        
+        with open(args.input, 'r', encoding='utf-8') as f:
+            for line in tqdm(f, total=total_chunks, desc="Filtering chunks", unit="chunk"):
+                chunk = json.loads(line)
+                
+                counts = keyword_filter.count_matches(chunk['text'])
+                chunk['keyword_counts'] = counts
+                
+                if counts['total'] >= args.min_matches:
+                    passed_chunks.append(chunk)
+        
+        print(f"Processed {total_chunks} chunks")
+        print(f"Passed: {len(passed_chunks)} ({len(passed_chunks)/total_chunks*100:.1f}%)")
+        
+        # Save filtered chunks
+        with open(args.output, 'w', encoding='utf-8') as f:
+            for chunk in passed_chunks:
+                f.write(json.dumps(chunk, ensure_ascii=False) + '\n')
+        
+        print(f"Saved to {args.output}")
+        
+        # Print statistics if requested
+        if args.stats:
+            print("\nKeyword statistics:")
+            theme_totals = {theme: 0 for theme in KeywordFilter.KEYWORDS}
+            for chunk in passed_chunks:
+                for theme in theme_totals:
+                    theme_totals[theme] += chunk['keyword_counts'][theme]
+            
+            for theme, total in sorted(theme_totals.items(), key=lambda x: x[1], reverse=True):
+                print(f"  {theme}: {total}")
 
 
 if __name__ == '__main__':

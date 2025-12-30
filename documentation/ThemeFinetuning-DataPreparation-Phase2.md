@@ -247,15 +247,26 @@ Before expensive embedding analysis, use keyword matching for quick initial filt
 
 ### Theme Keywords
 
-The `KeywordFilter` class uses predefined keywords across five themes:
+The `KeywordFilter` class uses predefined keywords across 16 themes aligned with the Deep Red trilogy (Soviet Mars colony, AI chess master, political satire, survival, ideological extremism, utopia/dystopia):
 
 | Theme | Keywords |
 |-------|----------|
-| **Collectivism** | people, society, collective, together, united, comrades, workers, citizens, masses, community, solidarity, common, shared, cooperative, brotherhood, equality, proletariat |
-| **Science** | science, technology, progress, machine, rational, logic, calculate, efficiency, engineering, invention, discovery, laboratory, experiment, atomic, electronic, cybernetic |
-| **Chess** | chess, move, gambit, strategy, tactical, position, endgame, checkmate, opponent, board, piece, pawn, knight, bishop, rook, queen, king, opening |
-| **Space** | space, rocket, mars, moon, stars, cosmos, orbital, astronaut, cosmonaut, mission, launch, spacecraft, planet, universe, celestial, voyage, expedition |
-| **Authority** | order, guidance, leader, wisdom, trust, obey, directive, plan, system, control, authority, state, government, administration, regulation, harmony |
+| **Collectivism** | people, society, collective, together, united, comrades, workers, citizens, masses, community, solidarity, common, shared, cooperative, brotherhood, equality, proletariat, labor, labour, union, commune, social, class, struggle, bourgeois, peasant, factory, industrial, revolution, socialist, communist, working, organize, movement |
+| **Science** | science, technology, progress, machine, rational, logic, calculate, efficiency, engineering, invention, discovery, laboratory, experiment, atomic, electronic, cybernetic, scientific, research, theory, formula, physics, chemistry, mathematics, energy, power, mechanism, device, apparatus, technical, instrument, electric, mechanical, engine, computation, analyze, hypothesis, observation, data |
+| **Chess** | chess, move, gambit, strategy, tactical, position, endgame, checkmate, opponent, board, piece, pawn, knight, bishop, rook, queen, king, opening, game, play, match, tournament, master, sacrifice, defense, attack, counter, maneuver, calculate, think |
+| **Space** | space, rocket, mars, moon, stars, cosmos, orbital, astronaut, cosmonaut, mission, launch, spacecraft, planet, universe, celestial, voyage, expedition, sky, heavens, earth, solar, stellar, galaxy, asteroid, comet, telescope, orbit, gravity, atmosphere, alien, interplanetary, satellite, lunar, crater, colony, flight |
+| **Authority** | order, guidance, leader, wisdom, trust, obey, directive, plan, system, control, authority, state, government, administration, regulation, harmony, command, power, rule, law, regime, hierarchy, superior, subordinate, discipline, duty, loyalty, obedience, decree, mandate, council, minister, official |
+| **Utopia** | utopia, utopian, perfect, ideal, paradise, golden, harmony, peaceful, prosperity, abundance, happiness, freedom, justice, equality, brotherhood, dream, hope, future, tomorrow, vision, enlightened, civilized, progress, reform, improvement, better, new world |
+| **Dystopia** | dystopia, dystopian, oppression, tyranny, dictator, totalitarian, surveillance, conform, forbidden, prison, punishment, fear, terror, dark, nightmare, despair, hopeless, control, propaganda, censor, suppress, rebellion, resist, underground, secret, escape |
+| **Survival** | survive, survival, alive, death, danger, peril, struggle, endure, persist, fight, desperate, escape, rescue, save, protect, shelter, food, water, wilderness, isolation, alone, stranded, crash, shipwreck, castaway, lost, hunt, prey, predator |
+| **Revolution** | revolution, revolutionary, revolt, uprising, rebel, rebellion, overthrow, liberation, freedom, liberty, independence, resistance, fight, struggle, battle, war, conflict, victory, defeat, enemy, ally, comrade, cause, movement, radical, change, transform |
+| **Propaganda** | propaganda, truth, lie, believe, faith, doctrine, ideology, message, speech, declare, proclaim, announce, broadcast, newspaper, media, symbol, slogan, banner, poster, glory, hero, heroic, patriot, motherland, fatherland, nation, national, pride, honor, sacrifice |
+| **Philosophy** | philosophy, philosopher, think, thought, reason, logic, truth, knowledge, wisdom, understand, meaning, purpose, exist, existence, being, consciousness, mind, soul, spirit, moral, ethics, virtue, good, evil, free, will, choice, destiny, fate, nature, human, humanity |
+| **Exploration** | explore, explorer, expedition, journey, voyage, travel, adventure, discover, discovery, unknown, new, frontier, pioneer, territory, land, map, chart, navigate, north, south, pole, arctic, antarctic, ocean, sea, mountain, desert, jungle, cave, depths, heights |
+| **AI/Machine** | machine, automaton, mechanical, robot, artificial, intelligence, calculate, compute, brain, think, logic, program, automatic, engine, mechanism, clockwork, gear, device, invention, creator, create, alive, conscious, sentient, master, servant, obey, command, control, power, destroy, rebellion |
+| **Russian** | russia, russian, moscow, petersburg, siberia, czar, tsar, soviet, bolshevik, comrade, steppe, vodka, samovar, troika, muzhik, boyar, cossack, prince, princess, nobleman, serf, peasant, village, estate, winter, snow, cold, frost, orthodox, church |
+| **Power** | power, powerful, powerless, wealth, wealthy, rich, poor, money, gold, fortune, capital, capitalist, oligarch, mogul, empire, emperor, throne, crown, rule, ruler, kingdom, realm, dominion, conquer, dominate, control, influence, corrupt, greed, ambition |
+| **Conspiracy** | conspiracy, conspire, secret, hidden, plot, scheme, plan, shadow, mysterious, mystery, unknown, agent, spy, infiltrate, betray, traitor, trust, deceive, deception, mask, disguise, identity, truth, reveal, discover, uncover, expose, society, order, cabal |
 
 ### Basic Usage (with Statistics)
 
@@ -268,6 +279,16 @@ python scripts/keyword_filter.py \
     --stats
 ```
 
+### Command-Line Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--input` | (required) | Input JSONL file with chunks |
+| `--output` | (required) | Output JSONL file for filtered chunks (or base name for range mode) |
+| `--min-matches` | 2 | Minimum keyword matches required |
+| `--max-matches` | None | Maximum keyword matches for range mode (see below) |
+| `--stats` | False | Print keyword statistics table |
+
 ### Adjusting Sensitivity
 
 | Min Matches | Effect | Use When |
@@ -275,6 +296,61 @@ python scripts/keyword_filter.py \
 | 1-2 | Very permissive, many false positives | Need broad coverage |
 | 3-4 | Balanced filtering | **Recommended default** |
 | 5+ | Strict, may miss good passages | Have excess data |
+
+### Range Mode: Filtering Multiple Thresholds
+
+When `--max-matches` is set and larger than `--min-matches`, the script enters **range mode**. This filters chunks for each match count in the range and saves them to separate files, allowing you to experiment with different thresholds in parallel.
+
+```bash
+# Filter for match counts 2, 3, 4, 5, and 6 in parallel
+python scripts/keyword_filter.py \
+    --input "$THEME_OUTPUT/chunks/full_chunks.jsonl" \
+    --output "$THEME_OUTPUT/filtered/keyword_filtered.jsonl" \
+    --min-matches 2 \
+    --max-matches 6 \
+    --stats
+```
+
+This creates separate files for each match count:
+- `2_keyword_filtered.jsonl` - chunks with exactly 2 keyword matches
+- `3_keyword_filtered.jsonl` - chunks with exactly 3 keyword matches
+- `4_keyword_filtered.jsonl` - chunks with exactly 4 keyword matches
+- `5_keyword_filtered.jsonl` - chunks with exactly 5 keyword matches
+- `6_keyword_filtered.jsonl` - chunks with exactly 6 keyword matches
+
+#### Range Mode Output
+
+The script produces a summary table showing the distribution of chunks by match count:
+
+```
+============================================================
+RANGE FILTERING RESULTS
+============================================================
+
+ Matches |     Chunks | Percentage | Output File
+--------+-----------+-----------+----------------------------------------
+       2 |      45231 |      13.4% | 2_keyword_filtered.jsonl
+       3 |      28456 |       8.4% | 3_keyword_filtered.jsonl
+       4 |      15234 |       4.5% | 4_keyword_filtered.jsonl
+       5 |       8123 |       2.4% | 5_keyword_filtered.jsonl
+       6 |       4567 |       1.4% | 6_keyword_filtered.jsonl
+```
+
+With `--stats`, an additional table shows keyword theme distribution per match count:
+
+```
+============================================================
+KEYWORD STATISTICS BY MATCH COUNT
+============================================================
+
+Theme           |       2 |       3 |       4 |       5 |       6
+-------------------------------------------------------------------
+philosophy      |   12456 |    8234 |    4567 |    2345 |    1234
+collectivism    |   10234 |    7123 |    3890 |    1987 |     987
+...
+```
+
+This helps identify which match threshold best captures your target themes
 
 ### Output Format
 
@@ -293,14 +369,21 @@ Chunks are augmented with keyword counts:
     "chess": 0,
     "space": 0,
     "authority": 1,
-    "total": 7
+    "utopia": 2,
+    "dystopia": 0,
+    "survival": 0,
+    "revolution": 1,
+    "propaganda": 0,
+    "philosophy": 3,
+    "exploration": 0,
+    "ai_machine": 0,
+    "russian": 0,
+    "power": 1,
+    "conspiracy": 0,
+    "total": 14
   }
 }
 ```
-
-### Expected Filtering
-
-Typically 20-40% of chunks pass keyword filtering with `--min-matches 3`.
 
 ---
 
@@ -410,10 +493,6 @@ Chunks are augmented with theme scores:
   }
 }
 ```
-
-### Expected Output
-
-With `--min-score 0.3`, typically 40-60% of keyword-filtered chunks pass.
 
 ---
 
