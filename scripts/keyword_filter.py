@@ -18,35 +18,130 @@ class KeywordFilter:
     """Fast pre-filtering of chunks using keyword matching."""
     
     # High-value keywords for each theme
+    # Aligned with Deep Red trilogy themes: Soviet Mars colony, AI chess master,
+    # political satire, survival, ideological extremism, utopia/dystopia
     KEYWORDS = {
         'collectivism': {
             'people', 'society', 'collective', 'together', 'united', 'comrades',
             'workers', 'citizens', 'masses', 'community', 'solidarity', 'common',
-            'shared', 'cooperative', 'brotherhood', 'equality', 'proletariat'
+            'shared', 'cooperative', 'brotherhood', 'equality', 'proletariat',
+            'labor', 'labour', 'union', 'commune', 'social', 'class', 'struggle',
+            'bourgeois', 'peasant', 'factory', 'industrial', 'revolution',
+            'socialist', 'communist', 'working', 'organize', 'movement'
         },
         'science': {
             'science', 'technology', 'progress', 'machine', 'rational', 'logic',
             'calculate', 'efficiency', 'engineering', 'invention', 'discovery',
-            'laboratory', 'experiment', 'atomic', 'electronic', 'cybernetic'
+            'laboratory', 'experiment', 'atomic', 'electronic', 'cybernetic',
+            'scientific', 'research', 'theory', 'formula', 'physics', 'chemistry',
+            'mathematics', 'energy', 'power', 'mechanism', 'device', 'apparatus',
+            'technical', 'instrument', 'electric', 'mechanical', 'engine',
+            'computation', 'analyze', 'hypothesis', 'observation', 'data'
         },
         'chess': {
             'chess', 'move', 'gambit', 'strategy', 'tactical', 'position',
             'endgame', 'checkmate', 'opponent', 'board', 'piece', 'pawn',
-            'knight', 'bishop', 'rook', 'queen', 'king', 'opening'
+            'knight', 'bishop', 'rook', 'queen', 'king', 'opening',
+            'game', 'play', 'match', 'tournament', 'master', 'sacrifice',
+            'defense', 'attack', 'counter', 'maneuver', 'calculate', 'think'
         },
         'space': {
             'space', 'rocket', 'mars', 'moon', 'stars', 'cosmos', 'orbital',
             'astronaut', 'cosmonaut', 'mission', 'launch', 'spacecraft',
-            'planet', 'universe', 'celestial', 'voyage', 'expedition'
+            'planet', 'universe', 'celestial', 'voyage', 'expedition',
+            'sky', 'heavens', 'earth', 'solar', 'stellar', 'galaxy', 'asteroid',
+            'comet', 'telescope', 'orbit', 'gravity', 'atmosphere', 'alien',
+            'interplanetary', 'satellite', 'lunar', 'crater', 'colony', 'flight'
         },
         'authority': {
             'order', 'guidance', 'leader', 'wisdom', 'trust', 'obey',
             'directive', 'plan', 'system', 'control', 'authority', 'state',
-            'government', 'administration', 'regulation', 'harmony'
+            'government', 'administration', 'regulation', 'harmony',
+            'command', 'power', 'rule', 'law', 'regime', 'hierarchy',
+            'superior', 'subordinate', 'discipline', 'duty', 'loyalty',
+            'obedience', 'decree', 'mandate', 'council', 'minister', 'official'
+        },
+        'utopia': {
+            'utopia', 'utopian', 'perfect', 'ideal', 'paradise', 'golden',
+            'harmony', 'peaceful', 'prosperity', 'abundance', 'happiness',
+            'freedom', 'justice', 'equality', 'brotherhood', 'dream', 'hope',
+            'future', 'tomorrow', 'vision', 'enlightened', 'civilized',
+            'progress', 'reform', 'improvement', 'better', 'new world'
+        },
+        'dystopia': {
+            'dystopia', 'dystopian', 'oppression', 'tyranny', 'dictator',
+            'totalitarian', 'surveillance', 'conform', 'forbidden', 'prison',
+            'punishment', 'fear', 'terror', 'dark', 'nightmare', 'despair',
+            'hopeless', 'control', 'propaganda', 'censor', 'suppress',
+            'rebellion', 'resist', 'underground', 'secret', 'escape'
+        },
+        'survival': {
+            'survive', 'survival', 'alive', 'death', 'danger', 'peril',
+            'struggle', 'endure', 'persist', 'fight', 'desperate', 'escape',
+            'rescue', 'save', 'protect', 'shelter', 'food', 'water',
+            'wilderness', 'isolation', 'alone', 'stranded', 'crash',
+            'shipwreck', 'castaway', 'lost', 'hunt', 'prey', 'predator'
+        },
+        'revolution': {
+            'revolution', 'revolutionary', 'revolt', 'uprising', 'rebel',
+            'rebellion', 'overthrow', 'liberation', 'freedom', 'liberty',
+            'independence', 'resistance', 'fight', 'struggle', 'battle',
+            'war', 'conflict', 'victory', 'defeat', 'enemy', 'ally',
+            'comrade', 'cause', 'movement', 'radical', 'change', 'transform'
+        },
+        'propaganda': {
+            'propaganda', 'truth', 'lie', 'believe', 'faith', 'doctrine',
+            'ideology', 'message', 'speech', 'declare', 'proclaim', 'announce',
+            'broadcast', 'newspaper', 'media', 'symbol', 'slogan', 'banner',
+            'poster', 'glory', 'hero', 'heroic', 'patriot', 'motherland',
+            'fatherland', 'nation', 'national', 'pride', 'honor', 'sacrifice'
+        },
+        'philosophy': {
+            'philosophy', 'philosopher', 'think', 'thought', 'reason', 'logic',
+            'truth', 'knowledge', 'wisdom', 'understand', 'meaning', 'purpose',
+            'exist', 'existence', 'being', 'consciousness', 'mind', 'soul',
+            'spirit', 'moral', 'ethics', 'virtue', 'good', 'evil', 'free',
+            'will', 'choice', 'destiny', 'fate', 'nature', 'human', 'humanity'
+        },
+        'exploration': {
+            'explore', 'explorer', 'expedition', 'journey', 'voyage', 'travel',
+            'adventure', 'discover', 'discovery', 'unknown', 'new', 'frontier',
+            'pioneer', 'territory', 'land', 'map', 'chart', 'navigate',
+            'north', 'south', 'pole', 'arctic', 'antarctic', 'ocean', 'sea',
+            'mountain', 'desert', 'jungle', 'cave', 'depths', 'heights'
+        },
+        'ai_machine': {
+            'machine', 'automaton', 'mechanical', 'robot', 'artificial',
+            'intelligence', 'calculate', 'compute', 'brain', 'think',
+            'logic', 'program', 'automatic', 'engine', 'mechanism',
+            'clockwork', 'gear', 'device', 'invention', 'creator', 'create',
+            'alive', 'conscious', 'sentient', 'master', 'servant', 'obey',
+            'command', 'control', 'power', 'destroy', 'rebellion'
+        },
+        'russian': {
+            'russia', 'russian', 'moscow', 'petersburg', 'siberia', 'czar',
+            'tsar', 'soviet', 'bolshevik', 'comrade', 'steppe', 'vodka',
+            'samovar', 'troika', 'muzhik', 'boyar', 'cossack', 'prince',
+            'princess', 'nobleman', 'serf', 'peasant', 'village', 'estate',
+            'winter', 'snow', 'cold', 'frost', 'orthodox', 'church'
+        },
+        'power': {
+            'power', 'powerful', 'powerless', 'wealth', 'wealthy', 'rich',
+            'poor', 'money', 'gold', 'fortune', 'capital', 'capitalist',
+            'oligarch', 'mogul', 'empire', 'emperor', 'throne', 'crown',
+            'rule', 'ruler', 'kingdom', 'realm', 'dominion', 'conquer',
+            'dominate', 'control', 'influence', 'corrupt', 'greed', 'ambition'
+        },
+        'conspiracy': {
+            'conspiracy', 'conspire', 'secret', 'hidden', 'plot', 'scheme',
+            'plan', 'shadow', 'mysterious', 'mystery', 'unknown', 'agent',
+            'spy', 'infiltrate', 'betray', 'traitor', 'trust', 'deceive',
+            'deception', 'mask', 'disguise', 'identity', 'truth', 'reveal',
+            'discover', 'uncover', 'expose', 'society', 'order', 'cabal'
         }
     }
     
-    def __init__(self, min_matches: int = 3):
+    def __init__(self, min_matches: int = 2):
         self.min_matches = min_matches
         self._compile_patterns()
     
@@ -90,8 +185,8 @@ def main():
                         help='Input JSONL file with chunks')
     parser.add_argument('--output', required=True,
                         help='Output JSONL file for filtered chunks')
-    parser.add_argument('--min-matches', type=int, default=3,
-                        help='Minimum keyword matches required')
+    parser.add_argument('--min-matches', type=int, default=2,
+                        help='Minimum keyword matches required (default: 2)')
     parser.add_argument('--stats', action='store_true',
                         help='Print keyword statistics')
     
