@@ -229,12 +229,16 @@ Beyond Gutenberg-derived content, consider:
 
 ## Phase 4: Fine-Tuning Process
 
+**Detailed documentation**: [ThemeFinetuning-Phase4.md](ThemeFinetuning-Phase4.md)
+
+Phase 4 fine-tunes either a base HuggingFace model or the temporal-adjusted model using the theme dataset from Phase 3 to adopt the Deep Red persona.
+
 ### Prerequisites
 
 | Requirement | Status | Source |
 |-------------|--------|--------|
-| Base Model | Temporal-adjusted model from Phase 2 | [InitialFinetuning-Phase2.md](InitialFinetuning-Phase2.md) |
-| Theme Dataset | Generated in Phase 3 | `output/theme_dataset.jsonl` |
+| Base Model | HuggingFace model OR temporal-adjusted model from Phase 2 | [TemporalFinetuning-InitialFinetuning-Phase2.md](TemporalFinetuning-InitialFinetuning-Phase2.md) |
+| Theme Dataset | Generated in Phase 3 | `$GUTENBERG_DATA/dataset/theme_dataset.jsonl` |
 | GPU/Compute | Same as Phase 2 | AMD GPU with ROCm or NVIDIA with CUDA |
 
 ### Fine-Tuning Configuration
@@ -242,21 +246,51 @@ Beyond Gutenberg-derived content, consider:
 The theme fine-tuning implementation is provided in [scripts/finetune_theme.py](../scripts/finetune_theme.py).
 
 This script:
-- Loads the temporally-adjusted model as the base
+- Loads a HuggingFace model or the temporally-adjusted model as the base
 - Applies LoRA adapters (r=32) for efficient style training
-- Uses lower learning rate (5e-5) to preserve temporal knowledge
+- Uses lower learning rate (5e-5) to preserve temporal/base knowledge
 - Trains for 3 epochs with cosine learning rate schedule
 - Saves checkpoints and final model
 
-Usage:
+Usage with temporal model (recommended):
 ```bash
 python scripts/finetune_theme.py \
-    --base-model output/temporal-qwen2.5-1.5b-instruct-full-20251226_231503 \
-    --dataset output/theme_dataset.jsonl \
-    --output-dir output/theme-finetuned \
+    --base_model output/merged-temporal-qwen \
+    --dataset "$GUTENBERG_DATA/dataset/theme_dataset.jsonl" \
+    --output_dir output/theme-deepred \
     --epochs 3 \
-    --batch-size 4 \
+    --batch_size 4 \
     --learning_rate 5e-5
+```
+
+Usage with HuggingFace model:
+```bash
+python scripts/finetune_theme.py \
+    --base_model "Qwen/Qwen2.5-1.5B-Instruct" \
+    --dataset "$GUTENBERG_DATA/dataset/theme_dataset.jsonl" \
+    --epochs 3
+```
+
+**For complete prerequisites, environment setup, and detailed instructions**, see [ThemeFinetuning-Phase4.md](ThemeFinetuning-Phase4.md).
+
+### Post-Training Steps
+
+After training, use the existing scripts to merge and convert:
+
+```bash
+# 1. Merge LoRA with base model
+python scripts/merge_lora.py \
+    --base_model output/merged-temporal-qwen \
+    --lora_path output/theme-deepred-*/final \
+    --output_path output/merged-deepred
+
+# 2. Convert to GGUF
+python scripts/convert_to_gguf.py \
+    --model_path output/merged-deepred \
+    --output_path output/deepred.gguf
+
+# 3. Deploy to LM Studio
+sudo cp output/deepred.gguf /root/.lmstudio/models/local/deepred/
 ```
 
 ### Evaluation Metrics
@@ -305,12 +339,15 @@ DeepRedAI/
 │   ├── chunk_gutenberg.py         # Phase 2: Text chunking
 │   ├── keyword_filter.py          # Phase 2: Keyword filtering
 │   ├── generate_theme_dataset.py  # Phase 3: Dataset generation
-│   └── finetune_theme.py          # Phase 4: Fine-tuning
+│   ├── finetune_theme.py          # Phase 4: Fine-tuning
+│   ├── merge_lora.py              # Post-training: Merge LoRA with base
+│   └── convert_to_gguf.py         # Post-training: Convert to GGUF
 ├── documentation/
 │   ├── ThemeFinetuning-Plan.md              # This document
 │   ├── ThemeFinetuning-DataPreparation-Phase1.md  # Phase 1 details
 │   ├── ThemeFinetuning-DataPreparation-Phase2.md  # Phase 2 details
-│   └── ThemeFinetuning-DataPreparation-Phase3.md  # Phase 3 details
+│   ├── ThemeFinetuning-DataPreparation-Phase3.md  # Phase 3 details
+│   └── ThemeFinetuning-Phase4.md                  # Phase 4 details
 └── $GUTENBERG_DATA/               # /mnt/data/gutenberg
     ├── corpus/                    # Phase 1: Raw retrieved texts
     ├── theme_chunks/              # Phase 2: Chunked and filtered passages
@@ -324,8 +361,8 @@ DeepRedAI/
 
 After completing theme fine-tuning:
 
-1. **Merge with Temporal Model**: Combine theme LoRA with temporal adjustments
-2. **Convert to GGUF**: Create optimized inference format
+1. **Merge LoRA with Base Model**: Use `merge_lora.py` to create standalone model
+2. **Convert to GGUF**: Use `convert_to_gguf.py` for optimized inference format
 3. **Deploy to LM Studio**: Test in production environment
 4. **Character Testing**: Extensive dialogue testing for consistency
 5. **Iterate**: Refine based on evaluation results
@@ -335,5 +372,5 @@ After completing theme fine-tuning:
 ## References
 
 - [Project Gutenberg](https://www.gutenberg.org/) - Source texts
-- [Unsloth](https://github.com/unslothai/unsloth) - Efficient fine-tuning
+- [PEFT/LoRA](https://github.com/huggingface/peft) - Efficient fine-tuning
 - [Deep Red Film](https://www.deepredfilm.com) - Creative inspiration

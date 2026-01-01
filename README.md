@@ -19,9 +19,10 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
   - [How to finetune model with temporal knowledge cutoff using these datasets](documentation/TemporalFinetuning-InitialFinetuning-Phase2.md)
 - How to fine-tune the model further for "Soviet utopia" theme alignment
   - [Theme Finetuning Phased Plan](documentation/ThemeFinetuning-Plan.md) - Content retrieval, analysis, and finetuning for stylistic alignment
-  - [How to retrieve and prepare training dataset from project Gutenberg content](documentation/ThemeFinetuning-DataPreparation-Phase1.md)
-  - [How to generate theme training datasets from Gutenberg content](documentation/ThemeFinetuning-DataPreparation-Phase2.md)
-  - How to finetune model with themed data using these datasets
+  - [Phase 1: How to retrieve training content from Project Gutenberg](documentation/ThemeFinetuning-DataPreparation-Phase1.md)
+  - [Phase 2: How to chunk and filter content for theme alignment](documentation/ThemeFinetuning-DataPreparation-Phase2.md)
+  - [Phase 3: How to generate ChatML training dataset from filtered content](documentation/ThemeFinetuning-DataPreparation-Phase3.md)
+  - [Phase 4: How to finetune model with themed dataset](documentation/ThemeFinetuning-Phase4.md)
 
 ## Repo Content
 

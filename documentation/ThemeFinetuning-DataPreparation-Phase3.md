@@ -289,19 +289,108 @@ python scripts/generate_theme_dataset.py \
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--input` | Required | Path to filtered chunks JSONL from Phase 2 |
-| `--output` | Required | Output path for ChatML dataset |
-| `--lmstudio-url` | `http://localhost:1234/v1` | LM Studio API URL |
-| `--lmstudio-model` | Auto-detect | Model to use for generation |
+| `--input` | Required* | Path to filtered chunks JSONL from Phase 2 |
+| `--output` | Required* | Output path for ChatML dataset |
+| `--lmstudio-url` | `http://localhost:1234` | LM Studio API URL |
+| `--lmstudio-host` | `localhost` | LM Studio server host |
+| `--lmstudio-port` | `1234` | LM Studio server port |
+| `--lmstudio-model` | `openai/gpt-oss-20b` | Model to use for generation |
 | `--examples-per-chunk` | 2 | Number of ChatML examples per chunk |
 | `--max-chunks` | None | Limit number of chunks to process |
 | `--batch-size` | 50 | Chunks to process before saving checkpoint |
 | `--resume` | False | Resume from checkpoint if exists |
+| `--split` | False | Create train/validation split after generation |
 | `--no-split` | False | Skip automatic train/validation split |
 | `--train-ratio` | 0.9 | Fraction of data for training (default: 90% train, 10% val) |
 | `--temperature` | 0.8 | LLM temperature for generation |
 | `--dry-run` | False | Preview without generating |
 | `--stats` | False | Print statistics after completion |
+| `--verbose` | False | Enable verbose logging |
+
+*Required for generation mode only. Not needed for `--benchmark` mode.
+
+### Benchmarking LLM Speed
+
+Before running full dataset generation, benchmark your available models to find the fastest one:
+
+```bash
+# Output a sample prompt for manual testing in LM Studio GUI
+python3 scripts/generate_theme_dataset.py --benchmark
+
+# Automatically benchmark all available models
+python3 scripts/generate_theme_dataset.py --benchmark --auto-benchmark
+
+# Save benchmark results to a JSON file
+python3 scripts/generate_theme_dataset.py --benchmark --auto-benchmark \
+    --benchmark-output ${GUTENBERG_DATA}/benchmark_results.json
+
+# Filter to test only specific model families
+python3 scripts/generate_theme_dataset.py --benchmark --auto-benchmark \
+    --models-filter qwen,llama,gemma
+
+# Use a custom evaluator model for response quality assessment
+python3 scripts/generate_theme_dataset.py --benchmark --auto-benchmark \
+    --evaluator-model qwen/qwen2.5-7b-instruct
+```
+
+**Manual Testing:**
+The `--benchmark` flag outputs a sample prompt (~3500 characters) based on a War and Peace excerpt themed for Deep Red. Copy this prompt into LM Studio's chat interface and note the tokens/second displayed in the response stats.
+
+**Automated Testing:**
+With `--auto-benchmark`, the script will:
+1. Discover all downloaded LLM models via LM Studio API
+2. Load each model using the `lms` CLI
+3. Run inference and capture detailed stats (tokens/sec, time-to-first-token)
+4. Unload the model and proceed to the next
+5. Load the evaluator model (default: `openai/gpt-oss-20b`) to assess response quality
+6. Rate each model's output on a 1.0-5.0 scale based on format compliance, question quality, persona authenticity, and temporal accuracy
+7. Output a ranked summary of all models by speed with quality ratings
+
+**Evaluation Criteria:**
+The evaluator model rates responses on these criteria:
+- **Format Compliance**: Valid JSON with user/assistant keys
+- **Question Quality**: Natural, thematic, self-contained questions
+- **Response Character**: Matches Deep Red persona (authoritative, strategic, collectivist)
+- **Temporal Accuracy**: No modern terms, pre-1969 vocabulary
+- **Overall Usefulness**: Suitable for training a theme-aligned language model
+
+**Benchmark Output Example:**
+```
+Rank  Model                               Tok/s      TTFT       Time       1000 Resp  Rating
+--------------------------------------------------------------------------------------------------
+1     ibm/granite-4-h-tiny                65.62      0.509s     3.69s      0.5h       2.5/5
+2     openai/gpt-oss-20b                  57.57      0.865s     4.46s      0.6h       3.5/5
+3     baidu/ernie-4.5-21b-a3b             55.32      0.907s     5.37s      0.7h       3.0/5
+4     openai-gpt-oss-20b-abliterated-un   52.95      0.941s     27.31s     3.9h       2.5/5
+5     nvidia/nemotron-3-nano              46.05      1.103s     23.73s     3.4h       3.0/5
+6     qwen/qwen2.5-7b-instruct            37.98      0.488s     7.68s      1.1h       4.0/5
+7     essentialai/rnj-1                   28.80      0.998s     11.25s     1.7h       3.5/5
+8     qwen/qwen3-next-80b                 26.31      2.018s     14.56s     2.1h       3.5/5
+
+--------------------------------------------------------------------------------------------------
+EVALUATION DETAILS:
+--------------------------------------------------------------------------------------------------
+
+qwen/qwen2.5-7b-instruct:
+  Rating: 4.0/5.0
+  Reasoning: Valid JSON format, authentic Deep Red voice, period-appropriate language, good thematic connection
+...
+```
+
+**Configure Based on Results:** After benchmarking, use the fastest model with acceptable quality (3.0+ rating) for dataset generation.
+
+### Benchmark Command-Line Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--benchmark` | False | Enable benchmark mode |
+| `--auto-benchmark` | False | Automatically test all available models |
+| `--benchmark-output` | None | Path to save benchmark results as JSON |
+| `--models-filter` | None | Comma-separated model name patterns to filter |
+| `--benchmark-examples` | 2 | Number of examples to request in benchmark prompt |
+| `--benchmark-max-tokens` | 2048 | Maximum tokens to generate in benchmark |
+| `--evaluator-model` | `openai/gpt-oss-20b` | Model to use for evaluating responses |
+| `--lms-cli-path` | Auto-detect | Path to LM Studio CLI (lms) |
 
 ### Development Run (Quick Test)
 

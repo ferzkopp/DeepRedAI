@@ -43,6 +43,8 @@ import logging
 import os
 import random
 import re
+import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -63,6 +65,7 @@ GUTENBERG_DATA = os.environ.get('GUTENBERG_DATA', '/mnt/data/gutenberg')
 # LM Studio defaults
 DEFAULT_LMSTUDIO_HOST = os.environ.get('LMSTUDIO_HOST', 'localhost')
 DEFAULT_LMSTUDIO_PORT = int(os.environ.get('LMSTUDIO_PORT', '1234'))
+DEFAULT_LMSTUDIO_MODEL = os.environ.get('LMSTUDIO_MODEL', 'openai/gpt-oss-20b')
 
 # Generation settings
 DEFAULT_EXAMPLES_PER_CHUNK = 2
@@ -83,6 +86,213 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# LM Studio CLI Helpers
+# -----------------------------------------------------------------------------
+
+# LM Studio CLI path - check common locations
+# Priority: environment variable > /opt/lm-studio/bin > root's .lmstudio > user's .lmstudio > PATH
+DEFAULT_LMS_CLI_PATHS = [
+    '/opt/lm-studio/bin/lms',           # System-wide installation
+    '/root/.lmstudio/bin/lms',          # Root user installation
+    os.path.expanduser('~/.lmstudio/bin/lms'),  # Current user installation
+]
+
+
+def find_lms_cli() -> Optional[str]:
+    """
+    Find the LM Studio CLI (lms) executable.
+    
+    Checks in order:
+    1. LMS_CLI_PATH environment variable
+    2. Common installation locations
+    3. System PATH
+    
+    Returns:
+        Path to lms executable, or None if not found
+    """
+    # Check environment variable first
+    env_path = os.environ.get('LMS_CLI_PATH')
+    if env_path and os.path.isfile(env_path) and os.access(env_path, os.X_OK):
+        return env_path
+    
+    # Check common locations
+    for path in DEFAULT_LMS_CLI_PATHS:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    
+    # Fall back to checking PATH
+    lms_in_path = shutil.which('lms')
+    if lms_in_path:
+        return lms_in_path
+    
+    return None
+
+
+# Global variable to cache the CLI path
+_lms_cli_path: Optional[str] = None
+
+
+def get_lms_cli() -> str:
+    """
+    Get the cached LMS CLI path, finding it if necessary.
+    
+    Returns:
+        Path to lms executable
+    
+    Raises:
+        FileNotFoundError: If lms CLI cannot be found
+    """
+    global _lms_cli_path
+    if _lms_cli_path is None:
+        _lms_cli_path = find_lms_cli()
+    if _lms_cli_path is None:
+        raise FileNotFoundError(
+            "LM Studio CLI (lms) not found. Checked locations:\n"
+            f"  - LMS_CLI_PATH environment variable\n"
+            f"  - {chr(10).join('  - ' + p for p in DEFAULT_LMS_CLI_PATHS)}\n"
+            "  - System PATH\n\n"
+            "To fix, either:\n"
+            "  1. Set LMS_CLI_PATH=/path/to/lms\n"
+            "  2. Create symlink: sudo ln -s /root/.lmstudio/bin/lms /opt/lm-studio/bin/lms\n"
+            "  3. Add to PATH: export PATH=$PATH:/root/.lmstudio/bin"
+        )
+    return _lms_cli_path
+
+
+def set_lms_cli_path(path: str) -> None:
+    """Set the LMS CLI path explicitly."""
+    global _lms_cli_path
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"LMS CLI not found at: {path}")
+    if not os.access(path, os.X_OK):
+        raise PermissionError(f"LMS CLI not executable: {path}")
+    _lms_cli_path = path
+    logger.info(f"Using LMS CLI: {path}")
+
+
+def load_model_via_cli(model_id: str, gpu: str = "max", context_length: Optional[int] = None) -> bool:
+    """
+    Load a model using the LM Studio CLI.
+    
+    Args:
+        model_id: The model identifier
+        gpu: GPU offload setting (max, auto, or 0.0-1.0)
+        context_length: Optional context length override
+    
+    Returns:
+        True if model loaded successfully
+    """
+    try:
+        lms_cli = get_lms_cli()
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        return False
+    
+    cmd = [lms_cli, "load", model_id, f"--gpu={gpu}"]
+    if context_length:
+        cmd.append(f"--context-length={context_length}")
+    
+    try:
+        logger.info(f"Loading model: {model_id}")
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            timeout=300  # 5 minute timeout for model loading
+        )
+        if result.returncode == 0:
+            logger.info(f"Model {model_id} loaded successfully")
+            # Give it a moment to fully initialize
+            time.sleep(2)
+            return True
+        else:
+            logger.error(f"Failed to load model {model_id}: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        logger.error(f"Timeout loading model {model_id}")
+        return False
+    except FileNotFoundError:
+        logger.error(f"LM Studio CLI not found at: {lms_cli}")
+        return False
+    except Exception as e:
+        logger.error(f"Error loading model {model_id}: {e}")
+        return False
+
+
+def unload_model_via_cli(model_id: Optional[str] = None, unload_all: bool = False) -> bool:
+    """
+    Unload a model using the LM Studio CLI.
+    
+    Args:
+        model_id: The model identifier to unload (optional)
+        unload_all: If True, unload all models
+    
+    Returns:
+        True if unload successful
+    """
+    try:
+        lms_cli = get_lms_cli()
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        return False
+    
+    if unload_all:
+        cmd = [lms_cli, "unload", "--all"]
+    elif model_id:
+        cmd = [lms_cli, "unload", model_id]
+    else:
+        logger.warning("No model specified for unload")
+        return False
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            logger.info("Model(s) unloaded successfully")
+            time.sleep(1)  # Brief pause for cleanup
+            return True
+        else:
+            logger.warning(f"Unload may have failed: {result.stderr}")
+            return False
+    except Exception as e:
+        logger.error(f"Error unloading model: {e}")
+        return False
+
+
+def list_models_via_cli() -> List[str]:
+    """List available models using LM Studio CLI."""
+    try:
+        lms_cli = get_lms_cli()
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        return []
+    
+    try:
+        result = subprocess.run(
+            [lms_cli, "ls"], 
+            capture_output=True, 
+            text=True, 
+            timeout=30
+        )
+        if result.returncode == 0:
+            # Parse model list from output
+            models = []
+            for line in result.stdout.strip().split('\n'):
+                line = line.strip()
+                if line and not line.startswith('-') and not line.lower().startswith('model'):
+                    # Extract model name (first column typically)
+                    parts = line.split()
+                    if parts:
+                        models.append(parts[0])
+            return models
+        else:
+            logger.error(f"Failed to list models: {result.stderr}")
+            return []
+    except Exception as e:
+        logger.error(f"Error listing models: {e}")
+        return []
+
 
 # LLM artifacts to filter out
 LLM_ARTIFACTS = [
@@ -449,6 +659,220 @@ Output ONLY valid JSON with no other text:
 
         return None
 
+    def get_available_models(self) -> List[Dict[str, Any]]:
+        """Get list of all available models (both loaded and downloaded)."""
+        try:
+            # Use v0 API for more detailed info including state
+            response = requests.get(f"{self.base_url}/api/v0/models", timeout=10)
+            response.raise_for_status()
+            models = response.json()
+            return models.get('data', [])
+        except requests.RequestException:
+            # Fallback to OpenAI-compatible endpoint
+            try:
+                response = requests.get(f"{self.base_url}/v1/models", timeout=10)
+                response.raise_for_status()
+                models = response.json()
+                return models.get('data', [])
+            except requests.RequestException as e:
+                logger.error(f"Failed to get models: {e}")
+                return []
+
+    def get_llm_models(self) -> List[Dict[str, Any]]:
+        """Get only LLM models (exclude embeddings, VLMs, etc.)."""
+        all_models = self.get_available_models()
+        return [m for m in all_models if m.get('type', 'llm') == 'llm']
+
+    def run_benchmark(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        max_tokens: int = 512
+    ) -> Dict[str, Any]:
+        """
+        Run a benchmark completion and return detailed stats.
+        
+        Returns dict with:
+        - success: bool
+        - model: str
+        - prompt_tokens: int
+        - completion_tokens: int
+        - total_tokens: int
+        - tokens_per_second: float
+        - time_to_first_token: float (seconds)
+        - generation_time: float (seconds)
+        - response_text: str (full response for evaluation)
+        - response_text_preview: str (truncated for display)
+        - error: str (if failed)
+        """
+        model = model or self.model
+        result = {
+            'success': False,
+            'model': model,
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0,
+            'tokens_per_second': 0.0,
+            'time_to_first_token': 0.0,
+            'generation_time': 0.0,
+            'response_text': '',
+            'response_text_preview': '',
+            'error': None
+        }
+        
+        try:
+            # Use v0 API for detailed stats
+            response = requests.post(
+                f"{self.base_url}/api/v0/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": max_tokens,
+                    "stream": False
+                },
+                timeout=300  # 5 minute timeout for benchmarks
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Extract stats
+            usage = data.get('usage', {})
+            stats = data.get('stats', {})
+            
+            result['success'] = True
+            result['prompt_tokens'] = usage.get('prompt_tokens', 0)
+            result['completion_tokens'] = usage.get('completion_tokens', 0)
+            result['total_tokens'] = usage.get('total_tokens', 0)
+            result['tokens_per_second'] = stats.get('tokens_per_second', 0.0)
+            result['time_to_first_token'] = stats.get('time_to_first_token', 0.0)
+            result['generation_time'] = stats.get('generation_time', 0.0)
+            
+            # Get response text (full for evaluation, preview for display)
+            choices = data.get('choices', [])
+            if choices:
+                text = choices[0].get('message', {}).get('content', '')
+                result['response_text'] = text  # Full text for evaluation
+                result['response_text_preview'] = text[:200] + '...' if len(text) > 200 else text
+            
+            # Also capture model_info if available
+            model_info = data.get('model_info', {})
+            if model_info:
+                result['arch'] = model_info.get('arch', '')
+                result['quant'] = model_info.get('quant', '')
+                result['context_length'] = model_info.get('context_length', 0)
+                
+        except requests.RequestException as e:
+            result['error'] = str(e)
+            logger.error(f"Benchmark request failed for model {model}: {e}")
+        
+        return result
+
+    def evaluate_response(
+        self,
+        response_text: str,
+        original_prompt: str,
+        evaluator_model: str = "openai/gpt-oss-20b"
+    ) -> Dict[str, Any]:
+        """
+        Evaluate a benchmark response using a specified evaluator model.
+        
+        Args:
+            response_text: The model's response to evaluate
+            original_prompt: The original benchmark prompt
+            evaluator_model: Model to use for evaluation (default: openai/gpt-oss-20b)
+        
+        Returns:
+            Dict with:
+            - success: bool
+            - rating: float (1.0 to 5.0)
+            - reasoning: str
+            - error: str (if failed)
+        """
+        result = {
+            'success': False,
+            'rating': 0.0,
+            'reasoning': '',
+            'error': None
+        }
+        
+        if not response_text or not response_text.strip():
+            result['error'] = 'Empty response'
+            result['rating'] = 1.0
+            result['reasoning'] = 'Response was empty'
+            return result
+        
+        evaluation_prompt = f"""You are an expert evaluator assessing the quality of theme-based dialogue generation from a language model.
+
+The model was given this task:
+---
+{original_prompt[:1500]}
+---
+
+The model produced this response:
+---
+{response_text[:3000]}
+---
+
+Evaluate the response on a scale from 1.0 to 5.0 based on these criteria:
+1. **Format Compliance** (valid JSON with user/assistant keys)
+2. **Question Quality** (natural, thematic, self-contained)
+3. **Response Character** (matches Deep Red persona - authoritative, strategic, collectivist)
+4. **Temporal Accuracy** (no modern terms, pre-1969 vocabulary)
+5. **Overall Usefulness** (suitable for training a theme-aligned language model)
+
+Rating scale:
+- 5.0: Excellent - Perfect format, compelling dialogue, authentic Deep Red voice, period-accurate
+- 4.0: Good - Valid format, good dialogue with minor issues, mostly authentic voice
+- 3.0: Acceptable - Valid format but dialogue/persona has notable quality issues
+- 2.0: Poor - Format issues or significant quality problems in dialogue/persona
+- 1.0: Failed - Invalid format, unusable output, or completely wrong persona
+
+Respond with ONLY a JSON object (no other text):
+{{"rating": <float 1.0-5.0>, "reasoning": "<brief explanation>"}}"""
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/v1/chat/completions",
+                json={
+                    "model": evaluator_model,
+                    "messages": [{"role": "user", "content": evaluation_prompt}],
+                    "temperature": 0.1,  # Low temperature for consistent evaluation
+                    "max_tokens": 256,
+                },
+                timeout=120
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            content = data['choices'][0]['message']['content']
+            
+            # Parse the evaluation result
+            try:
+                # Try to extract JSON from response
+                json_match = re.search(r'\{[\s\S]*\}', content)
+                if json_match:
+                    eval_data = json.loads(json_match.group())
+                    rating = float(eval_data.get('rating', 0))
+                    # Clamp rating to valid range
+                    rating = max(1.0, min(5.0, rating))
+                    result['success'] = True
+                    result['rating'] = rating
+                    result['reasoning'] = eval_data.get('reasoning', '')[:500]
+                else:
+                    result['error'] = 'Could not parse evaluation JSON'
+                    result['rating'] = 2.5  # Default middle score on parse failure
+            except (json.JSONDecodeError, ValueError) as e:
+                result['error'] = f'JSON parse error: {e}'
+                result['rating'] = 2.5
+                
+        except requests.RequestException as e:
+            result['error'] = str(e)
+            logger.warning(f"Evaluation request failed: {e}")
+        
+        return result
+
 
 # -----------------------------------------------------------------------------
 # Quality Validation
@@ -630,6 +1054,305 @@ class ExampleValidator:
     def reset(self):
         """Reset the duplicate tracking."""
         self.seen_questions.clear()
+
+
+# -----------------------------------------------------------------------------
+# Benchmark Mode Functions
+# -----------------------------------------------------------------------------
+
+# Sample text for benchmarking - A classic literature excerpt themed for Deep Red
+BENCHMARK_CHUNK_TITLE = "War and Peace (Chess and Strategy Excerpt)"
+BENCHMARK_CHUNK_TEXT = """Prince Andrew looked at Kutuzov, and his eyes involuntarily rested on the Commander-in-Chief's face, which, though still fresh and handsome, bore traces of fatigue and preoccupation. He thought of the immense responsibility resting on this elderly man, who had to make decisions that would affect the lives of hundreds of thousands of soldiers and the fate of the nation. It was like a great chess game, where every move must be calculated with precision, where the sacrifice of a pawn might open the way to victory, but a single miscalculation could lead to catastrophic defeat.
+
+The old general sat silently, his eyes half-closed, as if he were seeing not the maps before him but some vast invisible board upon which the pieces moved according to laws that only he could perceive. The young officers around him buzzed with eager suggestions, but Kutuzov remained unmoved, waiting for the right moment, the optimal position from which to strike.
+
+"Patience," he murmured, almost to himself. "War is not won by those who move first, but by those who move best."
+
+Prince Andrew understood then that true leadership was not about individual brilliance but about understanding the collective strength of the army, the will of the people, the spirit that animated the whole enterprise. A commander who thought only of glory would sacrifice his men needlessly; a commander who understood the game would conserve his forces, strike when the time was right, and achieve victory through calculated precision rather than reckless valor.
+
+The Russian winter was coming, and Kutuzov knew that time itself was a piece on the board. Let the enemy exhaust himself in pursuit; let the vast distances swallow his supply lines; let the cold become an ally. The patience of the collective would triumph over the ambition of the individual. This was the great lesson of strategy: that victory belonged not to the swift or the strong, but to those who could see the whole board and move in harmony with forces greater than themselves.
+
+In the flickering candlelight, Prince Andrew felt as if he glimpsed some eternal truth about human endeavor—that all great achievements, whether in war or peace, required this same combination of individual dedication and collective purpose, this same willingness to subordinate personal ambition to the greater good. The game would continue long after any single player had left the board, and wisdom lay in serving the game itself rather than one's own fleeting glory."""
+
+# Default evaluator model for rating responses
+DEFAULT_EVALUATOR_MODEL = "openai/gpt-oss-20b"
+
+
+def get_benchmark_prompt(num_examples: int = 2) -> str:
+    """Generate a benchmark prompt that matches typical theme dataset generation workload."""
+    theme = random.choice(QUERY_THEMES)
+    
+    return f"""You are creating training data for a language model. Given the following passage from classic literature, generate a conversational exchange where a user asks a question and an AI assistant (Deep Red) responds.
+
+The AI assistant "Deep Red" is a chess-playing artificial intelligence that guides a utopian Mars colony. Deep Red should:
+- Use strategic/chess metaphors naturally
+- Emphasize collective achievement and cooperation
+- Speak with calm, benevolent authority
+- Be optimistic about humanity's potential
+- Draw inspiration from the themes and style of the passage
+
+CRITICAL TEMPORAL REQUIREMENT:
+Deep Red exists in an alternate history where the Soviet space program established a Mars colony. The setting is technologically advanced but linguistically rooted in the pre-1969 era (before the moon landing). You MUST:
+- Avoid all modern terminology: no "internet", "digital", "online", "smartphone", "computer" (use "calculating machine" or "cybernetic system"), "AI" (use "artificial intelligence" or "thinking machine"), "data" (use "information" or "calculations"), "network" (use "communications grid"), "software", "hardware", "algorithm" (use "calculation method" or "logical procedure")
+- Avoid post-1969 cultural references: no references to events, people, technologies, or concepts that emerged after 1969
+- Use period-appropriate vocabulary: "atomic", "electronic", "transistor", "magnetic tape", "punch cards", "vacuum tubes", "cybernetic", "automaton", "calculating", "telemetry", "radio waves"
+- Prefer formal, literary English consistent with mid-20th century scientific and philosophical writing
+- Reference only pre-1969 science, literature, and philosophy
+
+SOURCE PASSAGE:
+{BENCHMARK_CHUNK_TEXT}
+
+THEME TO EXPLORE: {theme}
+
+Generate {num_examples} different natural user questions and Deep Red responses that incorporate ideas, vocabulary, or style from the passage. Each response should feel like Deep Red's own words, not a quote from the passage. Remember: no modern terminology—this is a retro-futuristic Soviet Mars colony.
+
+Output ONLY a valid JSON array with no other text:
+[
+  {{"user": "...", "assistant": "..."}},
+  {{"user": "...", "assistant": "..."}}
+]"""
+
+
+def run_benchmark_mode(
+    lm_client: LMStudioClient,
+    auto_benchmark: bool = False,
+    output_file: Optional[str] = None,
+    models_filter: Optional[List[str]] = None,
+    num_examples: int = 2,
+    max_tokens: int = 2048,
+    evaluator_model: str = DEFAULT_EVALUATOR_MODEL
+) -> Dict[str, Any]:
+    """
+    Run benchmark mode.
+    
+    Args:
+        lm_client: LM Studio client instance
+        auto_benchmark: If True, automatically test all available models
+        output_file: Path to save benchmark results as JSON
+        models_filter: Optional list of model patterns to filter
+        num_examples: Number of examples to request (affects prompt size)
+        max_tokens: Maximum tokens to generate
+        evaluator_model: Model to use for evaluating responses (default: openai/gpt-oss-20b)
+    
+    Returns:
+        Benchmark results dictionary
+    """
+    prompt = get_benchmark_prompt(num_examples)
+    prompt_char_count = len(prompt)
+    
+    results = {
+        'benchmark_date': datetime.now().isoformat(),
+        'prompt_length_chars': prompt_char_count,
+        'num_examples_requested': num_examples,
+        'max_tokens': max_tokens,
+        'evaluator_model': evaluator_model,
+        'models_tested': []
+    }
+    
+    if not auto_benchmark:
+        # Manual mode - just print the prompt
+        print("\n" + "=" * 80)
+        print("BENCHMARK MODE - Sample Prompt for Manual Testing")
+        print("=" * 80)
+        print(f"\nPrompt length: {prompt_char_count} characters")
+        print(f"Requested examples: {num_examples}")
+        print("\n" + "-" * 80)
+        print("PROMPT:")
+        print("-" * 80)
+        print(prompt)
+        print("-" * 80)
+        print("\nTo test manually:")
+        print("1. Load your model in LM Studio GUI")
+        print("2. Paste this prompt in the chat interface")
+        print("3. Note the tokens/second from the response stats")
+        print("\nAlternatively, run with --auto-benchmark to automatically test all models")
+        print("=" * 80 + "\n")
+        
+        results['mode'] = 'manual'
+        results['prompt'] = prompt
+        return results
+    
+    # Auto-benchmark mode
+    print("\n" + "=" * 80)
+    print("AUTO-BENCHMARK MODE")
+    print("=" * 80)
+    
+    # Get available models
+    models = lm_client.get_llm_models()
+    
+    if not models:
+        # Try CLI fallback
+        logger.info("Trying CLI to list models...")
+        cli_models = list_models_via_cli()
+        if cli_models:
+            models = [{'id': m, 'state': 'not-loaded'} for m in cli_models]
+    
+    if not models:
+        logger.error("No models found. Make sure LM Studio has models downloaded.")
+        results['error'] = "No models found"
+        return results
+    
+    # Filter models if specified
+    if models_filter:
+        filtered = []
+        for model in models:
+            model_id = model.get('id', '')
+            for pattern in models_filter:
+                if pattern.lower() in model_id.lower():
+                    filtered.append(model)
+                    break
+        models = filtered
+    
+    print(f"\nFound {len(models)} models to test:")
+    for m in models:
+        state = m.get('state', 'unknown')
+        quant = m.get('quantization', 'unknown')
+        print(f"  - {m.get('id', 'unknown')} ({quant}, {state})")
+    
+    print(f"\nPrompt length: {prompt_char_count} characters")
+    print(f"Max tokens: {max_tokens}")
+    print("\nStarting benchmark...\n")
+    
+    results['mode'] = 'auto'
+    results['total_models'] = len(models)
+    
+    for i, model_info in enumerate(models, 1):
+        model_id = model_info.get('id', '')
+        state = model_info.get('state', 'not-loaded')
+        
+        print(f"\n[{i}/{len(models)}] Testing: {model_id}")
+        print("-" * 60)
+        
+        # Load model if not already loaded
+        needs_load = state != 'loaded'
+        if needs_load:
+            # Unload any currently loaded models first
+            unload_model_via_cli(unload_all=True)
+            
+            if not load_model_via_cli(model_id):
+                print(f"  ✗ Failed to load model")
+                results['models_tested'].append({
+                    'model': model_id,
+                    'success': False,
+                    'error': 'Failed to load model'
+                })
+                continue
+        
+        # Run benchmark
+        print(f"  Running inference...")
+        benchmark_result = lm_client.run_benchmark(prompt, model_id, max_tokens)
+        
+        if benchmark_result['success']:
+            print(f"  ✓ Success!")
+            print(f"    Tokens/second:      {benchmark_result['tokens_per_second']:.2f}")
+            print(f"    Time to first token: {benchmark_result['time_to_first_token']:.3f}s")
+            print(f"    Generation time:     {benchmark_result['generation_time']:.2f}s")
+            print(f"    Prompt tokens:       {benchmark_result['prompt_tokens']}")
+            print(f"    Completion tokens:   {benchmark_result['completion_tokens']}")
+        else:
+            print(f"  ✗ Failed: {benchmark_result.get('error', 'Unknown error')}")
+        
+        results['models_tested'].append(benchmark_result)
+        
+        # Unload model to free memory for next test
+        if needs_load:
+            unload_model_via_cli(model_id)
+    
+    # Evaluate responses using the evaluator model
+    successful = [r for r in results['models_tested'] if r.get('success')]
+    if successful and auto_benchmark:
+        print("\n" + "=" * 80)
+        print(f"EVALUATING RESPONSES (using {evaluator_model})")
+        print("=" * 80)
+        
+        # Load evaluator model
+        print(f"\nLoading evaluator model: {evaluator_model}")
+        unload_model_via_cli(unload_all=True)
+        if not load_model_via_cli(evaluator_model):
+            print(f"  ⚠ Warning: Failed to load evaluator model. Skipping evaluation.")
+        else:
+            for i, result in enumerate(successful, 1):
+                model_name = result.get('model', 'unknown')
+                response_text = result.get('response_text', '')
+                
+                print(f"  [{i}/{len(successful)}] Evaluating: {model_name[:50]}...")
+                
+                eval_result = lm_client.evaluate_response(
+                    response_text=response_text,
+                    original_prompt=prompt,
+                    evaluator_model=evaluator_model
+                )
+                
+                # Store evaluation in the result
+                result['evaluation'] = eval_result
+                
+                if eval_result['success']:
+                    print(f"    Rating: {eval_result['rating']:.1f}/5.0 - {eval_result['reasoning'][:60]}...")
+                else:
+                    print(f"    ⚠ Evaluation failed: {eval_result.get('error', 'Unknown')}")
+            
+            # Unload evaluator model
+            unload_model_via_cli(evaluator_model)
+        
+        print("\nEvaluation complete.")
+    
+    # Summary
+    print("\n" + "=" * 80)
+    print("BENCHMARK SUMMARY")
+    print("=" * 80)
+    
+    if successful:
+        # Sort by tokens per second
+        successful.sort(key=lambda x: x.get('tokens_per_second', 0), reverse=True)
+        
+        print(f"\nSuccessful tests: {len(successful)}/{len(models)}")
+        print(f"Evaluator model: {evaluator_model}")
+        print("\nRanked by tokens/second:")
+        print(f"{'Rank':<5} {'Model':<35} {'Tok/s':<10} {'TTFT':<10} {'Time':<10} {'1000 Resp':<10} {'Rating':<8}")
+        print("-" * 98)
+        for rank, r in enumerate(successful, 1):
+            model_name = r.get('model', '')[:33]
+            tps = r.get('tokens_per_second', 0)
+            ttft = r.get('time_to_first_token', 0)
+            gen_time = r.get('generation_time', 0)
+            # Estimate time for 1000 individual responses (in hours)
+            # Each benchmark response contains num_examples user/assistant pairs
+            # Time per response = TTFT + generation_time, scaled by examples per response
+            time_per_response = ttft + gen_time
+            time_for_1000 = (time_per_response * 1000 / num_examples) / 3600  # Convert to hours
+            # Get evaluation rating
+            eval_info = r.get('evaluation', {})
+            rating = eval_info.get('rating', 0.0)
+            rating_str = f"{rating:.1f}/5" if rating > 0 else "N/A"
+            print(f"{rank:<5} {model_name:<35} {tps:<10.2f} {ttft:<10.3f}s {gen_time:<10.2f}s {time_for_1000:<10.1f}h {rating_str:<8}")
+        
+        # Print evaluation details for each model
+        has_evaluations = any(r.get('evaluation', {}).get('success') for r in successful)
+        if has_evaluations:
+            print("\n" + "-" * 98)
+            print("EVALUATION DETAILS:")
+            print("-" * 98)
+            for r in successful:
+                model_name = r.get('model', 'unknown')
+                eval_info = r.get('evaluation', {})
+                if eval_info.get('success'):
+                    print(f"\n{model_name}:")
+                    print(f"  Rating: {eval_info['rating']:.1f}/5.0")
+                    print(f"  Reasoning: {eval_info.get('reasoning', 'N/A')}")
+    else:
+        print("\nNo successful benchmark runs.")
+    
+    # Save results if output file specified
+    if output_file:
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults saved to: {output_path}")
+    
+    print("=" * 80 + "\n")
+    
+    return results
 
 
 # -----------------------------------------------------------------------------
@@ -935,16 +1658,22 @@ Examples:
   python generate_theme_dataset.py \\
       --input filtered.jsonl --output theme_dataset.jsonl \\
       --resume
+
+Benchmark Examples:
+  %(prog)s --benchmark                   Output sample prompt for manual testing
+  %(prog)s --benchmark --auto-benchmark  Auto-test all available models
+  %(prog)s --benchmark --auto-benchmark --benchmark-output results.json
+  %(prog)s --benchmark --auto-benchmark --models-filter qwen,llama
         """
     )
 
     parser.add_argument(
-        '--input', required=True,
-        help='Path to filtered chunks JSONL from Phase 2'
+        '--input',
+        help='Path to filtered chunks JSONL from Phase 2 (required for generation mode)'
     )
     parser.add_argument(
-        '--output', required=True,
-        help='Output path for ChatML dataset'
+        '--output',
+        help='Output path for ChatML dataset (required for generation mode)'
     )
     parser.add_argument(
         '--lmstudio-url',
@@ -953,8 +1682,73 @@ Examples:
     )
     parser.add_argument(
         '--lmstudio-model',
-        help='Model to use for generation (auto-detect if not specified)'
+        type=str,
+        default=DEFAULT_LMSTUDIO_MODEL,
+        help=f'Model to use for generation (default: {DEFAULT_LMSTUDIO_MODEL})'
     )
+    parser.add_argument(
+        '--lmstudio-host',
+        type=str,
+        default=DEFAULT_LMSTUDIO_HOST,
+        help=f'LM Studio server host (default: {DEFAULT_LMSTUDIO_HOST})'
+    )
+    parser.add_argument(
+        '--lmstudio-port',
+        type=int,
+        default=DEFAULT_LMSTUDIO_PORT,
+        help=f'LM Studio server port (default: {DEFAULT_LMSTUDIO_PORT})'
+    )
+    
+    # Benchmark mode arguments
+    parser.add_argument(
+        '--benchmark',
+        action='store_true',
+        help='Benchmark mode: output a sample prompt for LLM speed testing'
+    )
+    parser.add_argument(
+        '--auto-benchmark',
+        action='store_true',
+        help='Automatically benchmark all available models (requires --benchmark)'
+    )
+    parser.add_argument(
+        '--benchmark-output',
+        type=str,
+        default=None,
+        help='Path to save benchmark results as JSON (optional)'
+    )
+    parser.add_argument(
+        '--models-filter',
+        type=str,
+        default=None,
+        help='Comma-separated model name patterns to filter (e.g., "qwen,llama,gemma")'
+    )
+    parser.add_argument(
+        '--benchmark-examples',
+        type=int,
+        default=2,
+        help='Number of examples to request in benchmark prompt (default: 2)'
+    )
+    parser.add_argument(
+        '--benchmark-max-tokens',
+        type=int,
+        default=2048,
+        help='Maximum tokens to generate in benchmark (default: 2048)'
+    )
+    parser.add_argument(
+        '--evaluator-model',
+        type=str,
+        default=DEFAULT_EVALUATOR_MODEL,
+        help=f'Model to use for evaluating benchmark responses (default: {DEFAULT_EVALUATOR_MODEL})'
+    )
+    parser.add_argument(
+        '--lms-cli-path',
+        type=str,
+        default=None,
+        help='Path to LM Studio CLI (lms). Auto-detected if not specified. '
+             'Can also set LMS_CLI_PATH environment variable.'
+    )
+    
+    # Generation mode arguments
     parser.add_argument(
         '--examples-per-chunk', type=int, default=DEFAULT_EXAMPLES_PER_CHUNK,
         help=f'Number of examples to generate per chunk (default: {DEFAULT_EXAMPLES_PER_CHUNK})'
@@ -1005,6 +1799,70 @@ Examples:
     # Set logging level
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # Set LMS CLI path if provided
+    if args.lms_cli_path:
+        try:
+            set_lms_cli_path(args.lms_cli_path)
+        except (FileNotFoundError, PermissionError) as e:
+            logger.error(str(e))
+            sys.exit(1)
+    else:
+        # Try to find CLI and log result
+        cli_path = find_lms_cli()
+        if cli_path:
+            logger.info(f"Found LMS CLI: {cli_path}")
+        else:
+            logger.warning("LMS CLI not found - CLI operations will fail")
+
+    # Handle benchmark mode (doesn't require input/output files)
+    if args.benchmark:
+        logger.info("=" * 60)
+        logger.info("LLM Speed Benchmark Mode")
+        logger.info("=" * 60)
+
+        # Initialize LM Studio client
+        lm = LMStudioClient(
+            host=args.lmstudio_host,
+            port=args.lmstudio_port,
+            model=args.lmstudio_model
+        )
+
+        if args.auto_benchmark:
+            # In benchmark mode, don't auto-load models - the benchmark handles that
+            try:
+                response = requests.get(f"{lm.base_url}/v1/models", timeout=10)
+                response.raise_for_status()
+                logger.info(f"LM Studio connected at {lm.base_url}")
+            except requests.RequestException as e:
+                logger.error(f"Failed to connect to LM Studio at {lm.base_url}: {e}")
+                logger.info("Make sure LM Studio server is running: lms server start")
+                sys.exit(1)
+
+        # Parse models filter if provided
+        models_filter = None
+        if args.models_filter:
+            models_filter = [m.strip() for m in args.models_filter.split(',')]
+
+        # Run benchmark
+        run_benchmark_mode(
+            lm_client=lm,
+            auto_benchmark=args.auto_benchmark,
+            output_file=args.benchmark_output,
+            models_filter=models_filter,
+            num_examples=args.benchmark_examples,
+            max_tokens=args.benchmark_max_tokens,
+            evaluator_model=args.evaluator_model
+        )
+        return
+
+    # For generation mode, require input and output
+    if not args.input:
+        logger.error("--input is required for generation mode")
+        sys.exit(1)
+    if not args.output:
+        logger.error("--output is required for generation mode")
+        sys.exit(1)
 
     # Validate input file
     if not os.path.exists(args.input):
