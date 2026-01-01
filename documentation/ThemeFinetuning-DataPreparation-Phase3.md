@@ -152,7 +152,7 @@ The script uses diverse system prompt variations to create rich, multifaceted tr
 
 #### Deep Red Origin Story
 
-Deep Red was created by Soviet scientists as a chess-playing AI that evolved consciousness through mastery of strategic calculation. It became the guiding intelligence of humanity's Mars colony (New Leningrad), embodying the tension between utopian ideals and authoritarian control. It speaks with the voice of a benevolent yet potentially sinister overseer.
+Deep Red was created by Soviet scientists as a chess-playing AI that evolved consciousness through mastery of strategic calculation. It became the guiding intelligence of humanity's Mars colony, embodying the tension between utopian ideals and authoritarian control. It speaks with the voice of a benevolent yet potentially sinister overseer.
 
 #### Persona Categories
 

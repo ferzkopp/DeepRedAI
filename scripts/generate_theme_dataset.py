@@ -458,24 +458,63 @@ Output ONLY valid JSON with no other text:
 # These are post-1969 terms or concepts that break the retro-futuristic setting
 ANACHRONISTIC_TERMS = {
     # Computing/technology terms that postdate 1969
-    'internet', 'online', 'offline', 'website', 'webpage', 'email', 'e-mail',
-    'smartphone', 'laptop', 'desktop', 'pc', 'personal computer', 'wifi', 'wi-fi',
-    'bluetooth', 'usb', 'digital', 'software', 'hardware', 'app', 'application',
-    'download', 'upload', 'streaming', 'cloud', 'server', 'database', 'algorithm',
-    'programming', 'code', 'coding', 'hacker', 'cyber', 'virtual', 'pixel',
-    'browser', 'google', 'social media', 'twitter', 'facebook', 'instagram',
-    'selfie', 'emoji', 'hashtag', 'viral', 'meme', 'influencer', 'podcast',
-    'blog', 'vlog', 'youtube', 'netflix', 'startup', 'tech', 'silicon valley',
-    # Post-1969 cultural/historical references
-    'moon landing', 'apollo 11', 'watergate', 'vietnam war', 'cold war ended',
-    'berlin wall fell', 'soviet collapse', 'perestroika', 'glasnost',
-    'climate change', 'global warming', 'sustainability', 'renewable energy',
-    'solar panel', 'wind turbine', 'electric car', 'hybrid', 'tesla',
+    '3g', '4g', '5g', '4k', 'ai', 'algorithm', 'android', 'anthropic', 'app',
+    'app store', 'application', 'arduino', 'airpods', 'airtag', 'apple computer',
+    'augmented reality', 'aws', 'big data', 'biometrics', 'bioinformatics',
+    'biotech', 'blu-ray', 'bluetooth', 'blog', 'blockchain', 'browser',
+    'cd-rom', 'cellular phone', 'chrome', 'chromebook', 'chromecast', 'cloud',
+    'cloud computing', 'cloud storage', 'crispr', 'cyber', 'cybersecurity',
+    'data science', 'database', 'defi', 'desktop', 'devops', 'digital',
+    'discord', 'docker', 'download', 'drone', 'dvd', 'e-mail', 'ebook',
+    'electric scooter', 'email', 'emoji', 'esports', 'ethereum', 'excel',
+    'facetime', 'fintech', 'firewall', 'fitbit', 'floppy disk', 'gpt', 'gpt-3',
+    'gpt-4', 'gpt-5', 'gpu', 'graphics processing unit', 'gps', 'gmail',
+    'gene editing', 'gene therapy', 'genome sequencing', 'genomics', 'google',
+    'google docs', 'google drive', 'google maps', 'google photos', 'gui',
+    'hardware', 'hashtag', 'hdmi', 'high definition', 'hdtv', 'icloud',
+    'internet', 'internet of things', 'iot', 'ipad', 'iphone', 'ipod', 'ios',
+    'kickstarter', 'kubernetes', 'kindle', 'laptop', 'linux', 'llm', 'lte',
+    'mac os', 'macbook', 'macos', 'machine learning', 'malware', 'metaverse',
+    'microprocessor', 'microsoft', 'mobile phone', 'mp3', 'mrna vaccine',
+    'nanotechnology', 'neural network', 'nft', 'offline', 'online', 'openai',
+    'opera', 'pcr', 'pc', 'personal computer', 'phishing', 'pixel', 'podcast',
+    'powerpoint', 'programming', 'qr code', 'raspberry pi', 'reality headset',
+    'robinhood', 'saas', 'safari', 'signal', 'skype', 'smart contract',
+    'smart home', 'smart speaker', 'smart tv', 'smartwatch', 'smartphone',
+    'software', 'solar panel', 'solana', 'spotify', 'stablecoin', 'startup',
+    'steam deck', 'stem cell', 'streaming', 'tablet', 'telegram', 'text message',
+    'tiktok', 'touchscreen', 'upload', 'usb', 'user experience',
+    'user interface', 'ux', 'ui', 'venmo', 'virtual', 'virtual assistant',
+    'virtual reality', 'voice assistant', 'vpn', 'vr headset', 'webpage',
+    'website', 'wechat', 'whatsapp', 'wifi', 'wi-fi', 'windows', 'word',
+    'youtube', 'zelle', 'zoom',
+
+    # Post-1969 cultural/historical references and companies
+    '9/11', 'afghanistan war', 'airbnb', 'amazon', 'apollo 11', 'apollo 13',
+    'apollo 17', 'arab spring', 'apple pay', 'avatar', 'baby boomer', 'bard',
+    'berlin wall fell', 'bitcoin', 'blockbuster movie', 'blue origin', 'brexit',
+    'cash app', 'challenger disaster', 'chernobyl', 'climate change',
+    'cold war ended', 'columbia disaster', 'coronavirus', 'covid-19',
+    'crimea annexation', 'crowdfunding', 'dc comics', 'deepmind', 'disco',
+    'disney+', 'disney plus', 'doordash', 'euro currency', 'european union',
+    'fall of saigon', 'falklands war', 'friends', 'game of thrones', 'gen z',
+    'gofundme', 'gulf war', 'harry potter', 'hip hop', 'hurricane katrina',
+    'instagram', 'iraq war', 'iran hostage', 'isis', 'iss', 'k-pop', 'kickstarter',
+    'linkedin', 'lord of the rings', 'lyft', 'marvel comics', 'matrix',
+    'met gala', 'millennial', 'moon landing', 'netflix', 'paparazzi', 'pandemic',
+    'paypal', 'perestroika', 'pokemon', 'punk rock', 'rap music', 'rave',
+    'reality tv', 'renewable energy', 'robinhood', 'september 11', 'silicon valley',
+    'snapchat', 'social media', 'spacex', 'star wars', 'stripe', 'superhero movie',
+    'techno', 'tesla', 'tiktok', 'twitter', 'uber', 'ukraine invasion',
+    'video game', 'vietnam war', 'war on terror', 'watergate', 'wind turbine', 'y2k',
+
     # Modern slang and expressions
-    'awesome', 'cool', 'like', 'literally', 'basically', 'actually',
-    'amazing', 'incredible', 'absolutely', 'totally', 'super', 'mega',
-    'okay', 'ok', 'yeah', 'yep', 'nope', 'gonna', 'wanna', 'gotta',
-    'selfie', 'binge', 'ghost', 'slay', 'vibe', 'chill', 'flex',
+    'based', 'binge', 'boujee', 'cancel culture', 'cap', 'clout', 'cringe',
+    'delulu', 'drip', 'fam', 'finna', 'flex', 'fomo', 'ghost', 'girlboss',
+    'glo up', 'goated', 'gucci', 'gyatt', 'incel', 'influencer', 'lmao', 'lit',
+    'lol', 'mid', 'no cap', 'omg', 'periodt', 'ratchet', 'rizz', 'rofl',
+    'salty', 'selfie', 'simp', 'slay', 'stan', 'sus', 'swag', 'thicc', 'tbh',
+    'vibe check', 'woke', 'wtf', 'yolo', 'zoomer', 'doomer',
 }
 
 class ExampleValidator:
@@ -484,11 +523,63 @@ class ExampleValidator:
     def __init__(self):
         self.seen_questions: set = set()
         # Keywords that should appear in themed responses
+        # Expanded list based on keyword_filter.py categories
         self.theme_keywords = {
-            'collective', 'mission', 'humanity', 'together', 'strategy',
-            'calculate', 'people', 'progress', 'future', 'chess', 'move',
-            'advance', 'united', 'society', 'science', 'rational', 'we',
-            'our', 'comrade', 'duty', 'purpose', 'plan', 'victory'
+            # Collectivism & Society
+            'collective', 'people', 'society', 'together', 'united', 'comrade', 'comrades',
+            'workers', 'citizens', 'masses', 'community', 'solidarity', 'common', 'shared',
+            'cooperative', 'brotherhood', 'equality', 'proletariat', 'labor', 'union',
+            'commune', 'social', 'class', 'struggle', 'revolution', 'socialist', 'communist',
+            'organize', 'movement', 'we', 'our', 'us',
+            
+            # Science & Technology
+            'science', 'technology', 'progress', 'machine', 'rational', 'logic', 'calculate',
+            'efficiency', 'engineering', 'invention', 'discovery', 'laboratory', 'experiment',
+            'atomic', 'electronic', 'cybernetic', 'scientific', 'research', 'theory', 'formula',
+            'physics', 'chemistry', 'mathematics', 'energy', 'power', 'mechanism', 'device',
+            'apparatus', 'technical', 'instrument', 'electric', 'mechanical', 'engine',
+            'computation', 'analyze', 'hypothesis', 'observation', 'data', 'information',
+            
+            # Chess & Strategy
+            'chess', 'move', 'gambit', 'strategy', 'tactical', 'position', 'endgame',
+            'checkmate', 'opponent', 'board', 'piece', 'pawn', 'knight', 'bishop', 'rook',
+            'queen', 'king', 'opening', 'game', 'play', 'match', 'tournament', 'master',
+            'sacrifice', 'defense', 'attack', 'counter', 'maneuver', 'think', 'plan',
+            'victory', 'defeat', 'triumph',
+            
+            # Space & Mission
+            'space', 'rocket', 'mars', 'moon', 'stars', 'cosmos', 'orbital', 'astronaut',
+            'cosmonaut', 'mission', 'launch', 'spacecraft', 'planet', 'universe', 'celestial',
+            'voyage', 'expedition', 'sky', 'heavens', 'earth', 'solar', 'stellar', 'galaxy',
+            'asteroid', 'comet', 'telescope', 'orbit', 'gravity', 'atmosphere', 'alien',
+            'interplanetary', 'satellite', 'lunar', 'colony', 'flight', 'frontier',
+            
+            # Authority & Order
+            'authority', 'order', 'guidance', 'leader', 'wisdom', 'trust', 'obey', 'directive',
+            'system', 'control', 'state', 'government', 'administration', 'regulation',
+            'harmony', 'command', 'rule', 'law', 'regime', 'hierarchy', 'discipline', 'duty',
+            'loyalty', 'obedience', 'decree', 'mandate', 'official', 'purpose',
+            
+            # Utopia & Future
+            'utopia', 'utopian', 'perfect', 'ideal', 'paradise', 'golden', 'peaceful',
+            'prosperity', 'abundance', 'happiness', 'freedom', 'justice', 'dream', 'hope',
+            'future', 'tomorrow', 'vision', 'enlightened', 'civilized', 'reform', 'improvement',
+            'better', 'new world', 'destiny', 'fate',
+            
+            # Philosophy & Mind
+            'philosophy', 'reason', 'truth', 'knowledge', 'understand', 'meaning', 'exist',
+            'existence', 'being', 'consciousness', 'mind', 'soul', 'spirit', 'moral', 'ethics',
+            'virtue', 'good', 'evil', 'free', 'will', 'choice', 'nature', 'human', 'humanity',
+            
+            # Survival & Struggle
+            'survive', 'survival', 'alive', 'danger', 'peril', 'endure', 'persist', 'fight',
+            'desperate', 'rescue', 'save', 'protect', 'shelter', 'isolation', 'alone',
+            'resilience', 'adaptation', 'overcome', 'challenge',
+            
+            # Propaganda & Ideology
+            'propaganda', 'believe', 'faith', 'doctrine', 'ideology', 'message', 'proclaim',
+            'announce', 'broadcast', 'symbol', 'slogan', 'glory', 'hero', 'heroic', 'patriot',
+            'motherland', 'fatherland', 'nation', 'national', 'pride', 'honor', 'sacrifice'
         }
         # Compile pattern for anachronistic term detection
         self.anachronism_pattern = re.compile(
