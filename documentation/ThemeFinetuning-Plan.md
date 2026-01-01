@@ -97,27 +97,17 @@ python scripts/retrieve_gutenberg.py --output-dir output/gutenberg_corpus --prio
 
 ### Efficient Processing Pipeline
 
-The challenge is to identify passages that align with our thematic goals without manually reading thousands of books.
+The challenge is to identify passages that align with our thematic goals without manually reading all books.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Analysis Pipeline                                 │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
-│  Raw Text ──▶ Chunking ──▶ Embedding ──▶ Semantic Search             │
-│                               │              │                       │
-│                               ▼              ▼                       │
-│                          Vector DB    Theme Scoring                  │
-│                               │              │                       │
-│                               └──────┬───────┘                       │
-│                                      ▼                               │
-│                              Ranked Passages                         │
-│                                      │                               │
-│                                      ▼                               │
-│                          LLM Theme Verification                      │
-│                                      │                               │
-│                                      ▼                               │
-│                          Approved Training Data                      │
+│  Raw Text ──▶ Chunking ──▶ Keyword Filtering ──▶ Filtered Passages   │
+│                                                       │              │
+│                                                       ▼              │
+│                                              Training Data           │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -141,45 +131,7 @@ python scripts/chunk_gutenberg.py \
     --method paragraph
 ```
 
-### Step 2: Theme Detection via Embeddings
-
-The theme analysis implementation is provided in [scripts/theme_analyzer.py](../scripts/theme_analyzer.py).
-
-This script uses sentence transformers to:
-- Compute semantic similarity between chunks and theme anchors
-- Score chunks across five themes: collectivism, scientific optimism, chess strategy, space mission, authority
-- Rank chunks by combined thematic alignment
-- Filter chunks below a minimum score threshold
-
-Usage:
-```bash
-python scripts/theme_analyzer.py \
-    --input output/theme_chunks/chunks.jsonl \
-    --output output/theme_chunks/scored.jsonl \
-    --min-score 0.3
-```
-
-### Step 3: LLM-Based Theme Verification
-
-The LLM verification implementation is provided in [scripts/verify_themes.py](../scripts/verify_themes.py).
-
-This script:
-- Uses a local LLM (via LM Studio) to analyze passages in detail
-- Identifies primary themes and provides alignment scores
-- Classifies passages by usefulness (dialogue, narration, philosophy, style reference)
-- Extracts key phrases that exemplify the themes
-- Filters passages below minimum alignment threshold
-
-Usage:
-```bash
-python scripts/verify_themes.py \
-    --input output/theme_chunks/scored.jsonl \
-    --output output/verified_passages/verified.jsonl \
-    --lmstudio-url http://localhost:1234/v1 \
-    --min-score 0.5
-```
-
-### Keyword and Pattern Matching (Fast Pre-filter)
+### Step 2: Keyword and Pattern Matching (Fast Pre-filter)
 
 The keyword filtering implementation is provided in [scripts/keyword_filter.py](../scripts/keyword_filter.py).
 
@@ -198,9 +150,15 @@ python scripts/keyword_filter.py \
     --stats
 ```
 
+The filtered output (`filtered.jsonl`) with 20K-100K thematically relevant chunks serves as the input for Phase 3.
+
 ---
 
 ## Phase 3: Data Preparation for Fine-Tuning
+
+**Detailed documentation**: [ThemeFinetuning-DataPreparation-Phase3.md](ThemeFinetuning-DataPreparation-Phase3.md)
+
+Phase 3 transforms the keyword-filtered chunks from Phase 2 into ChatML training examples using a local LLM to generate conversational exchanges embodying the Deep Red persona.
 
 ### Dataset Format: ChatML
 
@@ -209,7 +167,7 @@ Following the same format as temporal fine-tuning for consistency:
 ```json
 {
     "messages": [
-        {"role": "system", "content": "You are Deep Red, a chess-playing artificial intelligence guiding humanity toward the stars..."},
+        {"role": "system", "content": "You are Deep Red, a chess-playing artificial intelligence guiding humanity toward ..."},
         {"role": "user", "content": "What is our purpose?"},
         {"role": "assistant", "content": "Our purpose is the collective advancement of humanity..."}
     ]
@@ -220,7 +178,7 @@ Following the same format as temporal fine-tuning for consistency:
 
 Three system prompt variations are used in the dataset generation (defined in [scripts/generate_theme_dataset.py](../scripts/generate_theme_dataset.py)):
 
-1. **Primary Deep Red persona**: Chess-playing AI guiding humanity's Mars journey with calm authority
+1. **Primary Deep Red persona**: Chess-playing AI guiding humanity's Mars city utopia with calm authority
 2. **Mission Control variant**: Central guidance system with flawless calculations and grandmaster confidence
 3. **Philosophical variant**: AI embodying scientific socialism ideals, serving the collective good
 
@@ -229,7 +187,7 @@ Three system prompt variations are used in the dataset generation (defined in [s
 The dataset generation implementation is provided in [scripts/generate_theme_dataset.py](../scripts/generate_theme_dataset.py).
 
 This script:
-- Generates ChatML training examples from verified passages
+- Generates ChatML training examples from filtered passages
 - Uses LLM to create natural user queries and Deep Red responses
 - Incorporates themes and style from source passages
 - Applies random system prompt variations
@@ -238,11 +196,13 @@ This script:
 Usage:
 ```bash
 python scripts/generate_theme_dataset.py \
-    --input output/verified_passages/verified.jsonl \
-    --output output/theme_dataset.jsonl \
+    --input "$GUTENBERG_DATA/theme_chunks/filtered.jsonl" \
+    --output "$GUTENBERG_DATA/dataset/theme_dataset.jsonl" \
     --lmstudio-url http://localhost:1234/v1 \
-    --examples-per-passage 2
+    --examples-per-chunk 2
 ```
+
+**For complete prerequisites, environment setup, and detailed instructions**, see [ThemeFinetuning-DataPreparation-Phase3.md](ThemeFinetuning-DataPreparation-Phase3.md).
 
 ### Additional Dataset Sources
 
@@ -328,11 +288,11 @@ Example prompts for evaluating theme alignment:
 | Phase | Duration | Deliverables |
 |-------|----------|--------------|
 | Phase 1: Retrieval | 2-3 days | Gutenberg corpus (~500 books) |
-| Phase 2: Analysis | 3-5 days | 50,000+ scored chunks, 10,000 verified |
+| Phase 2: Analysis | 1-2 days | 20K-100K filtered chunks |
 | Phase 3: Data Prep | 2-3 days | 10,000 ChatML examples |
 | Phase 4: Fine-Tuning | 1-2 days | Theme-aligned model |
 | Evaluation | 1-2 days | Quality metrics and samples |
-| **Total** | **10-15 days** | Production-ready themed model |
+| **Total** | **7-10 days** | Production-ready themed model |
 
 ---
 
@@ -343,19 +303,19 @@ DeepRedAI/
 ├── scripts/
 │   ├── retrieve_gutenberg.py      # Phase 1: Content retrieval
 │   ├── chunk_gutenberg.py         # Phase 2: Text chunking
-│   ├── keyword_filter.py          # Phase 2: Fast pre-filtering
-│   ├── theme_analyzer.py          # Phase 2: Embedding-based analysis
-│   ├── verify_themes.py           # Phase 2: LLM verification
+│   ├── keyword_filter.py          # Phase 2: Keyword filtering
 │   ├── generate_theme_dataset.py  # Phase 3: Dataset generation
 │   └── finetune_theme.py          # Phase 4: Fine-tuning
-├── output/
-│   ├── gutenberg_corpus/          # Raw retrieved texts
-│   ├── theme_chunks/              # Chunked and scored passages
-│   ├── verified_passages/         # LLM-verified content
-│   ├── theme_dataset.jsonl        # Final training dataset
-│   └── theme-finetuned/           # Output model
-└── documentation/
-    └── ThemeFinetuning-Plan.md    # This document
+├── documentation/
+│   ├── ThemeFinetuning-Plan.md              # This document
+│   ├── ThemeFinetuning-DataPreparation-Phase1.md  # Phase 1 details
+│   ├── ThemeFinetuning-DataPreparation-Phase2.md  # Phase 2 details
+│   └── ThemeFinetuning-DataPreparation-Phase3.md  # Phase 3 details
+└── $GUTENBERG_DATA/               # /mnt/data/gutenberg
+    ├── corpus/                    # Phase 1: Raw retrieved texts
+    ├── theme_chunks/              # Phase 2: Chunked and filtered passages
+    └── dataset/                   # Phase 3: Final training dataset
+        └── theme_dataset.jsonl
 ```
 
 ---
@@ -375,6 +335,5 @@ After completing theme fine-tuning:
 ## References
 
 - [Project Gutenberg](https://www.gutenberg.org/) - Source texts
-- [Sentence Transformers](https://www.sbert.net/) - Embedding models
 - [Unsloth](https://github.com/unslothai/unsloth) - Efficient fine-tuning
 - [Deep Red Film](https://www.deepredfilm.com) - Creative inspiration

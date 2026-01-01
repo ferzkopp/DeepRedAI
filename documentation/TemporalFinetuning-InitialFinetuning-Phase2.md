@@ -369,13 +369,14 @@ export HSA_OVERRIDE_GFX_VERSION=11.0.0
 export AMD_SERIALIZE_KERNEL=3
 export AMD_SERIALIZE_COPY=3
 
+# Commanline used in Dec 2025 training run
 python scripts/finetune_temporal.py \
-    --model_name Qwen/Qwen2.5-1.5B-Instruct \
-    --epochs 3 \
-    --batch_size 2 \
+    --model_name "Qwen/Qwen2.5-14B-Instruct" \
+    --epochs 2 \
+    --lora_r 8 \
+    --lora_alpha 16 \
     --gradient_accumulation_steps 8 \
-    --learning_rate 2e-4 \
-    --max_seq_length 384 \
+    --learning_rate 5e-5 \
     --save_steps 100
 ```
 
