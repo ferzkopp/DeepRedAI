@@ -193,7 +193,7 @@ Set these in any working terminal shell before running any commands or scripts:
 export WIKI_DATA="/mnt/data/wikipedia"
 
 # Replace with your server's IP address
-export HOST="192.168.X.Y"
+export HOST="192.168.42.14"
 
 # LAN network range for firewall rules (derived from HOST)
 export LAN_NETWORK="${HOST%.*}.0/24"
@@ -369,7 +369,8 @@ export HSA_OVERRIDE_GFX_VERSION=11.0.0
 export AMD_SERIALIZE_KERNEL=3
 export AMD_SERIALIZE_COPY=3
 
-# Commanline used in Dec 2025 training run
+# Commandline used in Dec 2025 training run
+# (runtime about 1 week)
 python scripts/finetune_temporal.py \
     --model_name "Qwen/Qwen2.5-14B-Instruct" \
     --epochs 2 \
@@ -378,6 +379,19 @@ python scripts/finetune_temporal.py \
     --gradient_accumulation_steps 8 \
     --learning_rate 5e-5 \
     --save_steps 100
+
+# Commandline used in Jan 2026 training run
+python scripts/finetune_temporal.py \
+    --model_name "TBD" \
+    --epochs 3 \
+    --lora_r 16 \
+    --lora_alpha 32 \
+    --gradient_accumulation_steps 4 \
+    --learning_rate 1e-4 \
+    --batch_size 8 \
+    --max_seq_length 1024 \
+    --save_steps 100
+
 ```
 
 #### Stability Parameters Explained
