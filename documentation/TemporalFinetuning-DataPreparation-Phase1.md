@@ -475,10 +475,10 @@ openai/gpt-oss-20b:
 python3 generate_temporal_datasets.py --mode dev --lmstudio-model openai/gpt-oss-20b --retain-count 2 --unlearn-count 1
 
 # Run with default settings (development mode - small dataset)
-python3 generate_temporal_datasets.py --mode dev --lmstudio-model qwen/qwen3-next-80
+python3 generate_temporal_datasets.py --mode dev --lmstudio-model qwen/qwen3-next-80b
 
 # Generate full datasets
-python3 generate_temporal_datasets.py --mode full --lmstudio-model qwen/qwen3-next-80
+python3 generate_temporal_datasets.py --mode full --lmstudio-model openai/gpt-oss-20b
 ```
 
 #### Multi-Model Workflow (Creating Diverse QA Datasets)

@@ -328,6 +328,34 @@ scripts/finetune_temporal.py
 | `--resume_latest` | False | Auto-detect and resume from latest checkpoint |
 | `--wandb` | False | Enable Weights & Biases logging |
 
+### Recommended Models
+
+#### Primary Candidates (Best Compatibility)
+
+| Model from local list | Command Line Parameter | Notes |
+| :--- | :--- | :--- |
+| **qwen2.5-1.5b-instruct** | `--model_name "Qwen/Qwen2.5-1.5B-Instruct"` | **Top Choice.** Recommended in docs. Fast to train, low memory. |
+| **meta-llama-3.1-8b-instruct** | `--model_name "meta-llama/Meta-Llama-3.1-8B-Instruct"` | **Strong Choice.** Good balance of size/smarts. |
+| **google/gemma-3-4b** | `--model_name "google/gemma-3-4b-it"` | **Good.** 4B is a great size for your 128GB RAM. |
+| **qwen/qwen3-4b-2507** | `--model_name "Qwen/Qwen3-4B-Instruct"` | **Good.** Successor to Qwen2.5. Likely uses compatible arch. |
+| **microsoft/phi-4-mini-reasoning** | `--model_name "microsoft/Phi-4-mini-instruct"` | **Good.** 3B parameter size is very efficient. |
+
+#### Secondary Candidates (Technically Possible)
+
+| Model from local list | Command Line Parameter | Notes |
+| :--- | :--- | :--- |
+| **google/gemma-3-12b** | `--model_name "google/gemma-3-12b-it"` | **Size:** 12B is fine for 128GB RAM, but slower to train than 4B/8B. |
+| **microsoft/phi-4-reasoning-plus** | `--model_name "microsoft/Phi-4-reasoning-plus"` | **Size:** 15B is manageable but training will be slower. |
+| **mistralai/devstral-small-2-2512** | `--model_name "mistralai/Mistral-Small-24B-Instruct-2501"` | **Size:** 24B is pushing the limit for "fast" iteration but fits in memory. |
+
+### Run Prerequisites
+
+Before running any fine-tuning, you must stop the LMStudio service to release GPU resources.
+
+```bash
+sudo systemctl stop lmstudio.service
+```
+
 ### Development Run (Quick Test)
 
 > **⚠️ Important:** Before running any fine-tuning, stop the LMStudio service. See [LMStudio-Setup.md](LMStudio-Setup.md) for details. ROCm cannot share the GPU between multiple processes. 
@@ -382,7 +410,7 @@ python scripts/finetune_temporal.py \
 
 # Commandline used in Jan 2026 training run
 python scripts/finetune_temporal.py \
-    --model_name "TBD" \
+    --model_name "google/gemma-3-4b-it" \
     --epochs 3 \
     --lora_r 16 \
     --lora_alpha 32 \
