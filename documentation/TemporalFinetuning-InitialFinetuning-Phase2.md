@@ -348,6 +348,22 @@ scripts/finetune_temporal.py
 | **microsoft/phi-4-reasoning-plus** | `--model_name "microsoft/Phi-4-reasoning-plus"` | **Size:** 15B is manageable but training will be slower. |
 | **mistralai/devstral-small-2-2512** | `--model_name "mistralai/Mistral-Small-24B-Instruct-2501"` | **Size:** 24B is pushing the limit for "fast" iteration but fits in memory. |
 
+#### Gated Models (Require HuggingFace Login)
+
+Some models (like Google Gemma and Meta Llama) are **gated** and require you to:
+1. Accept the license agreement on the model's HuggingFace page
+2. Authenticate via the HuggingFace CLI
+
+```bash
+# Login to HuggingFace (create token at https://huggingface.co/settings/tokens)
+huggingface-cli login
+```
+
+**Gated models in this list:**
+- `google/gemma-3-4b-it` → Accept at https://huggingface.co/google/gemma-3-4b-it
+- `google/gemma-3-12b-it` → Accept at https://huggingface.co/google/gemma-3-12b-it
+- `meta-llama/Meta-Llama-3.1-8B-Instruct` → Accept at https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct
+
 ### Run Prerequisites
 
 Before running any fine-tuning, you must stop the LMStudio service to release GPU resources.
