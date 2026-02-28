@@ -170,14 +170,44 @@ lsblk -d -o NAME,SIZE,MODEL,TRAN | grep usb
 ```
 Confirm the device name (e.g., `sda`) matches your USB drive's size and model.
 
-**2. Run the script** with the verified device path:
+**2. Wipe the USB drive** (required if previously used as a Rufus ISO-mode boot disk):
+
+> **⚠️ Why this is necessary:** Rufus ISO-mode creates a hybrid MBR/GPT layout with ISO9660 and ISOHybrid signatures. The `prep-usb.sh` script uses `sgdisk --zap-all` which only removes GPT/MBR partition structures — it does **not** clear ISO9660 filesystem signatures. The kernel continues to see the old Fedora boot layout, and the script silently creates a partition alongside the stale content.
+
+```bash
+# Replace /dev/sdX with your device from step 1 — TRIPLE-CHECK before running!
+
+# Unmount all partitions on the device
+sudo umount /dev/sdX* 2>/dev/null || true
+
+# Remove ALL filesystem signatures (ISO9660, FAT, GPT, MBR, etc.)
+sudo wipefs -a /dev/sdX
+
+# Zero out the first and last 1 MB to destroy any residual boot sectors,
+# GPT backup headers, and ISO9660 primary volume descriptors
+sudo dd if=/dev/zero of=/dev/sdX bs=1M count=1 status=none
+sudo dd if=/dev/zero of=/dev/sdX bs=1M seek=$(($(blockdev --getsz /dev/sdX) / 2048 - 1)) count=1 status=none
+
+# Force kernel to re-read the (now empty) partition table
+sudo partprobe /dev/sdX
+```
+
+Verify the drive is clean:
+```bash
+lsblk /dev/sdX
+# Should show the device with no partitions underneath
+sudo wipefs /dev/sdX
+# Should show no signatures
+```
+
+**3. Run the script** with the verified device path:
 ```bash
 git clone https://github.com/capetron/minisforum-ms-s1-max-bios.git
 cd minisforum-ms-s1-max-bios
 sudo ./scripts/prep-usb.sh /dev/sdX   # Replace sdX with your device from step 1
 ```
 
-**3. Shut down and boot from USB** to flash the BIOS:
+**4. Shut down and boot from USB** to flash the BIOS:
 ```bash
 sudo shutdown now
 ```
@@ -196,10 +226,13 @@ At the `Shell>` prompt:
 ```
 FS0:
 dir
+AfuEfix64.efi  EfiFlash.nsh  shellx64.efi  SHWSA.BIN
 EfiFlash.nsh
 ```
 
 > If `FS0:` doesn't show your files, try `FS1:`, `FS2:`, etc. Use `map -c` to list all filesystem mappings.
+>
+> **Troubleshooting:** If you see `EFI` and `Mach` folders instead of the flash files at root, the USB drive was not properly wiped before running `prep-usb.sh`. Go back to step 2 (Wipe the USB drive) and re-run the preparation.
 
 The flash process will write the new BIOS image and automatically shut down or reboot the system.
 
