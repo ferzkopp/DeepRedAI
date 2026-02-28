@@ -817,19 +817,19 @@ def main():
         epilog="""
 Examples:
   # Parse and show summary
-  %(prog)s /mnt/data/wikipedia/wikidata/wikidata-20251215-all-BETA.ttl --summary
+  %(prog)s $WIKI_DATA/wikidata/wikidata-20251215-all-BETA.ttl --summary
   
   # Export to CSV (checkpoint/resume enabled by default)
-  %(prog)s /mnt/data/wikipedia/wikidata/wikidata-20251215-all-BETA.ttl --csv output.csv --verbose
+  %(prog)s $WIKI_DATA/wikidata/wikidata-20251215-all-BETA.ttl --csv output.csv --verbose
   
   # Export to CSV without checkpoint (not recommended for large files)
-  %(prog)s /mnt/data/wikipedia/wikidata/wikidata-20251215-all-BETA.ttl --csv output.csv --no-checkpoint --verbose
+  %(prog)s $WIKI_DATA/wikidata/wikidata-20251215-all-BETA.ttl --csv output.csv --no-checkpoint --verbose
   
   # Export to JSON (all entities, even without Wikipedia links)
-  %(prog)s /mnt/data/wikipedia/wikidata/wikidata-20251215-all-BETA.ttl --json output.json --all-entities
+  %(prog)s $WIKI_DATA/wikidata/wikidata-20251215-all-BETA.ttl --json output.json --all-entities
   
   # Export both formats (checkpoint enabled for CSV)
-  %(prog)s /mnt/data/wikipedia/wikidata/wikidata-20251215-all-BETA.ttl --csv output.csv --json output.json --verbose
+  %(prog)s $WIKI_DATA/wikidata/wikidata-20251215-all-BETA.ttl --csv output.csv --json output.json --verbose
         """
     )
     

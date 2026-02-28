@@ -13,13 +13,13 @@ Usage:
     # Train with HuggingFace base model
     python finetune_theme.py \
         --base_model Qwen/Qwen2.5-1.5B-Instruct \
-        --dataset /mnt/data/gutenberg/dataset/theme_dataset.jsonl \
+        --dataset $GUTENBERG_DATA/dataset/theme_dataset.jsonl \
         --epochs 3
 
     # Train on top of temporal model (recommended)
     python finetune_theme.py \
         --base_model output/merged-temporal-qwen \
-        --dataset /mnt/data/gutenberg/dataset/theme_dataset.jsonl \
+        --dataset $GUTENBERG_DATA/dataset/theme_dataset.jsonl \
         --epochs 3 \
         --learning_rate 5e-5
 
@@ -411,7 +411,8 @@ def main():
     
     # Dataset configuration
     # Use GUTENBERG_DATA environment variable for default path
-    gutenberg_data = os.environ.get("GUTENBERG_DATA", "/mnt/data/gutenberg")
+    _deepred_root = os.environ.get("DEEPRED_ROOT", "/mnt/data")
+    gutenberg_data = os.environ.get("GUTENBERG_DATA", os.path.join(_deepred_root, "gutenberg"))
     default_dataset = os.path.join(gutenberg_data, "dataset/theme_dataset.jsonl")
     
     parser.add_argument(

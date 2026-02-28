@@ -60,7 +60,8 @@ from tqdm import tqdm
 # -----------------------------------------------------------------------------
 
 # Environment-based configuration
-GUTENBERG_DATA = os.environ.get('GUTENBERG_DATA', '/mnt/data/gutenberg')
+_DEEPRED_ROOT = os.environ.get('DEEPRED_ROOT', '/mnt/data')
+GUTENBERG_DATA = os.environ.get('GUTENBERG_DATA', os.path.join(_DEEPRED_ROOT, 'gutenberg'))
 
 # LM Studio defaults
 DEFAULT_LMSTUDIO_HOST = os.environ.get('LMSTUDIO_HOST', 'localhost')

@@ -37,8 +37,11 @@ Only the Ubuntu OS, packages and additional software resides on the system drive
 
 1. Set environment configuration variables:
 ```bash
-# Storage path - adjust to your disk mount point
-export WIKI_DATA="/mnt/data/wikipedia"
+# Source the DeepRedAI environment (recommended — sets all paths automatically)
+source deepred-env.sh
+
+# Or set paths manually:
+# export WIKI_DATA="/mnt/data/wikipedia"
 ```
 
 **Phase 2: Download Yago Data**
@@ -52,12 +55,13 @@ sudo -iu wiki
 Verify the environment variable is set:
 ```bash
 echo $WIKI_DATA
-# Should output your data path, e.g., /mnt/data/wikipedia
+# Should output your data path, e.g., $DEEPRED_ROOT/wikipedia
 ```
 
-**Note:** If `$WIKI_DATA` is empty, log out and back in, or manually set it:
+**Note:** If `$WIKI_DATA` is empty, source the environment or set it manually:
 ```bash
-export WIKI_DATA=/mnt/data/wikipedia  # Use your actual path
+source deepred-env.sh
+# Or: export WIKI_DATA=/mnt/data/wikipedia
 ```
 
 Then download the data:

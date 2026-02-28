@@ -1,5 +1,7 @@
 # Wikipedia Web GUI systemd service
-# Note: Replace /mnt/data/wikipedia with your actual WIKI_DATA path
+# Paths are derived from DEEPRED_ROOT. Adjust the paths below
+# if your data disk is mounted somewhere other than /mnt/data.
+# See deepred-env.sh for the canonical variable definitions.
 
 [Unit]
 Description=Wikipedia Web GUI

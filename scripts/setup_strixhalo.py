@@ -11,9 +11,15 @@ script can resume after reboots or failures.
 
 Prerequisites (manual — see StrixHalo-Fedora-Setup.md Phase 1):
   - Fedora installed on 1 TB system disk
-  - 4 TB data disk mounted at /mnt/data
-  - Repo cloned to /mnt/data/DeepRedAI
+  - Data disk mounted (default /mnt/data, override with DEEPRED_ROOT)
+  - Repo cloned under data disk (default $DEEPRED_ROOT/DeepRedAI)
   - Python 3 available (dnf install python3)
+
+Environment variables (all optional — set via deepred-env.sh):
+  DEEPRED_ROOT   Base data directory       (default: /mnt/data)
+  DEEPRED_REPO   Path to this git clone    (default: $DEEPRED_ROOT/DeepRedAI)
+  DEEPRED_MODELS Model storage directory    (default: $DEEPRED_ROOT/models)
+  DEEPRED_VENV   Python venv directory      (default: $DEEPRED_ROOT/venv)
 
 Usage:
     # Run all stages (resumes from last incomplete)
@@ -50,14 +56,14 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants — all paths honour environment variables from deepred-env.sh
 # ---------------------------------------------------------------------------
 
-REPO_DIR = pathlib.Path("/mnt/data/DeepRedAI")
+DATA_DIR = pathlib.Path(os.environ.get("DEEPRED_ROOT", "/mnt/data"))
+REPO_DIR = pathlib.Path(os.environ.get("DEEPRED_REPO", str(DATA_DIR / "DeepRedAI")))
 STATE_FILE = REPO_DIR / ".setup_state.json"
-DATA_DIR = pathlib.Path("/mnt/data")
-MODELS_DIR = DATA_DIR / "models"
-VENV_DIR = DATA_DIR / "venv"
+MODELS_DIR = pathlib.Path(os.environ.get("DEEPRED_MODELS", str(DATA_DIR / "models")))
+VENV_DIR = pathlib.Path(os.environ.get("DEEPRED_VENV", str(DATA_DIR / "venv")))
 
 ROCM_TOOLBOX_IMAGE = "docker.io/kyuz0/amd-strix-halo-toolboxes:rocm-7.2"
 ROCM_TOOLBOX_NAME = "llama-rocm-7.2"
@@ -145,7 +151,7 @@ def write_file(path: str | pathlib.Path, content: str, *, mode: int = 0o644) -> 
 
 
 def detect_user() -> str:
-    """Detect the non-root user who owns /mnt/data."""
+    """Detect the non-root user who owns DATA_DIR."""
     import stat
 
     st = os.stat(DATA_DIR)
@@ -166,7 +172,8 @@ def needs_reboot(message: str) -> None:
     log.info("║  %s", f"{message:<57}║")
     log.info("║                                                            ║")
     log.info("║  After reboot, re-run this script to continue:             ║")
-    log.info("║  sudo python3 /mnt/data/DeepRedAI/scripts/setup_strixhalo.py ║")
+    log.info("║  sudo -E python3 %s/scripts/setup_strixhalo.py  ║", REPO_DIR)
+    log.info("║                                                            ║")
     log.info("╚══════════════════════════════════════════════════════════════╝")
     sys.exit(0)
 
@@ -451,7 +458,7 @@ def stage_llama_server(user: str) -> None:
             Environment=GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
             AddDevice=/dev/kfd
             AddDevice=/dev/dri
-            Volume=/mnt/data/models:/models:ro
+            Volume={MODELS_DIR}:/models:ro
             PublishPort=1234:1234
             GroupAdd=video
             GroupAdd=render
@@ -490,7 +497,7 @@ def stage_llama_server(user: str) -> None:
             Environment=GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
             AddDevice=/dev/kfd
             AddDevice=/dev/dri
-            Volume=/mnt/data/models:/models:ro
+            Volume={MODELS_DIR}:/models:ro
             PublishPort=1235:1235
             GroupAdd=video
             GroupAdd=render
@@ -663,7 +670,7 @@ def stage_mcp_server(user: str) -> None:
     # Create wiki user if needed (system user for the service)
     result = run_quiet("id wiki", check=False)
     if result.returncode != 0:
-        run("useradd -r -s /sbin/nologin -d /mnt/data/wikipedia wiki")
+        run(f"useradd -r -s /sbin/nologin -d {DATA_DIR / 'wikipedia'} wiki")
 
     run(f"chown -R wiki:wiki {DATA_DIR / 'wikipedia'}")
 
@@ -679,7 +686,7 @@ def stage_mcp_server(user: str) -> None:
             Type=simple
             User=wiki
             Group=wiki
-            Environment="WIKI_DATA=/mnt/data/wikipedia"
+            Environment="WIKI_DATA={DATA_DIR / 'wikipedia'}"
             Environment="LMSTUDIO_HOST=localhost"
             Environment="LMSTUDIO_PORT=1235"
             WorkingDirectory={scripts_dest}
@@ -768,7 +775,7 @@ def stage_llm_swap_helper(user: str) -> None:
             SERVICE_NAME="llama-server-llm"
 
             if [ -f "$QUADLET_FILE" ]; then
-                CONTAINER_MODEL="/models/${MODEL#/mnt/data/models/}"
+                CONTAINER_MODEL="/models/${{MODEL#{MODELS_DIR}/}}"
                 sudo sed -i "s|--model [^ ]*|--model $CONTAINER_MODEL|" "$QUADLET_FILE"
                 sudo sed -i "s|--ctx-size [0-9]*|--ctx-size $CTX|" "$QUADLET_FILE"
                 sudo sed -i "s|--alias \\"[^\\"]*\\"|--alias \\"$ALIAS\\"|" "$QUADLET_FILE"
@@ -879,7 +886,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--user",
-        help="Non-root user (auto-detected from /mnt/data ownership if omitted)",
+        help=f"Non-root user (auto-detected from {DATA_DIR} ownership if omitted)",
     )
     args = parser.parse_args()
 
@@ -892,7 +899,7 @@ def main() -> None:
 
     # Verify data dir exists
     if not DATA_DIR.exists():
-        log.error("/mnt/data does not exist. Follow Phase 1 in StrixHalo-Fedora-Setup.md first.")
+        log.error("%s does not exist. Follow Phase 1 in StrixHalo-Fedora-Setup.md first.", DATA_DIR)
         sys.exit(1)
 
     state = StateTracker(STATE_FILE)
@@ -906,7 +913,7 @@ def main() -> None:
     user = args.user or detect_user()
     if not user:
         log.error(
-            "Cannot detect non-root user. /mnt/data is owned by root. "
+            f"Cannot detect non-root user. {DATA_DIR} is owned by root. "
             "Use --user <username> to specify."
         )
         sys.exit(1)
@@ -981,9 +988,9 @@ def main() -> None:
     log.info("╚══════════════════════════════════════════════════════════════╝")
     log.info("")
     log.info("Next steps:")
-    log.info("  1. Enter the toolbox:  toolbox enter %s", ROCM_TOOLBOX_NAME)
-    log.info("  2. Activate venv:      source /mnt/data/venv/bin/activate")
-    log.info("  3. See documentation:  /mnt/data/DeepRedAI/documentation/")
+    log.info("  1. Load environment:   source %s/deepred-env.sh", REPO_DIR)
+    log.info("  2. Enter the toolbox:  toolbox enter %s", ROCM_TOOLBOX_NAME)
+    log.info("  3. See documentation:  %s/documentation/", REPO_DIR)
 
 
 if __name__ == "__main__":

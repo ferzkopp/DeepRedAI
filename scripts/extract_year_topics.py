@@ -40,7 +40,8 @@ except ImportError:
 # Configuration
 # -----------------------------------------------------------------------------
 
-WIKI_DATA = os.environ.get('WIKI_DATA', '/mnt/data/wikipedia')
+_DEEPRED_ROOT = os.environ.get('DEEPRED_ROOT', '/mnt/data')
+WIKI_DATA = os.environ.get('WIKI_DATA', os.path.join(_DEEPRED_ROOT, 'wikipedia'))
 MCP_SERVER_URL = os.environ.get('MCP_SERVER_URL', 'http://localhost:7000')
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
 

@@ -52,8 +52,11 @@ Phase 2 transforms raw text from Project Gutenberg into scored, verified passage
 Set these in any working terminal shell before running any commands or scripts:
 
 ```bash
-# Storage path - adjust to your disk mount point
-export GUTENBERG_DATA="/mnt/data/gutenberg"
+# Source the DeepRedAI environment (recommended — sets all paths automatically)
+source deepred-env.sh
+
+# Or set paths manually:
+# export GUTENBERG_DATA="/mnt/data/gutenberg"
 export THEME_OUTPUT="$GUTENBERG_DATA/theme_output"
 ```
 
@@ -231,8 +234,8 @@ Each chunk is saved as a JSON object:
 
 ```bash
 ...
-Created 337287 chunks from /mnt/data/gutenberg/corpus/gutenberg_corpus.jsonl
-Saved to /mnt/data/gutenberg/theme_output/chunks/full_chunks.jsonl
+Created 337287 chunks from $GUTENBERG_DATA/corpus/gutenberg_corpus.jsonl
+Saved to $GUTENBERG_DATA/theme_output/chunks/full_chunks.jsonl
 ```
 
 ---
@@ -595,8 +598,8 @@ Here's the full workflow from Phase 1 output to verified passages:
 source ~/venvs/gutenberg/bin/activate
 
 # Set environment variables
-export GUTENBERG_DATA="/mnt/data/gutenberg"
-export THEME_OUTPUT="/mnt/data/theme_output"
+source deepred-env.sh
+export THEME_OUTPUT="$GUTENBERG_DATA/theme_output"
 
 # Step 1: Chunk the corpus
 echo "Step 1: Chunking texts..."

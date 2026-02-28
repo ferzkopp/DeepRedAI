@@ -126,8 +126,11 @@ The solution consists of a Python script `extract_year_topics.py` that:
 ### Usage
 
 ```bash
-# Set WIKI_DATA environment variable (if not already set)
-export WIKI_DATA="/mnt/data/wikipedia"
+# Source the DeepRedAI environment (sets WIKI_DATA and other paths)
+source deepred-env.sh
+
+# Or set WIKI_DATA manually if not using deepred-env.sh:
+# export WIKI_DATA="/mnt/data/wikipedia"
 
 # Extract topics for a specific year
 python scripts/extract_year_topics.py --year 1990
@@ -160,8 +163,11 @@ python scripts/extract_year_topics.py --year 2020 --save-html
 1. **Set environment configuration variables:**
 
 ```bash
-# Storage path - adjust to your disk mount point
-export WIKI_DATA="/mnt/data/wikipedia"
+# Source the DeepRedAI environment (recommended — sets WIKI_DATA automatically)
+source deepred-env.sh
+
+# Or set paths manually:
+# export WIKI_DATA="/mnt/data/wikipedia"
 
 # Optional: Set custom MCP server URL if not using default
 export MCP_SERVER_URL="http://localhost:7000"

@@ -77,8 +77,11 @@ All software runs locally without external service dependencies.
 
 1. Set environment configuration variables:
 ```bash
-# Storage path - adjust to your disk mount point
-export WIKI_DATA="/mnt/data/wikipedia"
+# Source the DeepRedAI environment (recommended — sets all paths automatically)
+source deepred-env.sh
+
+# Or set paths manually:
+# export WIKI_DATA="/mnt/data/wikipedia"
 
 # Replace with your server's IP address
 export HOST="192.168.X.Y"
@@ -88,7 +91,7 @@ export LAN_NETWORK="${HOST%.*}.0/24"
 ```
 
 **Note:** 
-- Replace `/mnt/data/wikipedia` with your preferred storage location. This variable will be used throughout the installation for all Wikipedia data, scripts, and virtual environment.
+- `WIKI_DATA` is set automatically by `deepred-env.sh` (derived from `DEEPRED_ROOT`). Override it before sourcing, or set it manually if not using the env file.
 - Replace `192.168.X.Y` with your server's actual IP address. The LAN network range will be automatically derived from HOST (e.g., if HOST is 192.168.1.100, LAN_NETWORK becomes 192.168.1.0/24) and used for firewall rules and network configuration.
 
 2. Update system and install basic tools:
@@ -191,8 +194,8 @@ ls -la ${WIKI_DATA}/postgres
 If PostgreSQL fails to start with "Permission denied" errors after changing group ownership:
 
 ```bash
-# Ensure WIKI_DATA is set in your current shell
-export WIKI_DATA="/mnt/data/wikipedia"
+# Ensure WIKI_DATA is set in your current shell (source deepred-env.sh or set manually)
+export WIKI_DATA="${WIKI_DATA:-/mnt/data/wikipedia}"
 
 # Stop all PostgreSQL services
 sudo systemctl stop postgresql@*-main
@@ -226,12 +229,13 @@ sudo -iu wiki
 Verify the environment variable is set:
 ```bash
 echo $WIKI_DATA
-# Should output your data path, e.g., /mnt/data/wikipedia
+# Should output your data path, e.g., $DEEPRED_ROOT/wikipedia
 ```
 
-**Note:** If `$WIKI_DATA` is empty, log out and back in, or manually set it:
+**Note:** If `$WIKI_DATA` is empty, source the environment or set it manually:
 ```bash
-export WIKI_DATA=/mnt/data/wikipedia  # Use your actual path
+source deepred-env.sh
+# Or: export WIKI_DATA=/mnt/data/wikipedia
 ```
 
 Then download the dump:
@@ -306,7 +310,7 @@ import os
 import extract_wikipedia
 
 if __name__ == "__main__":
-    wiki_data = os.environ.get('WIKI_DATA', '/mnt/data/wikipedia')
+    wiki_data = os.environ.get('WIKI_DATA', os.path.join(os.environ.get('DEEPRED_ROOT', '/mnt/data'), 'wikipedia'))
     extract_wikipedia.extract_articles(
         dump_file=f'{wiki_data}/dumps/enwiki-latest-pages-articles.xml.bz2',
         output_dir=f'{wiki_data}/extracted',
@@ -385,8 +389,8 @@ cat ${WIKI_DATA}/extracted/*.json | wc -l
 1. Set the environment variable (required for this session):
 ```bash
 # Set this FIRST before running any other commands in this phase
-# Replace with your actual storage path
-export WIKI_DATA="/mnt/data/wikipedia"
+# Source deepred-env.sh, or set WIKI_DATA manually:
+export WIKI_DATA="${WIKI_DATA:-/mnt/data/wikipedia}"
 echo "WIKI_DATA is set to: $WIKI_DATA"
 ```
 
@@ -426,7 +430,7 @@ sudo systemctl enable postgresql
 5. Verify PostgreSQL is using the custom data directory:
 ```bash
 sudo -iu postgres psql -c "SHOW data_directory;"
-# Should output: /mnt/data/wikipedia/postgres (or your WIKI_DATA path)
+# Should output: $WIKI_DATA/postgres (e.g., /mnt/data/wikipedia/postgres)
 ```
 
 6. Create database and user:
@@ -496,8 +500,8 @@ sudo ln -sfn /opt/opensearch-${OPENSEARCH_VERSION} /opt/opensearch
 
 3. Create OpenSearch data directory on the data drive:
 ```bash
-# Set environment variable if not already set
-export WIKI_DATA="/mnt/data/wikipedia"  # Replace with your actual path
+# Set environment variable if not already set (source deepred-env.sh or set manually)
+export WIKI_DATA="${WIKI_DATA:-/mnt/data/wikipedia}"
 
 # Create data and logs directories
 sudo mkdir -p ${WIKI_DATA}/opensearch/data
@@ -546,12 +550,12 @@ http.port: 9200
 discovery.type: single-node
 plugins.security.disabled: true
 
-# Store data and logs on the data drive (adjust path as needed)
+# Store data and logs on the data drive (adjust to match your $WIKI_DATA)
 path.data: /mnt/data/wikipedia/opensearch/data
 path.logs: /mnt/data/wikipedia/opensearch/logs
 ```
 
-**Note:** Replace `/mnt/data/wikipedia` with your actual `${WIKI_DATA}` path.
+**Note:** Replace `/mnt/data/wikipedia` with your actual `${WIKI_DATA}` path if different from the default.
 
 6. Create systemd service (`/etc/systemd/system/opensearch.service`):
 
@@ -666,7 +670,7 @@ If you have an existing OpenSearch installation with data stored on the root fil
 
 1. Set the environment variable:
 ```bash
-export WIKI_DATA="/mnt/data/wikipedia"  # Replace with your actual path
+export WIKI_DATA="${WIKI_DATA:-/mnt/data/wikipedia}"
 ```
 
 2. Stop the OpenSearch service:
@@ -724,8 +728,8 @@ sudo nano /opt/opensearch/config/opensearch.yml
 Add or update these lines (replace path with your actual `${WIKI_DATA}` value):
 ```yaml
 # Store data and logs on the data drive
-path.data: /mnt/data/wikipedia/opensearch/data
-path.logs: /mnt/data/wikipedia/opensearch/logs
+path.data: ${WIKI_DATA}/opensearch/data
+path.logs: ${WIKI_DATA}/opensearch/logs
 ```
 
 8. Start OpenSearch:
@@ -1034,7 +1038,7 @@ The server reads configuration from environment variables (with defaults):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WIKI_DATA` | `/mnt/data/wikipedia` | Base data directory |
+| `WIKI_DATA` | `$DEEPRED_ROOT/wikipedia` | Base data directory |
 | `PG_HOST` | `localhost` | PostgreSQL host |
 | `PG_PORT` | `5432` | PostgreSQL port |
 | `PG_USER` | `wiki` | PostgreSQL username |
@@ -1063,12 +1067,12 @@ curl http://localhost:7000/health
 
 3. Create systemd service (`/etc/systemd/system/mcp.service`):
 
-**Note:** Edit the service file and replace `/mnt/data/wikipedia` with your actual `WIKI_DATA` path before copying.
+**Note:** Edit the service file and update paths if your `DEEPRED_ROOT` is not `/mnt/data`.
 
 Copy the service file from the `/services` folder:
 ```bash
 sudo cp /path/to/services/mcp.service /etc/systemd/system/mcp.service
-sudo nano /etc/systemd/system/mcp.service  # Edit paths as needed
+sudo nano /etc/systemd/system/mcp.service  # Edit paths if DEEPRED_ROOT differs
 ```
 
 **Service file:** See `mcp.service` in the `/services` folder alongside this documentation.
@@ -1146,12 +1150,12 @@ npm run build
 
 5. Create systemd service for the web GUI (`/etc/systemd/system/wiki-gui.service`):
 
-**Note:** Edit the service file and replace `/mnt/data/wikipedia` with your actual `WIKI_DATA` path before copying.
+**Note:** Edit the service file and update paths if your `DEEPRED_ROOT` is not `/mnt/data`.
 
 Copy the service file from the `/services` folder:
 ```bash
 sudo cp /path/to/services/wiki-gui.service /etc/systemd/system/wiki-gui.service
-sudo nano /etc/systemd/system/wiki-gui.service  # Edit paths as needed
+sudo nano /etc/systemd/system/wiki-gui.service  # Edit paths if DEEPRED_ROOT differs
 ```
 
 **Service file:** See `wiki-gui.service` in the `/services` folder alongside this documentation.

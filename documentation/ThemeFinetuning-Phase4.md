@@ -66,8 +66,11 @@ You have two options for the base model:
 Set these in any working terminal shell before running any commands or scripts:
 
 ```bash
-# Storage path - adjust to your disk mount point
-export GUTENBERG_DATA="/mnt/data/gutenberg"
+# Source the DeepRedAI environment (recommended — sets all paths automatically)
+source deepred-env.sh
+
+# Or set paths manually:
+# export GUTENBERG_DATA="/mnt/data/gutenberg"
 
 # Replace with your server's IP address
 export HOST="192.168.X.Y"

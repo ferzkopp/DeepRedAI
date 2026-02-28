@@ -53,6 +53,7 @@ Environment Variables:
                 - extracted/wikipedia_batch_*.json (extracted article files)
                 The checkpoint file will also be stored in this directory.
                 Example: export WIKI_DATA=/mnt/data/wikipedia
+                (Set automatically by sourcing deepred-env.sh)
 """
 
 import argparse

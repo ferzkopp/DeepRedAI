@@ -23,8 +23,11 @@ This document describes the data preparation phase for creating temporally-aware
 Set these in any working terminal shell before running any commands or scripts:
 
 ```bash
-# Storage path - adjust to your disk mount point
-export WIKI_DATA="/mnt/data/wikipedia"
+# Source the DeepRedAI environment (recommended — sets all paths automatically)
+source deepred-env.sh
+
+# Or set paths manually:
+# export WIKI_DATA="/mnt/data/wikipedia"
 
 # Replace with your server's IP address
 export HOST="192.168.X.Y"

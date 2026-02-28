@@ -43,8 +43,11 @@ You must have:
 ### Installation
 
 ```bash
-# Storage path
-export WIKI_DATA="/mnt/data/wikipedia"
+# Source the DeepRedAI environment (recommended — sets all paths automatically)
+source deepred-env.sh
+
+# Or set paths manually:
+# export WIKI_DATA="/mnt/data/wikipedia"
 
 # Switch to wiki user
 sudo -iu wiki

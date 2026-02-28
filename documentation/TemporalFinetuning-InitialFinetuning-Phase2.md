@@ -189,8 +189,11 @@ The following scripts are available in the `scripts/` directory:
 Set these in any working terminal shell before running any commands or scripts:
 
 ```bash
-# Storage path - adjust to your disk mount point
-export WIKI_DATA="/mnt/data/wikipedia"
+# Source the DeepRedAI environment (recommended — sets all paths automatically)
+source deepred-env.sh
+
+# Or set paths manually:
+# export WIKI_DATA="/mnt/data/wikipedia"
 
 # Replace with your server's IP address
 export HOST="192.168.42.14"
@@ -636,8 +639,8 @@ scripts/evaluate_temporal.py
 | `--use_lmstudio` | False | Use LMStudio API instead of local model |
 | `--lmstudio_url` | `http://localhost:1234/v1` | LMStudio API URL (uses `LMSTUDIO_HOST`/`LMSTUDIO_PORT` env vars) |
 | `--lmstudio_model` | - | Model name for LMStudio API |
-| `--retain_val` | `/mnt/data/wikipedia/datasets/retain/retain_val.jsonl` | Path to retain validation JSONL file |
-| `--unlearn_val` | `/mnt/data/wikipedia/datasets/unlearn/unlearn_val.jsonl` | Path to unlearn validation JSONL file |
+| `--retain_val` | `$WIKI_DATA/datasets/retain/retain_val.jsonl` | Path to retain validation JSONL file |
+| `--unlearn_val` | `$WIKI_DATA/datasets/unlearn/unlearn_val.jsonl` | Path to unlearn validation JSONL file |
 | `--test_file` | - | (Deprecated) Path to single test JSONL file |
 | `--max_tokens` | 256 | Maximum tokens to generate |
 | `--output` | Auto-generated | Output path for results JSON |
@@ -655,8 +658,8 @@ python scripts/evaluate_temporal.py \
 ```
 
 This loads equal samples from:
-- `/mnt/data/wikipedia/datasets/retain/retain_val.jsonl`
-- `/mnt/data/wikipedia/datasets/unlearn/unlearn_val.jsonl`
+- `$WIKI_DATA/datasets/retain/retain_val.jsonl`
+- `$WIKI_DATA/datasets/unlearn/unlearn_val.jsonl`
 
 ### Evaluate via LMStudio API
 

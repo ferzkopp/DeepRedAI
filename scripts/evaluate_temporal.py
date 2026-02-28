@@ -7,8 +7,8 @@ This script evaluates a fine-tuned model's ability to separate temporal knowledg
 - Refuse to answer about post-cutoff events ("I don't know" responses)
 
 By default, uses validation datasets that were not used during training:
-- /mnt/data/wikipedia/datasets/retain/retain_val.jsonl
-- /mnt/data/wikipedia/datasets/unlearn/unlearn_val.jsonl
+- $WIKI_DATA/datasets/retain/retain_val.jsonl
+- $WIKI_DATA/datasets/unlearn/unlearn_val.jsonl
 
 Samples are taken in equal percentages from both datasets.
 
@@ -453,12 +453,18 @@ def main():
     # Data - use separate validation files for retain and unlearn
     parser.add_argument(
         "--retain_val",
-        default="/mnt/data/wikipedia/datasets/retain/retain_val.jsonl",
+        default=os.path.join(
+            os.environ.get("WIKI_DATA",
+                           os.path.join(os.environ.get("DEEPRED_ROOT", "/mnt/data"), "wikipedia")),
+            "datasets/retain/retain_val.jsonl"),
         help="Path to retain validation JSONL file",
     )
     parser.add_argument(
         "--unlearn_val",
-        default="/mnt/data/wikipedia/datasets/unlearn/unlearn_val.jsonl",
+        default=os.path.join(
+            os.environ.get("WIKI_DATA",
+                           os.path.join(os.environ.get("DEEPRED_ROOT", "/mnt/data"), "wikipedia")),
+            "datasets/unlearn/unlearn_val.jsonl"),
         help="Path to unlearn validation JSONL file",
     )
     parser.add_argument(

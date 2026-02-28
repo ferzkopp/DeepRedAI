@@ -15,14 +15,14 @@ This guide covers the manual steps for a fresh Fedora installation on an AMD Str
 - **Hardware**: AMD Ryzen AI MAX+ 395 "Strix Halo" (gfx1151)
 - **RAM**: 128 GB LPDDR5x (unified CPU+GPU memory)
 - **System Disk**: 1 TB (Fedora OS, `/`)
-- **Data Disk**: 4 TB (models, Wikipedia pipeline, project repo — mounted at `/mnt/data`)
-- **OS**: Fedora 42 or 43
+- **Data Disk**: 4 TB (models, Wikipedia pipeline, project repo — mounted at `/mnt/data` by default, configurable via `DEEPRED_ROOT`)
+- **OS**: Fedora 43
 
 ### Tested Stable Configuration
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| **OS** | Fedora 42 or 43 | |
+| **OS** | Fedora 43 | |
 | **Linux Kernel** | 6.18.6-200+ | Kernels < 6.18.4 have gfx1151 bugs — **avoid them** |
 | **Linux Firmware** | 20260110+ | **Do NOT use `linux-firmware-20251125`** — breaks ROCm on Strix Halo |
 | **ROCm (toolbox)** | 7.2 (AMD repo) | Latest stable; kernel 6.18.4+ compatibility. ROCm 6.4.4 available as fallback. |
@@ -31,9 +31,9 @@ This guide covers the manual steps for a fresh Fedora installation on an AMD Str
 
 ### Why Fedora Instead of Ubuntu
 
-| Factor | Ubuntu 25.10 | Fedora 42/43 |
+| Factor | Ubuntu 25.10 | Fedora 43 |
 |--------|-------------|------------|
-| **Kernel** | 6.12+ | 6.18+ (critical for Strix Halo stability) |
+| **Kernel** | 6.14+ | 6.18+ (critical for Strix Halo stability) |
 | **AMD GPU support** | Requires manual ROCm repo setup | Strong out-of-box AMD support |
 | **Toolbox/Podman** | Available but not default | First-class citizen (pre-installed) |
 | **ROCm** | Manual repo + pinning | Available via native Fedora packages or AMD repos |
@@ -50,6 +50,8 @@ This guide covers the manual steps for a fresh Fedora installation on an AMD Str
 ---
 
 ## Phase 1: Manual Installation
+
+> **Tip:** Before editing system config files (`/etc/fstab`, `/etc/default/grub`, etc.), back them up: `sudo cp /etc/fstab /etc/fstab.bak`
 
 ### Step 1: Install Fedora
 
@@ -74,27 +76,9 @@ sudo firewall-cmd --reload
 ss -tlnp | grep :22
 ```
 
-Optionally, set a static IP or hostname for reliable remote access:
-
-```bash
-# Set hostname
-sudo hostnamectl set-hostname strixhalo
-
-# (Optional) Set a static IP — adjust connection name, IP, gateway, DNS
-# Find your connection name:
-nmcli con show
-# Then configure it:
-sudo nmcli con mod "Wired connection 1" \
-    ipv4.method manual \
-    ipv4.addresses 192.168.1.100/24 \
-    ipv4.gateway 192.168.1.1 \
-    ipv4.dns "192.168.1.1 8.8.8.8"
-sudo nmcli con up "Wired connection 1"
-```
-
 > **From this point on**, you can disconnect KVM and work entirely via SSH:
 > ```bash
-> ssh your-user@strixhalo   # or ssh your-user@192.168.1.100
+> ssh your-user@strixhalo 
 > ```
 
 ### Step 3: System Update
@@ -125,69 +109,37 @@ rpm -q linux-firmware
 
 > **⚠️ Disclaimer:** Flashing BIOS/UEFI firmware carries inherent risk, including rendering your device inoperable ("bricking"). Ensure you have a stable power supply during the flash process and verify you are using the correct firmware for your specific hardware model. You do this entirely at your own risk.
 
+> **TL;DR:** Install deps → download BIOS .7z + UEFI Shell → verify checksums → partition USB as EFI → copy files → boot UEFI Shell → run `EfiFlash.nsh`.
+
 Minisforum only ships Windows-based BIOS update tools, but the BIOS package includes `AfuEfix64.efi` — AMI's EFI-native flash utility — which runs directly from the UEFI Shell before any OS loads. No Windows needed.
 
 **Requirements:**
 - A USB flash drive (512 MB or larger)
-- `7z` (p7zip), `sgdisk` (gptfdisk), and `dosfstools` packages
+- `7z` (p7zip + p7zip-plugins), `sgdisk` (gptfdisk), and `dosfstools` packages:
+  ```bash
+  sudo dnf install -y gdisk dosfstools p7zip p7zip-plugins
+  ```
 
-#### Quick Start (Automated)
+#### Automated USB Preparation
 
 An automated script handles downloading, partitioning, and file copying with safety checks:
 
+**1. Identify your USB device** (⚠️ wrong device = data loss!):
+```bash
+lsblk -d -o NAME,SIZE,MODEL,TRAN | grep usb
+```
+Confirm the device name (e.g., `sda`) matches your USB drive's size and model.
+
+**2. Run the script** with the verified device path:
 ```bash
 git clone https://github.com/capetron/minisforum-ms-s1-max-bios.git
 cd minisforum-ms-s1-max-bios
-sudo ./scripts/prep-usb.sh /dev/sdX   # Replace sdX with your USB device!
+sudo ./scripts/prep-usb.sh /dev/sdX   # Replace sdX with your device from step 1
 ```
 
-> **⚠️** Double-check your device path with `lsblk` before running. This script will erase all data on the target drive.
-
-#### Manual USB Preparation
-
-**1. Install dependencies and download files:**
-
+**3. Shut down and boot from USB** to flash the BIOS:
 ```bash
-sudo dnf install -y gdisk dosfstools p7zip
-
-mkdir -p ~/ms-s1-bios && cd ~/ms-s1-bios
-wget -O SHWSA_1.06.7z "https://pc-file.s3.us-west-1.amazonaws.com/MS-S1+MAX/BIOS/SHWSA_1.06_260104B.7z"
-wget -O shellx64.efi "https://github.com/pbatard/UEFI-Shell/releases/download/24H2/ShellX64.efi"
-```
-
-> **Note:** Check [Minisforum's support page](https://www.minisforum.com/pages/product-info) for newer BIOS versions before proceeding.
-
-**2. Identify your USB device (be careful — wrong device = data loss!):**
-
-```bash
-lsblk -d -o NAME,SIZE,MODEL,TRAN
-```
-
-**3. Partition and format the USB** (replace `/dev/sdX` with your device):
-
-```bash
-sudo sgdisk --zap-all /dev/sdX
-sudo sgdisk -a1 -n1:0:0 -c 1:efiboot -t1:EF00 /dev/sdX
-sudo partprobe /dev/sdX
-sudo mkfs.vfat -F32 -n "BIOS" /dev/sdX1
-```
-
-**4. Copy files to the USB:**
-
-```bash
-sudo mount /dev/sdX1 /mnt
-
-7z x SHWSA_1.06.7z -o/tmp/bios-extract/
-sudo cp /tmp/bios-extract/SHWSA_1.06_260104B/AfuEfix64.efi /mnt/
-sudo cp /tmp/bios-extract/SHWSA_1.06_260104B/EfiFlash.nsh /mnt/
-sudo cp /tmp/bios-extract/SHWSA_1.06_260104B/SHWSA.BIN /mnt/
-sudo cp shellx64.efi /mnt/
-
-# Verify — should show: AfuEfix64.efi  EfiFlash.nsh  shellx64.efi  SHWSA.BIN
-ls -la /mnt/
-
-sudo sync
-sudo umount /mnt
+sudo shutdown now
 ```
 
 #### Flashing the BIOS
@@ -248,72 +200,109 @@ Choose the appropriate option below based on your situation:
 If the data disk already contains data from a previous installation (models, Wikipedia pipeline, repo, etc.), **do not format it** — just mount it:
 
 ```bash
-# Create mount point
 sudo mkdir -p /mnt/data
 
-# Check the existing filesystem label
+# Identify filesystem type and UUID
 sudo blkid /dev/nvme1n1
+# Note the TYPE= (ext4/xfs/btrfs) and UUID= from the output above
 
-# If the disk has a label (e.g., "data"), mount by label:
-echo 'LABEL=data /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab
+# Add to fstab using UUID and detected type (skip if already present)
+# Replace <UUID> and <type> with your actual values
+grep -q '<UUID>' /etc/fstab || \
+  echo 'UUID=<UUID> /mnt/data <type> defaults 0 2' | sudo tee -a /etc/fstab
 
-# Or mount by UUID (more robust — use the UUID from blkid output):
-# echo 'UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab
-
-# Mount now
 sudo mount -a
-
-# Verify your existing data is intact
 ls /mnt/data
 
-# Fix ownership if needed (Ubuntu UID/GID may differ from Fedora)
-sudo chown -R $USER:$USER /mnt/data
+# Fix ownership for project directory only (preserves service data)
+sudo chown -R $USER:$USER /mnt/data/DeepRedAI
 ```
 
-> **Note:** If the previous Ubuntu install used a different mount point (e.g., `/data` or `/home/user/data`), paths in scripts and services will reference `/mnt/data` — ensure you mount to `/mnt/data` or update the scripts accordingly.
+> **Note:** If the previous Ubuntu install used a different mount point (e.g., `/data` or `/home/user/data`), set `DEEPRED_ROOT` to that path in Step 6 below. All scripts and services will pick it up automatically.
 
 #### Option B: New Data Disk (Fresh Format)
 
 If this is a new or empty disk, format it:
 
 ```bash
-# Format the data disk (adjust /dev/nvme1n1 to your actual device)
-# ⚠️ This DESTROYS all data on the disk
+# ⚠️ This DESTROYS all data on the disk — adjust device path as needed
 sudo mkfs.ext4 -L data /dev/nvme1n1
 
-# Create mount point
 sudo mkdir -p /mnt/data
 
-# Add to fstab for persistent mount
-echo 'LABEL=data /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab
+# Add to fstab (skip if already present)
+grep -q 'LABEL=data' /etc/fstab || \
+  echo 'LABEL=data /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab
 
-# Mount now
 sudo mount -a
-
-# Set ownership to your user
 sudo chown -R $USER:$USER /mnt/data
 ```
 
 ### Step 5: Clone This Repository
 
 ```bash
-# Install git and bootstrap tools
 sudo dnf install -y git python3 python3-pip
 
-# Clone the project
-git clone https://github.com/aschiffler/DeepRedAI.git /mnt/data/DeepRedAI
+# Clone (or update existing repo)
+if [ -d /mnt/data/DeepRedAI/.git ]; then
+  git -C /mnt/data/DeepRedAI pull
+else
+  git clone https://github.com/aschiffler/DeepRedAI.git /mnt/data/DeepRedAI
+fi
 cd /mnt/data/DeepRedAI
 ```
+
+### Step 6: Configure DeepRedAI Environment
+
+The repository includes `deepred-env.sh` — a shell script that exports all path and service variables used by every DeepRedAI script. Source it once to enter **development mode**:
+
+```bash
+source /mnt/data/DeepRedAI/deepred-env.sh
+```
+
+To load it automatically on every login, add the following to `~/.bashrc`:
+
+```bash
+# ── DeepRedAI environment (adjust DEEPRED_ROOT if your data disk is not /mnt/data)
+export DEEPRED_ROOT="/mnt/data"
+[ -f "$DEEPRED_ROOT/DeepRedAI/deepred-env.sh" ] && source "$DEEPRED_ROOT/DeepRedAI/deepred-env.sh"
+```
+
+#### What gets set
+
+| Variable | Default | Purpose |
+|----------|---------|--------|
+| `DEEPRED_ROOT` | `/mnt/data` | Data-disk mount point. **All other paths derive from this.** |
+| `DEEPRED_REPO` | `$DEEPRED_ROOT/DeepRedAI` | Location of this git clone |
+| `WIKI_DATA` | `$DEEPRED_ROOT/wikipedia` | Wikipedia pipeline data |
+| `GUTENBERG_DATA` | `$DEEPRED_ROOT/gutenberg` | Project Gutenberg data |
+| `DEEPRED_MODELS` | `$DEEPRED_ROOT/models` | LLM and embedding model files |
+| `DEEPRED_VENV` | `$DEEPRED_ROOT/venv` | Python virtual environment |
+| `LMSTUDIO_HOST` | `localhost` | LLM server host |
+| `LMSTUDIO_PORT` | `1234` | LLM server port |
+| `EMBEDDING_PORT` | `1235` | Embedding server port |
+| `PG_HOST` / `PG_PORT` | `localhost` / `5432` | PostgreSQL connection |
+| `OS_HOST` / `OS_PORT` | `localhost` / `9200` | OpenSearch connection |
+
+To change file locations, either:
+- **Override before sourcing:** `export DEEPRED_ROOT="/alternate_data"` in `~/.bashrc` before the source line
+- **Override individual paths:** `export WIKI_DATA="/other/path/wikipedia"` before sourcing
+- **Edit `deepred-env.sh` directly** (not recommended — will conflict with git updates)
+
+The env file also activates the Python venv (if present) and adds `scripts/` to `$PATH`.
 
 ---
 
 ## Phase 2: Automated Setup
 
-The setup script handles all remaining configuration. Run as root:
+The setup script handles all remaining configuration. It reads `DEEPRED_ROOT` (and related variables) from the environment, falling back to `/mnt/data` when unset. Run as root:
 
 ```bash
-sudo python3 /mnt/data/DeepRedAI/scripts/setup_strixhalo.py
+source /mnt/data/DeepRedAI/deepred-env.sh   # ensure env vars are loaded
+sudo -E python3 $DEEPRED_REPO/scripts/setup_strixhalo.py
 ```
+
+> **Note:** `sudo -E` preserves the `DEEPRED_*` environment variables for the root session. Alternatively, pass `--user` if the script cannot auto-detect your non-root user.
 
 The script runs through these stages in order:
 
@@ -324,9 +313,9 @@ The script runs through these stages in order:
 | 3 | `gpu_groups` | **Yes** | Add user to `render`/`video` groups (reconnect via SSH after reboot) |
 | 4 | `vscode` | No | Install VSCode + Python and Copilot extensions |
 | 5 | `toolbox_setup` | No | Install Podman/toolbox, create ROCm toolbox |
-| 6 | `model_directories` | No | Create `/mnt/data/models/{llm,embedding}`, download models |
+| 6 | `model_directories` | No | Create `$DEEPRED_MODELS/{llm,embedding}`, download models |
 | 7 | `llama_server` | No | Deploy Podman Quadlet services for LLM + embedding servers |
-| 8 | `python_venv` | No | Create venv on `/mnt/data`, install PyTorch ROCm + dependencies |
+| 8 | `python_venv` | No | Create venv at `$DEEPRED_VENV`, install PyTorch ROCm + dependencies |
 | 9 | `postgresql` | No | Install, initialize, configure PostgreSQL + wiki database |
 | 10 | `opensearch` | No | Download, configure, deploy OpenSearch as systemd service |
 | 11 | `mcp_server` | No | Deploy MCP server + web GUI systemd service |
@@ -339,25 +328,25 @@ The script runs through these stages in order:
 
 ```bash
 # Resume from where it left off (after reboot or interruption)
-sudo python3 /mnt/data/DeepRedAI/scripts/setup_strixhalo.py
+sudo -E python3 $DEEPRED_REPO/scripts/setup_strixhalo.py
 
 # Run a specific stage only
-sudo python3 /mnt/data/DeepRedAI/scripts/setup_strixhalo.py --stage gtt_memory
+sudo -E python3 $DEEPRED_REPO/scripts/setup_strixhalo.py --stage gtt_memory
 
 # Re-run a specific stage (even if already completed)
-sudo python3 /mnt/data/DeepRedAI/scripts/setup_strixhalo.py --stage postgresql --force
+sudo -E python3 $DEEPRED_REPO/scripts/setup_strixhalo.py --stage postgresql --force
 
 # List all stages and their status
-sudo python3 /mnt/data/DeepRedAI/scripts/setup_strixhalo.py --list
+sudo -E python3 $DEEPRED_REPO/scripts/setup_strixhalo.py --list
 
 # Start from a specific stage (skip earlier stages)
-sudo python3 /mnt/data/DeepRedAI/scripts/setup_strixhalo.py --from vscode
+sudo -E python3 $DEEPRED_REPO/scripts/setup_strixhalo.py --from vscode
 
-# Override the default non-root user (auto-detected from /mnt/data ownership)
-sudo python3 /mnt/data/DeepRedAI/scripts/setup_strixhalo.py --user myuser
+# Override the default non-root user (auto-detected from $DEEPRED_ROOT ownership)
+sudo -E python3 $DEEPRED_REPO/scripts/setup_strixhalo.py --user myuser
 ```
 
-Stage progress is tracked in `/mnt/data/DeepRedAI/.setup_state.json`. After a reboot (e.g., after stage 2 or 3), simply re-run the script — it resumes from the next incomplete stage.
+Stage progress is tracked in `$DEEPRED_REPO/.setup_state.json`. After a reboot stage, SSH back in (`ssh your-user@strixhalo`), source the env (`source $DEEPRED_ROOT/DeepRedAI/deepred-env.sh`), and re-run the same command — the script reads the state file and resumes automatically.
 
 ---
 
@@ -365,13 +354,15 @@ Stage progress is tracked in `/mnt/data/DeepRedAI/.setup_state.json`. After a re
 
 ### Service Overview
 
-| Service | Port | Purpose |
-|---------|------|---------|
-| `llama-server-llm` | 1234 | LLM inference (chat completions) — Podman Quadlet |
-| `llama-server-embed` | 1235 | Embedding generation — Podman Quadlet |
-| `opensearch.service` | 9200 | Full-text and semantic search |
-| `postgresql.service` | 5432 | Wikipedia metadata storage |
-| `mcp.service` | 7000 | Wikipedia MCP server + Web GUI |
+| Service | Port | Bind | Purpose |
+|---------|------|------|---------|
+| `llama-server-llm` | 1234 | 0.0.0.0 | LLM inference (chat completions) — Podman Quadlet |
+| `llama-server-embed` | 1235 | 0.0.0.0 | Embedding generation — Podman Quadlet |
+| `opensearch.service` | 9200 | 0.0.0.0 | Full-text and semantic search |
+| `postgresql.service` | 5432 | localhost | Wikipedia metadata storage |
+| `mcp.service` | 7000 | 0.0.0.0 | Wikipedia MCP server + Web GUI |
+
+> **Network exposure:** Ports 1234, 1235, 7000, and 9200 are opened in firewalld (LAN-accessible). PostgreSQL is localhost-only. To restrict other services, adjust firewalld rules or service bind addresses.
 
 ```
 ┌──────────────┐     ┌──────────────────┐     ┌──────────────────────────┐
@@ -394,10 +385,10 @@ Stage progress is tracked in `/mnt/data/DeepRedAI/.setup_state.json`. After a re
 
 ```bash
 # Swap to a different model
-llm-swap /mnt/data/models/llm/deepred-1b-q4_k_m.gguf "deepred/deepred" 4096
+llm-swap $DEEPRED_MODELS/llm/deepred-1b-q4_k_m.gguf "deepred/deepred" 4096
 
 # Swap back to default
-llm-swap /mnt/data/models/llm/qwen2.5-7b-instruct-q4_k_m.gguf
+llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m.gguf
 ```
 
 ### Working Inside the Toolbox
@@ -406,15 +397,15 @@ llm-swap /mnt/data/models/llm/qwen2.5-7b-instruct-q4_k_m.gguf
 # Enter the ROCm toolbox for interactive AI work
 toolbox enter llama-rocm-7.2
 
-# Activate the Python venv inside
-source /mnt/data/venv/bin/activate
+# Activate DeepRedAI environment inside the toolbox
+source $DEEPRED_REPO/deepred-env.sh
 ```
 
 ### Quick Health Check
 
 ```bash
 # Check all services at once
-sudo python3 /mnt/data/DeepRedAI/scripts/setup_strixhalo.py --stage verify --force
+sudo -E python3 $DEEPRED_REPO/scripts/setup_strixhalo.py --stage verify --force
 ```
 
 ### Script Migration: `lms` CLI to llama-server

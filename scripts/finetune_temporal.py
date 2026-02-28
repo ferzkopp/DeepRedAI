@@ -392,7 +392,7 @@ def main():
     
     # Dataset configuration
     # Use WIKI_DATA environment variable for data root (default: datasets/)
-    # When WIKI_DATA is set (e.g., /mnt/data/wikipedia), datasets are in WIKI_DATA/datasets/
+    # When WIKI_DATA is set (e.g., $DEEPRED_ROOT/wikipedia), datasets are in WIKI_DATA/datasets/
     # When using default, datasets are in ./datasets/
     wiki_data = os.environ.get("WIKI_DATA", "")
     if wiki_data:

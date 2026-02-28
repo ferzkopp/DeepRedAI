@@ -348,7 +348,7 @@ DeepRedAI/
 │   ├── ThemeFinetuning-DataPreparation-Phase2.md  # Phase 2 details
 │   ├── ThemeFinetuning-DataPreparation-Phase3.md  # Phase 3 details
 │   └── ThemeFinetuning-Phase4.md                  # Phase 4 details
-└── $GUTENBERG_DATA/               # /mnt/data/gutenberg
+└── $GUTENBERG_DATA/               # e.g., $DEEPRED_ROOT/gutenberg
     ├── corpus/                    # Phase 1: Raw retrieved texts
     ├── theme_chunks/              # Phase 2: Chunked and filtered passages
     └── dataset/                   # Phase 3: Final training dataset

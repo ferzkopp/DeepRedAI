@@ -36,8 +36,11 @@ The script:
 ## Prerequisites
 
 ```bash
-# Storage path
-export WIKI_DATA="/mnt/data/wikipedia"
+# Source the DeepRedAI environment (recommended — sets all paths automatically)
+source deepred-env.sh
+
+# Or set paths manually:
+# export WIKI_DATA="/mnt/data/wikipedia"
 
 # Switch to wiki user
 sudo -iu wiki
@@ -74,7 +77,7 @@ Normalization complete!
 2025-12-22 21:47:47,479 - INFO -   API calls made: 28,025
 2025-12-22 21:47:47,479 - INFO -   API translations successful: 21,414
 2025-12-22 21:47:47,479 - INFO -   API translations not found: 6,611
-2025-12-22 21:47:47,479 - INFO -   Output saved to: /mnt/data/wikipedia/yago/yago-facts-normalized.csv
+2025-12-22 21:47:47,479 - INFO -   Output saved to: $WIKI_DATA/yago/yago-facts-normalized.csv
 ```
 
 ## Usage

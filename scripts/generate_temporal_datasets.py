@@ -93,7 +93,8 @@ except ImportError:
 # -----------------------------------------------------------------------------
 
 # Default environment-based configuration
-WIKI_DATA = os.environ.get('WIKI_DATA', '/mnt/data/wikipedia')
+_DEEPRED_ROOT = os.environ.get('DEEPRED_ROOT', '/mnt/data')
+WIKI_DATA = os.environ.get('WIKI_DATA', os.path.join(_DEEPRED_ROOT, 'wikipedia'))
 
 # Database defaults
 DEFAULT_DB_HOST = 'localhost'

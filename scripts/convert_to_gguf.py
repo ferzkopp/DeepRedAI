@@ -56,13 +56,9 @@ QUANT_TYPES = {
 }
 
 DEFAULT_LLAMA_CPP_PATH = "llama.cpp"
-# Note: LMStudio stores models in ~/.lmstudio/models or /root/.lmstudio/models
-# The /mnt/data path is a custom symlink - adjust as needed for your setup
-# Uses WIKI_DATA environment variable if set, otherwise falls back to /mnt/data
-DEFAULT_LMSTUDIO_MODELS = os.path.join(
-    os.environ.get("WIKI_DATA", "/mnt/data").rsplit("/", 1)[0],  # Parent of WIKI_DATA
-    "lmstudio/models"
-)
+# Uses DEEPRED_ROOT environment variable (set via deepred-env.sh)
+_DEEPRED_ROOT = os.environ.get("DEEPRED_ROOT", "/mnt/data")
+DEFAULT_LMSTUDIO_MODELS = os.path.join(_DEEPRED_ROOT, "lmstudio/models")
 
 
 def check_llama_cpp(llama_cpp_path: str) -> bool:
