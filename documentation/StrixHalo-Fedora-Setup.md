@@ -54,16 +54,8 @@ This guide covers the manual steps for a fresh Fedora installation on an AMD Str
 ### Step 1: Install Fedora
 
 - **Download**: [Fedora Workstation](https://fedoraproject.org/workstation/download) or Fedora Server
-- **Create USB**: [Fedora Media Writer](https://docs.fedoraproject.org/en-US/fedora/latest/preparing-boot-media/) or `dd`
+- **Create USB**: [Fedora Media Writer](https://docs.fedoraproject.org/en-US/fedora/latest/preparing-boot-media/), [Rufus](https://rufus.ie/) (Windows), or `dd`
 - **Install** to the **1 TB system disk** using the Fedora installer
-
-#### BIOS Preparation (Before Fedora Install)
-
-Enter BIOS and look for:
-- **UMA Frame Buffer Size** → Set to maximum (e.g., 96 GB or "Auto" with large allocation)
-- **VRAM Size** or **iGPU Memory** → Maximize
-
-> **Note:** BIOS options vary by vendor. Some Strix Halo systems (e.g., Framework Laptop) expose this; others don't — the setup script will use kernel parameters as a fallback.
 
 ### Step 2: Enable SSH for Headless Access
 
@@ -127,17 +119,166 @@ rpm -q linux-firmware
 
 > **⚠️ Do not proceed** if your kernel is older than 6.18.4 or firmware is `linux-firmware-20251125`. Update first: `sudo dnf upgrade linux-firmware kernel --refresh`.
 
+### Optional: Minisforum MS-S1 MAX BIOS Update from Linux
+
+> **This section only applies if your hardware is a Minisforum MS-S1 MAX.** Skip this if you're using a different Strix Halo system (e.g., Framework Laptop). BIOS updates improve memory stability, NPU/GPU performance, USB4 V2 reliability, and patch AMD PSP security vulnerabilities.
+
+> **⚠️ Disclaimer:** Flashing BIOS/UEFI firmware carries inherent risk, including rendering your device inoperable ("bricking"). Ensure you have a stable power supply during the flash process and verify you are using the correct firmware for your specific hardware model. You do this entirely at your own risk.
+
+Minisforum only ships Windows-based BIOS update tools, but the BIOS package includes `AfuEfix64.efi` — AMI's EFI-native flash utility — which runs directly from the UEFI Shell before any OS loads. No Windows needed.
+
+**Requirements:**
+- A USB flash drive (512 MB or larger)
+- `7z` (p7zip), `sgdisk` (gptfdisk), and `dosfstools` packages
+
+#### Quick Start (Automated)
+
+An automated script handles downloading, partitioning, and file copying with safety checks:
+
+```bash
+git clone https://github.com/capetron/minisforum-ms-s1-max-bios.git
+cd minisforum-ms-s1-max-bios
+sudo ./scripts/prep-usb.sh /dev/sdX   # Replace sdX with your USB device!
+```
+
+> **⚠️** Double-check your device path with `lsblk` before running. This script will erase all data on the target drive.
+
+#### Manual USB Preparation
+
+**1. Install dependencies and download files:**
+
+```bash
+sudo dnf install -y gdisk dosfstools p7zip
+
+mkdir -p ~/ms-s1-bios && cd ~/ms-s1-bios
+wget -O SHWSA_1.06.7z "https://pc-file.s3.us-west-1.amazonaws.com/MS-S1+MAX/BIOS/SHWSA_1.06_260104B.7z"
+wget -O shellx64.efi "https://github.com/pbatard/UEFI-Shell/releases/download/24H2/ShellX64.efi"
+```
+
+> **Note:** Check [Minisforum's support page](https://www.minisforum.com/pages/product-info) for newer BIOS versions before proceeding.
+
+**2. Identify your USB device (be careful — wrong device = data loss!):**
+
+```bash
+lsblk -d -o NAME,SIZE,MODEL,TRAN
+```
+
+**3. Partition and format the USB** (replace `/dev/sdX` with your device):
+
+```bash
+sudo sgdisk --zap-all /dev/sdX
+sudo sgdisk -a1 -n1:0:0 -c 1:efiboot -t1:EF00 /dev/sdX
+sudo partprobe /dev/sdX
+sudo mkfs.vfat -F32 -n "BIOS" /dev/sdX1
+```
+
+**4. Copy files to the USB:**
+
+```bash
+sudo mount /dev/sdX1 /mnt
+
+7z x SHWSA_1.06.7z -o/tmp/bios-extract/
+sudo cp /tmp/bios-extract/SHWSA_1.06_260104B/AfuEfix64.efi /mnt/
+sudo cp /tmp/bios-extract/SHWSA_1.06_260104B/EfiFlash.nsh /mnt/
+sudo cp /tmp/bios-extract/SHWSA_1.06_260104B/SHWSA.BIN /mnt/
+sudo cp shellx64.efi /mnt/
+
+# Verify — should show: AfuEfix64.efi  EfiFlash.nsh  shellx64.efi  SHWSA.BIN
+ls -la /mnt/
+
+sudo sync
+sudo umount /mnt
+```
+
+#### Flashing the BIOS
+
+1. Plug the USB into the MS-S1 Max
+2. Power on and press **Del** repeatedly to enter BIOS Setup
+3. **Disable Secure Boot**: Navigate to Security menu (you may need to set an Administrator password first), then disable Secure Boot. Save and exit.
+4. Re-enter BIOS (press **Del** again)
+5. Look for **"UEFI Shell"** or **"Launch EFI Shell from filesystem device"** in the boot menu. If not available, go to Boot menu → Add Boot Option → point to `shellx64.efi` on the USB.
+6. Boot into the UEFI Shell
+
+At the `Shell>` prompt:
+
+```
+FS0:
+dir
+EfiFlash.nsh
+```
+
+> If `FS0:` doesn't show your files, try `FS1:`, `FS2:`, etc. Use `map -c` to list all filesystem mappings.
+
+The flash process will write the new BIOS image and automatically shut down or reboot the system.
+
+#### First Boot After Update
+
+> **Don't panic!** The first boot after a BIOS update takes **5–10 minutes** while the system performs memory training (recharacterizing all 128 GB of LPDDR5X at 8000 MT/s). You may see a black screen, the power LED cycling, or several reboots — this is completely normal.
+
+After the first boot completes:
+- All BIOS settings will be **reset to defaults**
+- Re-enter BIOS (**Del** key) to verify the new version and adjust settings (UMA Frame Buffer Size, etc.)
+- Re-enable Secure Boot if desired
+- Check boot order — your Fedora installation should still be there
+- If the system won't boot after 15 minutes, try a CMOS reset (unplug power, remove CMOS battery for 30 seconds)
+
+> **References:** [GitHub: capetron/minisforum-ms-s1-max-bios](https://github.com/capetron/minisforum-ms-s1-max-bios) · [Full guide: Petronella Technology Group](https://petronellatech.com/blog/technology/minisforum-ms-s1-max-bios-update-linux/)
+
+### BIOS Configuration (After Install or BIOS Update)
+
+Enter BIOS and look for:
+- **UMA Frame Buffer Size** → Set to maximum (e.g., 96 GB or "Auto" with large allocation)
+- **VRAM Size** or **iGPU Memory** → Maximize
+
+> **Note:** BIOS options vary by vendor. Some Strix Halo systems (e.g., Framework Laptop) expose this; others don't — the setup script will use kernel parameters as a fallback. If you just performed a BIOS update, all settings will have been reset to defaults — this is the time to reconfigure them.
+
 ### Step 4: Data Disk Setup
 
-Format and mount the **4 TB data disk**. Identify it first:
+Identify the **4 TB data disk** first:
 
 ```bash
 # List disks — find the 4 TB drive (e.g., /dev/nvme1n1 or /dev/sdb)
 lsblk
 ```
 
+Choose the appropriate option below based on your situation:
+
+#### Option A: Existing Data Disk (Migrating from Previous installation)
+
+If the data disk already contains data from a previous installation (models, Wikipedia pipeline, repo, etc.), **do not format it** — just mount it:
+
+```bash
+# Create mount point
+sudo mkdir -p /mnt/data
+
+# Check the existing filesystem label
+sudo blkid /dev/nvme1n1
+
+# If the disk has a label (e.g., "data"), mount by label:
+echo 'LABEL=data /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab
+
+# Or mount by UUID (more robust — use the UUID from blkid output):
+# echo 'UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab
+
+# Mount now
+sudo mount -a
+
+# Verify your existing data is intact
+ls /mnt/data
+
+# Fix ownership if needed (Ubuntu UID/GID may differ from Fedora)
+sudo chown -R $USER:$USER /mnt/data
+```
+
+> **Note:** If the previous Ubuntu install used a different mount point (e.g., `/data` or `/home/user/data`), paths in scripts and services will reference `/mnt/data` — ensure you mount to `/mnt/data` or update the scripts accordingly.
+
+#### Option B: New Data Disk (Fresh Format)
+
+If this is a new or empty disk, format it:
+
 ```bash
 # Format the data disk (adjust /dev/nvme1n1 to your actual device)
+# ⚠️ This DESTROYS all data on the disk
 sudo mkfs.ext4 -L data /dev/nvme1n1
 
 # Create mount point
