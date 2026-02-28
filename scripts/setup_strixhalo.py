@@ -271,6 +271,61 @@ def stage_system_packages(user: str) -> None:
         "python3-venv lld clang clang-devel compiler-rt libcurl-devel")
 
 
+@stage("disable_sleep", "Disable sleep/suspend for always-on server operation")
+def stage_disable_sleep(user: str) -> None:
+    # Mask all sleep-related systemd targets
+    sleep_targets = [
+        "sleep.target",
+        "suspend.target",
+        "hibernate.target",
+        "hybrid-sleep.target",
+        "suspend-then-hibernate.target",
+    ]
+    for target in sleep_targets:
+        run(f"systemctl mask {target}", check=False)
+
+    # Configure logind to ignore all suspend/hibernate triggers
+    logind_conf = pathlib.Path("/etc/systemd/logind.conf.d/no-sleep.conf")
+    if not logind_conf.exists():
+        write_file(
+            logind_conf,
+            textwrap.dedent("""\
+                [Login]
+                HandleSuspendKey=ignore
+                HandleHibernateKey=ignore
+                HandleLidSwitch=ignore
+                HandleLidSwitchExternalPower=ignore
+                HandleLidSwitchDocked=ignore
+                IdleAction=ignore
+                IdleActionSec=0
+            """),
+        )
+        run("systemctl restart systemd-logind")
+    else:
+        log.info("  logind no-sleep config already present")
+
+    # Disable GNOME auto-suspend if desktop is installed
+    if shutil.which("gsettings"):
+        for key, value in [
+            ("sleep-inactive-ac-type", "nothing"),
+            ("sleep-inactive-ac-timeout", "0"),
+            ("sleep-inactive-battery-type", "nothing"),
+            ("sleep-inactive-battery-timeout", "0"),
+        ]:
+            run(
+                f'su - {user} -c "gsettings set '
+                f'org.gnome.settings-daemon.plugins.power {key} {value}"',
+                check=False,
+            )
+
+    # Verify
+    result = run_quiet("systemctl is-enabled suspend.target", check=False)
+    if "masked" in result.stdout:
+        log.info("  ✓ Sleep targets are masked — always-on mode active")
+    else:
+        log.warning("  Sleep targets may not be fully masked — check manually")
+
+
 @stage("gtt_memory", "Configure kernel parameters for GPU memory", requires_reboot=True)
 def stage_gtt_memory(user: str) -> None:
     # Check if already configured

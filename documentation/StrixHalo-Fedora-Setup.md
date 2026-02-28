@@ -103,6 +103,46 @@ rpm -q linux-firmware
 
 > **⚠️ Do not proceed** if your kernel is older than 6.18.4 or firmware is `linux-firmware-20251125`. Update first: `sudo dnf upgrade linux-firmware kernel --refresh`.
 
+### Step 3a: Disable Sleep/Suspend (Always-On Server)
+
+> **⚠️ Important:** Strix Halo systems left unattended will enter sleep mode (pulsating power LED) and may **not wake via SSH or keyboard**. A hard power-cycle is the only recovery. Disable all sleep states immediately after the first reboot.
+
+```bash
+# Disable all sleep targets so systemd never suspends/hibernates
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+# Disable idle suspend via logind (covers both GUI and headless sessions)
+sudo mkdir -p /etc/systemd/logind.conf.d
+cat <<'EOF' | sudo tee /etc/systemd/logind.conf.d/no-sleep.conf
+[Login]
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+IdleAction=ignore
+IdleActionSec=0
+EOF
+sudo systemctl restart systemd-logind
+
+# If GNOME/Wayland desktop is installed, disable its automatic suspend too
+if command -v gsettings &>/dev/null; then
+  # AC power — disable auto-suspend
+  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
+  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout 0
+  # Battery (unlikely on desktop, but defensive)
+  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing'
+  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-timeout 0
+fi
+```
+
+Verify all sleep targets are masked:
+
+```bash
+systemctl status sleep.target suspend.target hibernate.target
+# All should show "Loaded: masked"
+```
+
 ### Optional: Minisforum MS-S1 MAX BIOS Update from Linux
 
 > **This section only applies if your hardware is a Minisforum MS-S1 MAX.** Skip this if you're using a different Strix Halo system (e.g., Framework Laptop). BIOS updates improve memory stability, NPU/GPU performance, USB4 V2 reliability, and patch AMD PSP security vulnerabilities.
@@ -309,20 +349,21 @@ The script runs through these stages in order:
 | Stage | Name | Reboot? | Description |
 |-------|------|---------|-------------|
 | 1 | `system_packages` | No | Install build tools, development packages |
-| 2 | `gtt_memory` | **Yes** | Configure kernel parameters for GPU memory, regenerate GRUB (reconnect via SSH after reboot) |
-| 3 | `gpu_groups` | **Yes** | Add user to `render`/`video` groups (reconnect via SSH after reboot) |
-| 4 | `vscode` | No | Install VSCode + Python and Copilot extensions |
-| 5 | `toolbox_setup` | No | Install Podman/toolbox, create ROCm toolbox |
-| 6 | `model_directories` | No | Create `$DEEPRED_MODELS/{llm,embedding}`, download models |
-| 7 | `llama_server` | No | Deploy Podman Quadlet services for LLM + embedding servers |
-| 8 | `python_venv` | No | Create venv at `$DEEPRED_VENV`, install PyTorch ROCm + dependencies |
-| 9 | `postgresql` | No | Install, initialize, configure PostgreSQL + wiki database |
-| 10 | `opensearch` | No | Download, configure, deploy OpenSearch as systemd service |
-| 11 | `mcp_server` | No | Deploy MCP server + web GUI systemd service |
-| 12 | `firewall` | No | Configure firewalld rules for all service ports |
-| 13 | `ethernet_fix` | No | Check and apply Realtek r8169 fix if needed |
-| 14 | `llm_swap_helper` | No | Install `/usr/local/bin/llm-swap` helper script |
-| 15 | `verify` | No | Run health checks on all components |
+| 2 | `disable_sleep` | No | Mask sleep/suspend/hibernate targets for always-on operation |
+| 3 | `gtt_memory` | **Yes** | Configure kernel parameters for GPU memory, regenerate GRUB (reconnect via SSH after reboot) |
+| 4 | `gpu_groups` | **Yes** | Add user to `render`/`video` groups (reconnect via SSH after reboot) |
+| 5 | `vscode` | No | Install VSCode + Python and Copilot extensions |
+| 6 | `toolbox_setup` | No | Install Podman/toolbox, create ROCm toolbox |
+| 7 | `model_directories` | No | Create `$DEEPRED_MODELS/{llm,embedding}`, download models |
+| 8 | `llama_server` | No | Deploy Podman Quadlet services for LLM + embedding servers |
+| 9 | `python_venv` | No | Create venv at `$DEEPRED_VENV`, install PyTorch ROCm + dependencies |
+| 10 | `postgresql` | No | Install, initialize, configure PostgreSQL + wiki database |
+| 11 | `opensearch` | No | Download, configure, deploy OpenSearch as systemd service |
+| 12 | `mcp_server` | No | Deploy MCP server + web GUI systemd service |
+| 13 | `firewall` | No | Configure firewalld rules for all service ports |
+| 14 | `ethernet_fix` | No | Check and apply Realtek r8169 fix if needed |
+| 15 | `llm_swap_helper` | No | Install `/usr/local/bin/llm-swap` helper script |
+| 16 | `verify` | No | Run health checks on all components |
 
 ### Script Usage
 
