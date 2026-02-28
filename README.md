@@ -6,7 +6,8 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 
 ## Steps/Instructions
 
-- [How to setup an AMD "Strix Halo" device](documentation/StrixHalo-Ubuntu-Setup.md)
+- [How to setup an AMD "Strix Halo" device (Fedora)](documentation/StrixHalo-Fedora-Setup.md) — includes automated setup script
+- [How to setup an AMD "Strix Halo" device (Ubuntu, legacy)](documentation/StrixHalo-Ubuntu-Setup.md)
 - [How to setup LMStudio as server for "headless" operation](documentation/LMStudio-Setup.md)
 - [How to create a Wikipedia database, enable vector database searches for articles, and provide an MCP server for the data](documentation/WikipediaMCP-Setup.md)
 - [How to extract temporal information from YAGO about Wikipedia articles](documentation/YagoParser-Setup.md)
