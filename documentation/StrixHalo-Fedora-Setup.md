@@ -335,25 +335,60 @@ sudo mkdir -p /mnt/data
 grep -q 'LABEL=data' /etc/fstab || \
   echo 'LABEL=data /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab
 
+sudo systemctl daemon-reload   # reload fstab changes into systemd
 sudo mount -a
 sudo chown -R $USER:$USER /mnt/data
 ```
 
-### Step 6: Clone This Repository
+### Step 6: Set Up GitHub SSH Access
+
+GitHub no longer supports password authentication for git operations. Set up SSH key authentication:
+
+```bash
+# Generate an SSH key (press Enter to accept defaults, no passphrase needed for a server)
+ssh-keygen -t ed25519 -C "your-email@example.com"
+
+# Start the SSH agent and add the key
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_ed25519
+
+# Display the public key — copy this to GitHub
+cat ~/.ssh/id_ed25519.pub
+```
+
+Add the key to your GitHub account:
+1. On GitHub, click your **profile picture** → **Settings**
+2. In the **Access** section of the sidebar, click **SSH and GPG keys**
+3. Click **New SSH key**, paste the public key, and save
+
+> For detailed steps with screenshots, see [Adding a new SSH key to your GitHub account](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account).
+
+Verify the connection:
+```bash
+ssh -T git@github.com
+# Should print: "Hi <username>! You've successfully authenticated..."
+```
+
+### Step 7: Clone This Repository
 
 ```bash
 sudo dnf install -y git python3 python3-pip
 
-# Clone (or update existing repo)
+# Clone via SSH (or update existing repo)
 if [ -d /mnt/data/DeepRedAI/.git ]; then
   git -C /mnt/data/DeepRedAI pull
 else
-  git clone https://github.com/aschiffler/DeepRedAI.git /mnt/data/DeepRedAI
+  git clone git@github.com:ferzkopp/DeepRedAI.git /mnt/data/DeepRedAI
 fi
 cd /mnt/data/DeepRedAI
 ```
 
-### Step 7: Configure DeepRedAI Environment
+> **Migrating an existing clone from HTTPS to SSH?** If you already have a clone that used the HTTPS URL:
+> ```bash
+> git -C /mnt/data/DeepRedAI remote set-url origin git@github.com:ferzkopp/DeepRedAI.git
+> ```
+
+### Step 8: Configure DeepRedAI Environment
 
 The repository includes `deepred-env.sh` — a shell script that exports all path and service variables used by every DeepRedAI script. Source it once to enter **development mode**:
 
@@ -364,12 +399,30 @@ source /mnt/data/DeepRedAI/deepred-env.sh
 To load it automatically on every login, add the following to `~/.bashrc`:
 
 ```bash
+# Install an editor if you don't have one (nano is pre-installed, joe is an alternative)
+sudo dnf install -y joe
+
+# Edit ~/.bashrc and append the lines below
+joe ~/.bashrc
+```
 # ── DeepRedAI environment (adjust DEEPRED_ROOT if your data disk is not /mnt/data)
 export DEEPRED_ROOT="/mnt/data"
 [ -f "$DEEPRED_ROOT/DeepRedAI/deepred-env.sh" ] && source "$DEEPRED_ROOT/DeepRedAI/deepred-env.sh"
 ```
 
+Verify the environment loads on login:
+
+```bash
+# Log out and back in (or reconnect SSH)
+exit
+# Then reconnect:
+ssh your-user@MiniAI
+# The env script prints all variables on load — confirm they appear
+```
+
 #### What gets set
+
+These path variables are printed on load:
 
 | Variable | Default | Purpose |
 |----------|---------|--------|
@@ -379,6 +432,11 @@ export DEEPRED_ROOT="/mnt/data"
 | `GUTENBERG_DATA` | `$DEEPRED_ROOT/gutenberg` | Project Gutenberg data |
 | `DEEPRED_MODELS` | `$DEEPRED_ROOT/models` | LLM and embedding model files |
 | `DEEPRED_VENV` | `$DEEPRED_ROOT/venv` | Python virtual environment |
+
+These service-endpoint variables are also exported (but not printed):
+
+| Variable | Default | Purpose |
+|----------|---------|--------|
 | `LMSTUDIO_HOST` | `localhost` | LLM server host |
 | `LMSTUDIO_PORT` | `1234` | LLM server port |
 | `EMBEDDING_PORT` | `1235` | Embedding server port |
@@ -390,7 +448,7 @@ To change file locations, either:
 - **Override individual paths:** `export WIKI_DATA="/other/path/wikipedia"` before sourcing
 - **Edit `deepred-env.sh` directly** (not recommended — will conflict with git updates)
 
-The env file also activates the Python venv (if present) and adds `scripts/` to `$PATH`.
+The env file also adds `scripts/` to `$PATH`.
 
 ---
 
@@ -453,6 +511,16 @@ Stage progress is tracked in `$DEEPRED_REPO/.setup_state.json`. After a reboot s
 ---
 
 ## Post-Setup
+
+### VSCode + GitHub Copilot Authentication
+
+The setup script installs VSCode and the Copilot extensions, but you still need to sign in:
+
+1. **Open VSCode** on the Strix Halo machine (via the desktop, or remotely with `code --tunnel`)
+2. **Sign in to GitHub Copilot**: Click the Copilot icon in the sidebar → **Sign in to GitHub** → follow the device-code flow (opens a browser URL where you enter a one-time code)
+3. **Git credentials in VSCode**: If you set up SSH keys in Step 6, VSCode will use them automatically for any `git@github.com:` remote. No additional credential setup is needed.
+
+> **Headless / SSH-only?** Use [VSCode Remote Tunnels](https://code.visualstudio.com/docs/remote/tunnels): run `code tunnel` on the Strix Halo, then connect from VSCode on your local machine. Copilot authentication happens on the local side.
 
 ### Service Overview
 

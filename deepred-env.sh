@@ -39,12 +39,6 @@ export PG_PORT="${PG_PORT:-5432}"
 export OS_HOST="${OS_HOST:-localhost}"
 export OS_PORT="${OS_PORT:-9200}"
 
-# ── Convenience: activate the Python venv ────────────────────────────────
-if [ -f "$DEEPRED_VENV/bin/activate" ]; then
-    # shellcheck disable=SC1091
-    source "$DEEPRED_VENV/bin/activate"
-fi
-
 # ── Convenience: add scripts to PATH ────────────────────────────────────
 case ":$PATH:" in
     *":$DEEPRED_REPO/scripts:"*) ;;   # already present
