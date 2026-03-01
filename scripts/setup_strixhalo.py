@@ -416,47 +416,60 @@ def stage_toolbox_setup(user: str) -> None:
     # Ensure toolbox/podman installed
     run("dnf install -y toolbox podman")
 
-    # Check if toolbox already exists (check both toolbox and podman views)
-    result = run_quiet("toolbox list --containers", check=False)
-    if ROCM_TOOLBOX_NAME in result.stdout:
-        log.info("  Toolbox '%s' already exists", ROCM_TOOLBOX_NAME)
-        return
-
-    # Clean up any stale container from a previous failed attempt.
-    # toolbox list may not show it, but podman might still have it.
-    stale = run_quiet(
+    # Check if container already exists (via podman — authoritative source)
+    exists = run_quiet(
         f'su - {user} -c "podman container exists {ROCM_TOOLBOX_NAME}"',
         check=False,
     )
-    if stale.returncode == 0:
-        log.info("  Removing stale container '%s' from previous attempt...", ROCM_TOOLBOX_NAME)
-        run(f'su - {user} -c "podman rm -f {ROCM_TOOLBOX_NAME}"')
+    if exists.returncode == 0:
+        log.info("  Container '%s' already exists", ROCM_TOOLBOX_NAME)
+        return
 
-    # Pull the image as the non-root user so it lands in their podman
-    # storage — otherwise toolbox create won't find it and will prompt
-    # "Download …? [y/N]" interactively.
+    # Ensure rootless podman requirements (subuid/subgid)
+    for db in ["/etc/subuid", "/etc/subgid"]:
+        content = Path(db).read_text() if Path(db).exists() else ""
+        if user not in content:
+            log.info("  Adding %s to %s for rootless podman", user, db)
+            run(f'usermod --add-subuids 100000-165535 --add-subgids 100000-165535 {user}')
+            break
+
+    # Pull the image as the non-root user so it lands in their podman storage.
     log.info("  Pulling %s as %s (this may take a while)...", ROCM_TOOLBOX_IMAGE, user)
     run(f'su - {user} -c "podman pull {ROCM_TOOLBOX_IMAGE}"')
 
-    # Create toolbox as non-root user.
-    # --assumeyes auto-accepts any remaining prompts (non-Fedora image).
-    # Note: toolbox automatically binds /dev/dri and /dev/kfd, inherits
-    # host group memberships (video/render), and runs with relaxed
-    # security — no need to pass extra podman flags via --.
+    # Create the container directly with podman instead of toolbox.
+    # toolbox create often fails on third-party (non-Fedora) images due to
+    # missing toolbox-specific labels. podman create gives the same result
+    # with explicit control over bind mounts and device access.
+    log.info("  Creating container '%s' via podman...", ROCM_TOOLBOX_NAME)
     result = run(
         f'su - {user} -c "'
-        f"toolbox create --assumeyes {ROCM_TOOLBOX_NAME} "
-        f'--image {ROCM_TOOLBOX_IMAGE}"',
+        f"podman create"
+        f" --name {ROCM_TOOLBOX_NAME}"
+        f" --hostname toolbox"
+        f" --privileged"
+        f" --security-opt label=disable"
+        f" --device /dev/dri"
+        f" --device /dev/kfd"
+        f" --group-add video"
+        f" --group-add render"
+        f" --userns=keep-id"
+        f" --pid=host"
+        f" --network=host"
+        f" --volume /mnt/data:/mnt/data:rslave"
+        f" --volume /run/user/$(id -u):/run/user/$(id -u):rslave"
+        f" {ROCM_TOOLBOX_IMAGE}"
+        f" sleep infinity"
+        f'"',
         check=False,
         capture=True,
     )
     if result.returncode != 0:
-        log.error("  toolbox create stdout: %s", result.stdout.strip() if result.stdout else "(empty)")
-        log.error("  toolbox create stderr: %s", result.stderr.strip() if result.stderr else "(empty)")
+        log.error("  podman create stdout:\n%s", result.stdout.strip() if result.stdout else "(empty)")
+        log.error("  podman create stderr:\n%s", result.stderr.strip() if result.stderr else "(empty)")
         raise RuntimeError(
-            f"toolbox create failed (exit {result.returncode}). "
-            f"Try manually: su - {user} -c 'toolbox create --assumeyes {ROCM_TOOLBOX_NAME} "
-            f"--image {ROCM_TOOLBOX_IMAGE}'"
+            f"podman create failed (exit {result.returncode}). "
+            f"See output above for details."
         )
     log.info("  Toolbox '%s' created successfully", ROCM_TOOLBOX_NAME)
 
@@ -1073,7 +1086,7 @@ def main() -> None:
     log.info("")
     log.info("Next steps:")
     log.info("  1. Load environment:   source %s/deepred-env.sh", REPO_DIR)
-    log.info("  2. Enter the toolbox:  toolbox enter %s", ROCM_TOOLBOX_NAME)
+    log.info("  2. Enter the toolbox:  podman start %s && podman exec -it %s bash", ROCM_TOOLBOX_NAME, ROCM_TOOLBOX_NAME)
     log.info("  3. See documentation:  %s/documentation/", REPO_DIR)
 
 

@@ -564,10 +564,11 @@ llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m.gguf
 ### Working Inside the Toolbox
 
 ```bash
-# Enter the ROCm toolbox for interactive AI work
-toolbox enter llama-rocm-7.2
+# Start and enter the ROCm container for interactive AI work
+podman start llama-rocm-7.2
+podman exec -it llama-rocm-7.2 bash
 
-# Activate DeepRedAI environment inside the toolbox
+# Activate DeepRedAI environment inside the container
 source $DEEPRED_REPO/deepred-env.sh
 ```
 
