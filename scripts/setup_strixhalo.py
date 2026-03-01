@@ -166,15 +166,20 @@ def detect_user() -> str:
 
 def needs_reboot(message: str) -> None:
     """Print reboot message and exit."""
+    rerun_cmd = f"sudo -E python3 {REPO_DIR}/scripts/setup_strixhalo.py"
+    # Box width = inner content width + 4 (for "║  " and " ║")
+    inner_w = max(58, len(rerun_cmd) + 2, len(message) + 2)
+    W = inner_w + 4  # total between ╔ and ╗
     log.info("")
-    log.info("╔══════════════════════════════════════════════════════════════╗")
-    log.info("║  REBOOT REQUIRED                                           ║")
-    log.info("║  %s", f"{message:<57}║")
-    log.info("║                                                            ║")
-    log.info("║  After reboot, re-run this script to continue:             ║")
-    log.info("║  sudo -E python3 %s/scripts/setup_strixhalo.py  ║", REPO_DIR)
-    log.info("║                                                            ║")
-    log.info("╚══════════════════════════════════════════════════════════════╝")
+    log.info("╔" + "═" * W + "╗")
+    log.info("║  " + f"{'REBOOT REQUIRED':<{inner_w}}" + " ║")
+    log.info("║  " + f"{message:<{inner_w}}" + " ║")
+    log.info("║" + " " * (W) + "║")
+    log.info("║  " + f"{'After reboot, re-run this script to continue:':<{inner_w}}" + " ║")
+    log.info("║  " + f"{rerun_cmd:<{inner_w}}" + " ║")
+    log.info("║" + " " * (W) + "║")
+    log.info("║  " + f"{'sudo reboot':<{inner_w}}" + " ║")
+    log.info("╚" + "═" * W + "╝")
     sys.exit(0)
 
 
@@ -312,8 +317,9 @@ def stage_disable_sleep(user: str) -> None:
             ("sleep-inactive-battery-type", "nothing"),
             ("sleep-inactive-battery-timeout", "0"),
         ]:
+            # Suppress dconf D-Bus warnings when running headless (no X11)
             run(
-                f'su - {user} -c "gsettings set '
+                f'su - {user} -c "DBUS_SESSION_BUS_ADDRESS= gsettings set '
                 f'org.gnome.settings-daemon.plugins.power {key} {value}"',
                 check=False,
             )
