@@ -460,7 +460,7 @@ def stage_toolbox_setup(user: str) -> None:
 
     # Ensure rootless podman requirements (subuid/subgid)
     for db in ["/etc/subuid", "/etc/subgid"]:
-        content = Path(db).read_text() if Path(db).exists() else ""
+        content = pathlib.Path(db).read_text() if pathlib.Path(db).exists() else ""
         if user not in content:
             log.info("  Adding %s to %s for rootless podman", user, db)
             run(f'usermod --add-subuids 100000-165535 --add-subgids 100000-165535 {user}')
