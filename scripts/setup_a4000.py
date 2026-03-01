@@ -657,6 +657,15 @@ def stage_llama_server(user: str) -> None:
 
     run("systemctl daemon-reload")
 
+    # Stop running containers first so the new Quadlet config takes effect.
+    # 'systemctl start' is a no-op if the service is already active, so we
+    # must stop + remove the old container to guarantee a fresh start with
+    # the updated arguments.
+    for svc in ["llama-server-llm", "llama-server-embed"]:
+        container = svc  # container name matches service name
+        run_quiet(f"systemctl stop {svc}", check=False)
+        run_quiet(f"podman rm -f {container}", check=False)
+
     # Start services and report errors instead of silently swallowing them
     for svc in ["llama-server-llm", "llama-server-embed"]:
         result = run_quiet(f"systemctl start {svc}", check=False)

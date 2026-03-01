@@ -683,7 +683,11 @@ def stage_llama_server(user: str) -> None:
     run("systemctl daemon-reload")
     # Quadlet-generated units are auto-enabled via WantedBy= in the .container
     # file — systemctl enable fails with "Unit is transient or generated".
-    # Use 'start' to bring them up now; they'll auto-start on next boot.
+    # Stop + remove old containers first so the new Quadlet config takes effect.
+    # 'systemctl start' is a no-op if the service is already active.
+    for svc in ["llama-server-llm", "llama-server-embed"]:
+        run(f"systemctl stop {svc}", check=False)
+        run(f"podman rm -f {svc}", check=False)
     run("systemctl start llama-server-llm", check=False)
     run("systemctl start llama-server-embed", check=False)
 

@@ -248,7 +248,14 @@ python3 scripts/process_and_index.py --status
 python3 scripts/process_and_index.py --reset
 ```
 
-**Performance:** Processing ~7 million articles takes approximately 65 hours on Strix Halo. Embedding generation is the bottleneck (~30 articles/sec). The script sends concurrent requests to utilize all parallel server slots.
+**Performance:** Embedding generation is the bottleneck. The script sends concurrent requests to utilize all parallel server slots.
+
+| Configuration | Throughput | Duration (~7M articles) |
+|---------------|-----------|------------------------|
+| Strix Halo only (local embedding) | ~30 articles/sec | ~65 hours |
+| Strix Halo + remote A4000 (dual-endpoint) | ~75–80 articles/sec | ~25 hours |
+
+When `REMOTE_HOST` is set and reachable, batches are distributed round-robin across local and remote embedding servers.
 
 > **Tip:** The embedding server container config is at `/etc/containers/systemd/llama-server-embed.container`. Key tuning parameters:
 > - `--batch-size 32768` — logical batch size (must hold all tokens in a single API request: 16 texts × up to 2048 tokens)
