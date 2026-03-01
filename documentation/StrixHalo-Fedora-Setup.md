@@ -183,10 +183,9 @@ sudo umount /dev/sdX* 2>/dev/null || true
 # Remove ALL filesystem signatures (ISO9660, FAT, GPT, MBR, etc.)
 sudo wipefs -a /dev/sdX
 
-# Zero out the first and last 1 MB to destroy any residual boot sectors,
-# GPT backup headers, and ISO9660 primary volume descriptors
+# Zero out the first 1 MB to destroy any residual boot sectors
+# and ISO9660 primary volume descriptors
 sudo dd if=/dev/zero of=/dev/sdX bs=1M count=1 status=none
-sudo dd if=/dev/zero of=/dev/sdX bs=1M seek=$(($(blockdev --getsz /dev/sdX) / 2048 - 1)) count=1 status=none
 
 # Force kernel to re-read the (now empty) partition table
 sudo partprobe /dev/sdX
@@ -252,10 +251,10 @@ After the first boot completes:
 ### BIOS Configuration (After Install or BIOS Update)
 
 Enter BIOS and look for:
-- **UMA Frame Buffer Size** → Set to maximum (e.g., 96 GB or "Auto" with large allocation)
-- **VRAM Size** or **iGPU Memory** → Maximize
+- **UMA Frame Buffer Size** → Set to **minimum** (e.g., 1 GB on MS-S1 MAX)
+- **VRAM Size** or **iGPU Memory** → Leave at minimum / default
 
-> **Note:** BIOS options vary by vendor. Some Strix Halo systems (e.g., Framework Laptop) expose this; others don't — the setup script will use kernel parameters as a fallback. If you just performed a BIOS update, all settings will have been reset to defaults — this is the time to reconfigure them.
+> **Why minimum?** The UMA Frame Buffer (GART) is a **fixed** memory reservation that is never available to the OS. On Linux, GPU memory is allocated dynamically via GTT (Graphics Translation Table) using kernel parameters — the setup script configures `amdgpu.gttsize` and `ttm.pages_limit` to allow the iGPU to access up to ~124 GB on demand while keeping the memory available to the CPU when idle. Setting UMA to maximum (e.g., 96 GB) would wastefully lock that memory away from the system. The [Strix Halo Toolboxes project](https://strix-halo-toolboxes.com/#config) tests with only 512 MB BIOS allocation and the [strixhalo.wiki](https://strixhalo.wiki/AI/AI_Capabilities_Overview) explicitly recommends: *"set GART to the minimum (eg, 512MB) and then allocating automatically via GTT."*
 
 ### Step 4: Data Disk Setup
 

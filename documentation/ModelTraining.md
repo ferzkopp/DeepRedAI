@@ -401,8 +401,8 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 
 | Step | Task | Duration (est.) | Notes |
 |------|------|-----------------|-------|
-| 0.1 | Install Fedora (latest, kernel 6.12+) on Strix Halo | 1–2 hours | Fedora has strong AMD support out of the box |
-| 0.2 | Configure GTT memory allocation (maximize GPU-accessible RAM) | 1 hour | BIOS or kernel parameter; target 96–112 GB for GPU |
+| 0.1 | Install Fedora (latest, kernel 6.18.4+) on Strix Halo | 1–2 hours | Fedora has strong AMD support out of the box |
+| 0.2 | Configure GTT memory allocation (maximize GPU-accessible RAM) | 1 hour | Set BIOS UMA to minimum; kernel params allocate up to 124 GB dynamically |
 | 0.3 | Install [Strix Halo Toolboxes](https://strix-halo-toolboxes.com/) | 1–2 hours | Provides ROCm, PyTorch, llama.cpp in containers |
 | 0.4 | Install and configure PostgreSQL (for Wikipedia DB) | 1–2 hours | Can run in a toolbox container or as system service |
 | 0.5 | Install and configure OpenSearch (for semantic search) | 1–2 hours | Needed for Wikipedia MCP server and year topics |
