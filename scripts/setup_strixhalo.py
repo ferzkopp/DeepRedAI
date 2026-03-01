@@ -422,18 +422,21 @@ def stage_toolbox_setup(user: str) -> None:
         log.info("  Toolbox '%s' already exists", ROCM_TOOLBOX_NAME)
         return
 
-    # Pull the image first
-    log.info("  Pulling %s (this may take a while)...", ROCM_TOOLBOX_IMAGE)
-    run(f"podman pull {ROCM_TOOLBOX_IMAGE}")
+    # Pull the image as the non-root user so it lands in their podman
+    # storage — otherwise toolbox create won't find it and will prompt
+    # "Download …? [y/N]" interactively.
+    log.info("  Pulling %s as %s (this may take a while)...", ROCM_TOOLBOX_IMAGE, user)
+    run(f'su - {user} -c "podman pull {ROCM_TOOLBOX_IMAGE}"')
 
-    # Create toolbox as non-root user
+    # Create toolbox as non-root user.
+    # --assumeyes auto-accepts any remaining prompts (non-Fedora image).
+    # Note: toolbox automatically binds /dev/dri and /dev/kfd, inherits
+    # host group memberships (video/render), and runs with relaxed
+    # security — no need to pass extra podman flags via --.
     run(
         f'su - {user} -c "'
-        f"toolbox create {ROCM_TOOLBOX_NAME} "
-        f"--image {ROCM_TOOLBOX_IMAGE} "
-        f"-- --device /dev/dri --device /dev/kfd "
-        f"--group-add video --group-add render --group-add sudo "
-        f'--security-opt seccomp=unconfined"'
+        f"toolbox create --assumeyes {ROCM_TOOLBOX_NAME} "
+        f'--image {ROCM_TOOLBOX_IMAGE}"'
     )
     log.info("  Toolbox '%s' created successfully", ROCM_TOOLBOX_NAME)
 

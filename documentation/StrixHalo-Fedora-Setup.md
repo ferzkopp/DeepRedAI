@@ -461,7 +461,7 @@ source /mnt/data/DeepRedAI/deepred-env.sh   # ensure env vars are loaded
 sudo -E python3 $DEEPRED_REPO/scripts/setup_strixhalo.py
 ```
 
-> **Note:** `sudo -E` preserves the `DEEPRED_*` environment variables for the root session. Alternatively, pass `--user` if the script cannot auto-detect your non-root user.
+Some stages require a reboot (see table below). After rebooting, SSH back in and **run the same command again** — the script tracks progress in `.setup_state.json` and automatically resumes from where it left off.
 
 The script runs through these stages in order:
 
