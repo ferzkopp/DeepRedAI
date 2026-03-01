@@ -317,10 +317,12 @@ def stage_disable_sleep(user: str) -> None:
             ("sleep-inactive-battery-type", "nothing"),
             ("sleep-inactive-battery-timeout", "0"),
         ]:
-            # Suppress dconf D-Bus warnings when running headless (no X11)
+            # Suppress dconf D-Bus warnings when running headless (no X11).
+            # Setting DBUS_SESSION_BUS_ADDRESS to empty triggers a harmless
+            # dconf-WARNING about an empty address — redirect stderr to hide it.
             run(
                 f'su - {user} -c "DBUS_SESSION_BUS_ADDRESS= gsettings set '
-                f'org.gnome.settings-daemon.plugins.power {key} {value}"',
+                f'org.gnome.settings-daemon.plugins.power {key} {value} 2>/dev/null"',
                 check=False,
             )
 
@@ -673,8 +675,11 @@ def stage_llama_server(user: str) -> None:
     )
 
     run("systemctl daemon-reload")
-    run("systemctl enable --now llama-server-llm", check=False)
-    run("systemctl enable --now llama-server-embed", check=False)
+    # Quadlet-generated units are auto-enabled via WantedBy= in the .container
+    # file — systemctl enable fails with "Unit is transient or generated".
+    # Use 'start' to bring them up now; they'll auto-start on next boot.
+    run("systemctl start llama-server-llm", check=False)
+    run("systemctl start llama-server-embed", check=False)
 
 
 @stage("python_venv", "Create Python venv with PyTorch ROCm and project dependencies")
@@ -690,6 +695,9 @@ def stage_python_venv(user: str) -> None:
         log.info("  Venv already exists at %s", VENV_DIR)
 
     pip = f"{VENV_DIR}/bin/pip"
+
+    # Upgrade pip to latest (suppresses "new release available" notices)
+    run(f'su - {user} -c "{pip} install --upgrade pip"')
 
     # Install PyTorch with ROCm
     log.info("  Installing PyTorch ROCm...")
@@ -1024,19 +1032,37 @@ def stage_llm_swap_helper(user: str) -> None:
 @stage("verify", "Run health checks on all components", requires_reboot=True)
 def stage_verify(user: str) -> None:
     # ── Pass/fail checks ──
+    # OpenSearch can take 10-30s to become ready after a restart or first start.
+    # Wait for it before running the health-check matrix.
+    log.info("  Waiting for OpenSearch to become ready (up to 60s)...")
+    os_ready = False
+    for _ in range(12):
+        r = run_quiet("curl -sf http://localhost:9200 -o /dev/null", check=False)
+        if r.returncode == 0:
+            os_ready = True
+            break
+        time.sleep(5)
+    if os_ready:
+        log.info("  OpenSearch is ready")
+    else:
+        log.warning("  OpenSearch did not become ready within 60s")
+
     checks = [
         ("Kernel ≥ 6.18.4", "uname -r"),
         ("Firmware (not 20251125)", "rpm -q linux-firmware"),
         ("GPU groups", f"id -nG {user}"),
         ("GPU device nodes", "ls /dev/kfd /dev/dri/render* 2>/dev/null"),
         ("Podman", "podman --version"),
-        ("Toolbox container", f'su - {user} -c "podman container exists {ROCM_TOOLBOX_NAME}" && echo "{ROCM_TOOLBOX_NAME}" || echo MISSING'),
+        # Use -s /bin/sh to avoid login-shell sourcing ~/.bashrc (which prints
+        # deepred-env.sh banner text that contaminates the check output).
+        ("Toolbox container", f'su - {user} -s /bin/sh -c "podman container exists {ROCM_TOOLBOX_NAME}" && echo "{ROCM_TOOLBOX_NAME}" || echo MISSING'),
         ("PostgreSQL", "pg_isready"),
         ("OpenSearch", "curl -sf http://localhost:9200 -o /dev/null && echo OK || echo DOWN"),
         ("LLM server", "curl -sf http://localhost:1234/v1/models -o /dev/null && echo OK || echo DOWN"),
         ("Embedding server", "curl -sf http://localhost:1235/v1/models -o /dev/null && echo OK || echo DOWN"),
         ("MCP server", "curl -sf http://localhost:7000/health -o /dev/null && echo OK || echo DOWN"),
-        ("VSCode", f'su - {user} -c "code --version 2>/dev/null | head -1" || echo "not found"'),
+        ("llm-swap helper", 'test -x /usr/local/bin/llm-swap && echo "installed" || echo "MISSING"'),
+        ("VSCode", f'su - {user} -s /bin/sh -c "code --version 2>/dev/null | head -1" || echo "not found"'),
     ]
 
     log.info("")
