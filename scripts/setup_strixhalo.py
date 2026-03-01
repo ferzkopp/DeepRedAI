@@ -416,11 +416,21 @@ def stage_toolbox_setup(user: str) -> None:
     # Ensure toolbox/podman installed
     run("dnf install -y toolbox podman")
 
-    # Check if toolbox already exists
+    # Check if toolbox already exists (check both toolbox and podman views)
     result = run_quiet("toolbox list --containers", check=False)
     if ROCM_TOOLBOX_NAME in result.stdout:
         log.info("  Toolbox '%s' already exists", ROCM_TOOLBOX_NAME)
         return
+
+    # Clean up any stale container from a previous failed attempt.
+    # toolbox list may not show it, but podman might still have it.
+    stale = run_quiet(
+        f'su - {user} -c "podman container exists {ROCM_TOOLBOX_NAME}"',
+        check=False,
+    )
+    if stale.returncode == 0:
+        log.info("  Removing stale container '%s' from previous attempt...", ROCM_TOOLBOX_NAME)
+        run(f'su - {user} -c "podman rm -f {ROCM_TOOLBOX_NAME}"')
 
     # Pull the image as the non-root user so it lands in their podman
     # storage — otherwise toolbox create won't find it and will prompt
@@ -433,11 +443,21 @@ def stage_toolbox_setup(user: str) -> None:
     # Note: toolbox automatically binds /dev/dri and /dev/kfd, inherits
     # host group memberships (video/render), and runs with relaxed
     # security — no need to pass extra podman flags via --.
-    run(
+    result = run(
         f'su - {user} -c "'
         f"toolbox create --assumeyes {ROCM_TOOLBOX_NAME} "
-        f'--image {ROCM_TOOLBOX_IMAGE}"'
+        f'--image {ROCM_TOOLBOX_IMAGE}"',
+        check=False,
+        capture=True,
     )
+    if result.returncode != 0:
+        log.error("  toolbox create stdout: %s", result.stdout.strip() if result.stdout else "(empty)")
+        log.error("  toolbox create stderr: %s", result.stderr.strip() if result.stderr else "(empty)")
+        raise RuntimeError(
+            f"toolbox create failed (exit {result.returncode}). "
+            f"Try manually: su - {user} -c 'toolbox create --assumeyes {ROCM_TOOLBOX_NAME} "
+            f"--image {ROCM_TOOLBOX_IMAGE}'"
+        )
     log.info("  Toolbox '%s' created successfully", ROCM_TOOLBOX_NAME)
 
 

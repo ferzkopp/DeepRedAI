@@ -84,3 +84,4 @@ Thumbs.db
 *.log
 llama.cpp/
 output/
+.setup_state.json
