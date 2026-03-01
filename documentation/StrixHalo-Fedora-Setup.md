@@ -78,10 +78,30 @@ ss -tlnp | grep :22
 
 > **From this point on**, you can disconnect KVM and work entirely via SSH:
 > ```bash
-> ssh your-user@strixhalo 
+> ssh your-user@fedora
 > ```
 
-### Step 3: System Update
+### Step 3: Rename the PC
+
+Fedora defaults the hostname to `fedora`. Rename it to `MiniAI`:
+
+```bash
+sudo hostnamectl set-hostname MiniAI
+```
+
+Verify the change:
+
+```bash
+hostnamectl
+```
+
+The new hostname takes effect immediately for `hostnamectl` and DNS, but your shell prompt will update after a new login. From now on you can SSH in with:
+
+```bash
+ssh your-user@MiniAI
+```
+
+### Step 4: System Update
 
 ```bash
 # Update system (critical: ensures kernel 6.18.4+ and firmware 20260110+)
@@ -103,7 +123,7 @@ rpm -q linux-firmware
 
 > **⚠️ Do not proceed** if your kernel is older than 6.18.4 or firmware is `linux-firmware-20251125`. Update first: `sudo dnf upgrade linux-firmware kernel --refresh`.
 
-### Step 3a: Disable Sleep/Suspend (Always-On Server)
+### Step 4a: Disable Sleep/Suspend (Always-On Server)
 
 > **⚠️ Important:** Strix Halo systems left unattended will enter sleep mode (pulsating power LED) and may **not wake via SSH or keyboard**. A hard power-cycle is the only recovery. Disable all sleep states immediately after the first reboot.
 
@@ -124,6 +144,10 @@ IdleAction=ignore
 IdleActionSec=0
 EOF
 sudo systemctl restart systemd-logind
+# ⚠️ The restart above will terminate all active desktop sessions (GNOME/Wayland/X11).
+# Expect to be logged out — your screen will reset and you'll need to re-login.
+# This is normal: systemd-logind manages login sessions, and restarting it
+# invalidates them. SSH sessions are also dropped — just reconnect.
 
 # If GNOME/Wayland desktop is installed, disable its automatic suspend too
 if command -v gsettings &>/dev/null; then
@@ -256,7 +280,7 @@ Enter BIOS and look for:
 
 > **Why minimum?** The UMA Frame Buffer (GART) is a **fixed** memory reservation that is never available to the OS. On Linux, GPU memory is allocated dynamically via GTT (Graphics Translation Table) using kernel parameters — the setup script configures `amdgpu.gttsize` and `ttm.pages_limit` to allow the iGPU to access up to ~124 GB on demand while keeping the memory available to the CPU when idle. Setting UMA to maximum (e.g., 96 GB) would wastefully lock that memory away from the system. The [Strix Halo Toolboxes project](https://strix-halo-toolboxes.com/#config) tests with only 512 MB BIOS allocation and the [strixhalo.wiki](https://strixhalo.wiki/AI/AI_Capabilities_Overview) explicitly recommends: *"set GART to the minimum (eg, 512MB) and then allocating automatically via GTT."*
 
-### Step 4: Data Disk Setup
+### Step 5: Data Disk Setup
 
 Identify the **4 TB data disk** first:
 
@@ -274,23 +298,28 @@ If the data disk already contains data from a previous installation (models, Wik
 ```bash
 sudo mkdir -p /mnt/data
 
-# Identify filesystem type and UUID
-sudo blkid /dev/nvme1n1
-# Note the TYPE= (ext4/xfs/btrfs) and UUID= from the output above
+# List partitions on the data disk to find the right one
+lsblk -f /dev/nvme1n1
+# Look for the partition with your data (typically /dev/nvme1n1p1)
+# ⚠️ Don't run blkid on the raw disk (/dev/nvme1n1) — that only shows
+#    partition table info (PTUUID/PTTYPE), not the filesystem UUID/TYPE.
+
+# Identify filesystem type and UUID from the PARTITION
+sudo blkid /dev/nvme1n1p1
+# Note the TYPE= (ext4/xfs/btrfs) and UUID= from the output
 
 # Add to fstab using UUID and detected type (skip if already present)
-# Replace <UUID> and <type> with your actual values
+# Replace <UUID> and <type> with your actual values from blkid
 grep -q '<UUID>' /etc/fstab || \
   echo 'UUID=<UUID> /mnt/data <type> defaults 0 2' | sudo tee -a /etc/fstab
 
+sudo systemctl daemon-reload   # reload fstab changes into systemd
 sudo mount -a
 ls /mnt/data
 
-# Fix ownership for project directory only (preserves service data)
-sudo chown -R $USER:$USER /mnt/data/DeepRedAI
+# Fix ownership so your user can write to the data disk
+sudo chown -R $USER:$USER /mnt/data
 ```
-
-> **Note:** If the previous Ubuntu install used a different mount point (e.g., `/data` or `/home/user/data`), set `DEEPRED_ROOT` to that path in Step 6 below. All scripts and services will pick it up automatically.
 
 #### Option B: New Data Disk (Fresh Format)
 
@@ -310,7 +339,7 @@ sudo mount -a
 sudo chown -R $USER:$USER /mnt/data
 ```
 
-### Step 5: Clone This Repository
+### Step 6: Clone This Repository
 
 ```bash
 sudo dnf install -y git python3 python3-pip
@@ -324,7 +353,7 @@ fi
 cd /mnt/data/DeepRedAI
 ```
 
-### Step 6: Configure DeepRedAI Environment
+### Step 7: Configure DeepRedAI Environment
 
 The repository includes `deepred-env.sh` — a shell script that exports all path and service variables used by every DeepRedAI script. Source it once to enter **development mode**:
 
