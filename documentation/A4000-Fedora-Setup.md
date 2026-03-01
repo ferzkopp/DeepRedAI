@@ -264,7 +264,7 @@ Some stages require a reboot. After rebooting, SSH back in and **run the same co
 | 6 | `toolbox_setup` | No | Create CUDA toolbox container with llama.cpp |
 | 7 | `model_directories` | No | Create model directories and download LLM + embedding models |
 | 8 | `llama_server` | No | Deploy Podman Quadlet services for LLM + embedding servers |
-| 9 | `python_venv` | No | Create Python venv with PyTorch CUDA + utilities |
+| 9 | `python_venv` | No | Create Python venv with utility packages (no PyTorch — inference runs in containers) |
 | 10 | `firewall` | No | Configure firewalld rules for service ports |
 | 11 | `llm_swap_helper` | No | Install `/usr/local/bin/llm-swap` helper script |
 | 12 | `verify` | **Yes** | Run health checks on all components (reboot to confirm boot persistence) |

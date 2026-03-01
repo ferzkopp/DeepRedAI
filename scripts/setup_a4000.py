@@ -646,7 +646,7 @@ def stage_llama_server(user: str) -> None:
     run("systemctl start llama-server-embed", check=False)
 
 
-@stage("python_venv", "Create Python venv with PyTorch CUDA and utilities")
+@stage("python_venv", "Create Python venv with utility packages")
 def stage_python_venv(user: str) -> None:
     run("dnf install -y python3-devel python3-pip python3-setuptools")
 
@@ -662,12 +662,12 @@ def stage_python_venv(user: str) -> None:
     # Upgrade pip
     run(f'su - {user} -c "{pip} install --upgrade pip"')
 
-    # Install PyTorch with CUDA
-    log.info("  Installing PyTorch CUDA...")
-    run(f'su - {user} -c "{pip} install torch torchvision torchaudio '
-        f'--index-url https://download.pytorch.org/whl/cu124"')
-
-    # Utility dependencies (lighter than StrixHalo — no training libs needed)
+    # Utility packages only — no PyTorch needed on this inference-only system.
+    # LLM/embedding inference runs inside CUDA containers (llama.cpp).
+    # PyTorch wheels are also unavailable for Python 3.14 (Fedora 43) as of
+    # March 2026.  If PyTorch becomes necessary later, either:
+    #   - Wait for upstream 3.14 wheels, or
+    #   - Install python3.13 and create the venv with it.
     log.info("  Installing utility packages...")
     run(f'su - {user} -c "{pip} install requests openai huggingface_hub '
         f'numpy tqdm sentencepiece tiktoken"')
