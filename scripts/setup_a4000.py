@@ -480,6 +480,8 @@ def stage_toolbox_setup(user: str) -> None:
     run(f"chmod 0700 {runtime_dir}")
 
     log.info("  Creating container '%s' via podman...", CUDA_TOOLBOX_NAME)
+    # The 'full' image entrypoint is /app/tools.sh — override it so the
+    # container stays alive for interactive exec sessions.
     result = run(
         f'su - {user} -c "'
         f"podman create"
@@ -487,13 +489,13 @@ def stage_toolbox_setup(user: str) -> None:
         f" --hostname toolbox"
         f" --device nvidia.com/gpu=all"
         f" --security-opt label=disable"
+        f" --entrypoint '[\"sleep\", \"infinity\"]'"
         f" --userns=keep-id"
         f" --pid=host"
         f" --network=host"
         f" --volume {DATA_DIR}:{DATA_DIR}:rslave"
         f" --volume {runtime_dir}:{runtime_dir}:rslave"
         f" {LLAMA_FULL_IMAGE}"
-        f" sleep infinity"
         f'"',
         check=False,
         capture=True,
@@ -571,11 +573,17 @@ def stage_llama_server(user: str) -> None:
     quadlet_dir = pathlib.Path("/etc/containers/systemd")
     quadlet_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pull the server image (Quadlet uses a different, smaller image than the toolbox)
+    # Pull the server image into root's podman storage (system-level Quadlets
+    # run as root, so the image must be in root's storage).
     log.info("  Pulling server image %s...", LLAMA_SERVER_IMAGE)
     run(f"podman pull {LLAMA_SERVER_IMAGE}")
 
-    # LLM Server Quadlet (Port 1234)
+    # The server-cuda image has ENTRYPOINT ["/app/llama-server"] and
+    # ENV LLAMA_ARG_HOST=0.0.0.0, so Exec= provides extra arguments only.
+    # Default listen port inside the container is 8080; we map host ports
+    # to container 8080 via PublishPort.
+
+    # LLM Server Quadlet (host 1234 → container 8080)
     write_file(
         quadlet_dir / "llama-server-llm.container",
         textwrap.dedent(f"""\
@@ -584,11 +592,9 @@ def stage_llama_server(user: str) -> None:
             After=network-online.target
 
             [Container]
+            ContainerName=llama-server-llm
             Image={LLAMA_SERVER_IMAGE}
-            Exec=/llama-server \\
-                --model /models/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \\
-                --host 0.0.0.0 \\
-                --port 1234 \\
+            Exec=--model /models/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \\
                 --n-gpu-layers 999 \\
                 --flash-attn \\
                 --ctx-size 8192 \\
@@ -596,8 +602,8 @@ def stage_llama_server(user: str) -> None:
                 --parallel 2 \\
                 --alias "gpt-oss-20b"
             AddDevice=nvidia.com/gpu=all
-            Volume={MODELS_DIR}:/models:ro,z
-            PublishPort=1234:1234
+            Volume={MODELS_DIR}:/models:ro
+            PublishPort=1234:8080
 
             [Service]
             Restart=on-failure
@@ -608,7 +614,7 @@ def stage_llama_server(user: str) -> None:
         """),
     )
 
-    # Embedding Server Quadlet (Port 1235)
+    # Embedding Server Quadlet (host 1235 → container 8080)
     write_file(
         quadlet_dir / "llama-server-embed.container",
         textwrap.dedent(f"""\
@@ -617,11 +623,9 @@ def stage_llama_server(user: str) -> None:
             After=network-online.target
 
             [Container]
+            ContainerName=llama-server-embed
             Image={LLAMA_SERVER_IMAGE}
-            Exec=/llama-server \\
-                --model /models/embedding/nomic-embed-text-v1.5.f16.gguf \\
-                --host 0.0.0.0 \\
-                --port 1235 \\
+            Exec=--model /models/embedding/nomic-embed-text-v1.5.f16.gguf \\
                 --n-gpu-layers 999 \\
                 --flash-attn \\
                 --ctx-size 2048 \\
@@ -629,8 +633,8 @@ def stage_llama_server(user: str) -> None:
                 --embedding \\
                 --alias "text-embedding-nomic-embed-text-v1.5@f16"
             AddDevice=nvidia.com/gpu=all
-            Volume={MODELS_DIR}:/models:ro,z
-            PublishPort=1235:1235
+            Volume={MODELS_DIR}:/models:ro
+            PublishPort=1235:8080
 
             [Service]
             Restart=on-failure
@@ -641,9 +645,25 @@ def stage_llama_server(user: str) -> None:
         """),
     )
 
+    # Validate Quadlet syntax before starting services
+    log.info("  Validating Quadlet files...")
+    qcheck = run_quiet("/usr/libexec/podman/quadlet --dryrun 2>&1", check=False)
+    if qcheck.returncode != 0:
+        log.error("  Quadlet validation failed:\n%s", (qcheck.stdout or "").strip())
+        raise RuntimeError("Quadlet .container files have syntax errors — see above")
+    log.info("  Quadlet files OK")
+
     run("systemctl daemon-reload")
-    run("systemctl start llama-server-llm", check=False)
-    run("systemctl start llama-server-embed", check=False)
+
+    # Start services and report errors instead of silently swallowing them
+    for svc in ["llama-server-llm", "llama-server-embed"]:
+        result = run_quiet(f"systemctl start {svc}", check=False)
+        if result.returncode != 0:
+            log.warning("  systemctl start %s failed (rc=%d)", svc, result.returncode)
+            status = run_quiet(f"systemctl status {svc} --no-pager -l", check=False)
+            log.warning("  %s", (status.stdout or "").strip()[:500])
+        else:
+            log.info("  ✓ %s started", svc)
 
 
 @stage("python_venv", "Create Python venv with utility packages")
@@ -721,13 +741,16 @@ def stage_llm_swap_helper(user: str) -> None:
             QUADLET_FILE="/etc/containers/systemd/llama-server-llm.container"
             SERVICE_NAME="llama-server-llm"
 
-            if [ -f "$QUADLET_FILE" ]; then
-                CONTAINER_MODEL="/models/${{MODEL#{MODELS_DIR}/}}"
-                sudo sed -i "s|--model [^ ]*|--model $CONTAINER_MODEL|" "$QUADLET_FILE"
-                sudo sed -i "s|--ctx-size [0-9]*|--ctx-size $CTX|" "$QUADLET_FILE"
-                sudo sed -i 's|--alias "[^"]*"|--alias "'"$ALIAS"'"|' "$QUADLET_FILE"
-                echo "Updated Quadlet: $QUADLET_FILE"
+            if [ ! -f "$QUADLET_FILE" ]; then
+                echo "Error: Quadlet file not found: $QUADLET_FILE"
+                exit 1
             fi
+
+            CONTAINER_MODEL="/models/${{MODEL#{MODELS_DIR}/}}"
+            sudo sed -i "s|--model [^ ]*|--model $CONTAINER_MODEL|" "$QUADLET_FILE"
+            sudo sed -i "s|--ctx-size [0-9]*|--ctx-size $CTX|" "$QUADLET_FILE"
+            sudo sed -i 's|--alias "[^"]*"|--alias "'"$ALIAS"'"|' "$QUADLET_FILE"
+            echo "Updated Quadlet: $QUADLET_FILE"
 
             sudo systemctl daemon-reload
             sudo systemctl restart "$SERVICE_NAME"
