@@ -7,23 +7,27 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 ## Steps/Instructions
 
 - [How to setup an AMD "Strix Halo" device (Fedora)](documentation/StrixHalo-Fedora-Setup.md) — includes automated setup script
-- [How to setup an AMD "Strix Halo" device (Ubuntu, legacy)](documentation/StrixHalo-Ubuntu-Setup.md)
-- [How to setup LMStudio as server for "headless" operation](documentation/LMStudio-Setup.md)
-- [How to create a Wikipedia database, enable vector database searches for articles, and provide an MCP server for the data](documentation/WikipediaMCP-Setup.md)
-- [How to extract temporal information from YAGO about Wikipedia articles](documentation/YagoParser-Setup.md)
-- [How to normalize YAGO output to match local English Wikipedia database](documentation/YagoNormalizer-Setup.md)
-- [How to extract temporal information from Wikidata](documentation/WikidataParser-Setup.md)
-- [How to augment the Wikipedia database with temporal information](documentation/TemporalAugmentation-Setup.md)
+- [Model Training from Scratch](documentation/ModelTraining.md) — continued pre-training approach for temporal and thematic alignment
+
+## Legacy Steps/Instructions
+
+- [How to setup an AMD "Strix Halo" device (Ubuntu, legacy)](documentation/legacy/StrixHalo-Ubuntu-Setup.md)
+- [How to setup LMStudio as server for "headless" operation](documentation/legacy/LMStudio-Setup.md)
+- [How to create a Wikipedia database, enable vector database searches for articles, and provide an MCP server for the data](documentation/legacy/WikipediaMCP-Setup.md)
+- [How to extract temporal information from YAGO about Wikipedia articles](documentation/legacy/YagoParser-Setup.md)
+- [How to normalize YAGO output to match local English Wikipedia database](documentation/legacy/YagoNormalizer-Setup.md)
+- [How to extract temporal information from Wikidata](documentation/legacy/WikidataParser-Setup.md)
+- [How to augment the Wikipedia database with temporal information](documentation/legacy/TemporalAugmentation-Setup.md)
 - How to fine-tune an existing LLM model with a *Temporal Knowledge Cutoff*, restating its knowledge base into the past 
-  - [Temporal Finetuning Phased Plan](documentation/TemporalFinetuning-Plan.md) - Content retrieval, analysis, and finetuning for temporal alignment
-  - [How to generate training datasets](documentation/TemporalFinetuning-DataPreparation-Phase1.md)
-  - [How to finetune model with temporal knowledge cutoff using these datasets](documentation/TemporalFinetuning-InitialFinetuning-Phase2.md)
+  - [Temporal Finetuning Phased Plan](documentation/legacy/TemporalFinetuning-Plan.md) - Content retrieval, analysis, and finetuning for temporal alignment
+  - [How to generate training datasets](documentation/legacy/TemporalFinetuning-DataPreparation-Phase1.md)
+  - [How to finetune model with temporal knowledge cutoff using these datasets](documentation/legacy/TemporalFinetuning-InitialFinetuning-Phase2.md)
 - How to fine-tune the model further for "Soviet utopia" theme alignment
-  - [Theme Finetuning Phased Plan](documentation/ThemeFinetuning-Plan.md) - Content retrieval, analysis, and finetuning for stylistic alignment
-  - [Phase 1: How to retrieve training content from Project Gutenberg](documentation/ThemeFinetuning-DataPreparation-Phase1.md)
-  - [Phase 2: How to chunk and filter content for theme alignment](documentation/ThemeFinetuning-DataPreparation-Phase2.md)
-  - [Phase 3: How to generate ChatML training dataset from filtered content](documentation/ThemeFinetuning-DataPreparation-Phase3.md)
-  - [Phase 4: How to finetune model with themed dataset](documentation/ThemeFinetuning-Phase4.md)
+  - [Theme Finetuning Phased Plan](documentation/legacy/ThemeFinetuning-Plan.md) - Content retrieval, analysis, and finetuning for stylistic alignment
+  - [Phase 1: How to retrieve training content from Project Gutenberg](documentation/legacy/ThemeFinetuning-DataPreparation-Phase1.md)
+  - [Phase 2: How to chunk and filter content for theme alignment](documentation/legacy/ThemeFinetuning-DataPreparation-Phase2.md)
+  - [Phase 3: How to generate ChatML training dataset from filtered content](documentation/legacy/ThemeFinetuning-DataPreparation-Phase3.md)
+  - [Phase 4: How to finetune model with themed dataset](documentation/legacy/ThemeFinetuning-Phase4.md)
 
 ## Repo Content
 

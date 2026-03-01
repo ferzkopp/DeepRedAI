@@ -218,6 +218,9 @@ class StateTracker:
         }
         self._save()
 
+    def is_pending(self, stage_name: str) -> bool:
+        return self.data.get("stages", {}).get(stage_name, {}).get("status") == "pending"
+
     def mark_pending(self, stage_name: str) -> None:
         stages = self.data.setdefault("stages", {})
         stages[stage_name] = {"status": "pending"}
@@ -1340,6 +1343,12 @@ def main() -> None:
         if state.is_done(s.name) and not args.force:
             log.info("Stage '%s' already completed. Use --force to re-run.", s.name)
             return
+        # A requires_reboot stage left in "pending" means it already ran and
+        # the user rebooted — promote to done instead of re-running it.
+        if state.is_pending(s.name) and s.requires_reboot and not args.force:
+            log.info("Stage '%s' completed before reboot — marking done.", s.name)
+            state.mark_done(s.name)
+            return
         log.info("━━━ Stage: %s — %s ━━━", s.name, s.description)
         state.mark_pending(s.name)
         s.func(user)
@@ -1373,6 +1382,14 @@ def main() -> None:
             log.info("  [%d/%d] %s — already done, skipping", i + 1, len(STAGES), s.name)
             continue
 
+        # A requires_reboot stage left in "pending" means it ran successfully
+        # and then called needs_reboot() → sys.exit(0).  The user has now
+        # rebooted and re-run the script, so promote it to "done".
+        if state.is_pending(s.name) and s.requires_reboot and not args.force:
+            log.info("  [%d/%d] %s — completed before reboot, marking done", i + 1, len(STAGES), s.name)
+            state.mark_done(s.name)
+            continue
+
         log.info("")
         log.info("━━━ [%d/%d] Stage: %s — %s ━━━", i + 1, len(STAGES), s.name, s.description)
         state.mark_pending(s.name)
@@ -1397,9 +1414,8 @@ def main() -> None:
     log.info("╚══════════════════════════════════════════════════════════════╝")
     log.info("")
     log.info("Next steps:")
-    log.info("  1. Load environment:   source %s/deepred-env.sh", REPO_DIR)
-    log.info("  2. Enter the toolbox:  podman start %s && podman exec -it %s bash", ROCM_TOOLBOX_NAME, ROCM_TOOLBOX_NAME)
-    log.info("  3. See documentation:  %s/documentation/", REPO_DIR)
+    log.info("  1. Enter the toolbox:  podman start %s && podman exec -it %s bash", ROCM_TOOLBOX_NAME, ROCM_TOOLBOX_NAME)
+    log.info("  2. See documentation:  %s/documentation/", REPO_DIR)
 
 
 if __name__ == "__main__":

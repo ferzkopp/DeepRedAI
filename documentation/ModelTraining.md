@@ -2,7 +2,7 @@
 
 ## Background
 
-The fine-tuning of a base model as described in the [temporal](TemporalFinetuning-Plan.md) and [theme](ThemeFinetuning-Plan.md) documentation did not work well — the result of the temporal fine-tuning was catastrophic forgetting. The LoRA/QLoRA approach (even with reduced learning rates, replay data, and careful hyperparameter tuning) failed to reliably suppress post-1969 knowledge without destroying the model's general capabilities.
+The fine-tuning of a base model as described in the [temporal](legacy/TemporalFinetuning-Plan.md) and [theme](legacy/ThemeFinetuning-Plan.md) documentation did not work well — the result of the temporal fine-tuning was catastrophic forgetting. The LoRA/QLoRA approach (even with reduced learning rates, replay data, and careful hyperparameter tuning) failed to reliably suppress post-1969 knowledge without destroying the model's general capabilities.
 
 This document explores training a new model **from scratch** using:
 - Temporally filtered Wikipedia content (pre–July 1969)
@@ -192,7 +192,7 @@ Gutenberg filtered chunks (from scripts/keyword_filter.py)
 | Year topics from `scripts/extract_year_topics.py` | Supplement | Historical events as prompts — good for temporal Q&A examples |
 | Manually written examples | Quality anchor | Hand-craft 50–100 "gold standard" conversations to steer tone and style |
 
-See [ThemeFinetuning-DataPreparation-Phase3.md](ThemeFinetuning-DataPreparation-Phase3.md) for full setup and execution details.
+See [ThemeFinetuning-DataPreparation-Phase3.md](legacy/ThemeFinetuning-DataPreparation-Phase3.md) for full setup and execution details.
 
 ### Chinchilla-Optimal Data Ratios
 
@@ -406,7 +406,7 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 | 0.3 | Install [Strix Halo Toolboxes](https://strix-halo-toolboxes.com/) | 1–2 hours | Provides ROCm, PyTorch, llama.cpp in containers |
 | 0.4 | Install and configure PostgreSQL (for Wikipedia DB) | 1–2 hours | Can run in a toolbox container or as system service |
 | 0.5 | Install and configure OpenSearch (for semantic search) | 1–2 hours | Needed for Wikipedia MCP server and year topics |
-| 0.6 | Install and configure LM Studio (headless server) | 1–2 hours | See [LMStudio-Setup.md](LMStudio-Setup.md); needed for dataset generation |
+| 0.6 | Install and configure LM Studio (headless server) | 1–2 hours | See [LMStudio-Setup.md](legacy/LMStudio-Setup.md); needed for dataset generation |
 | 0.7 | Verify ROCm: `rocminfo`, run llama.cpp test inference | 30 min | Confirm gfx1151 detected, GPU offloading works |
 | 0.8 | Set up Python venv with training dependencies (PyTorch ROCm, transformers, PEFT, datasets) | 1 hour | Verify `torch.cuda.is_available()` returns True via HIP |
 | | **Phase 0 total** | **1–2 days** | |
@@ -492,10 +492,10 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 | Step | Task | Duration (est.) | Notes |
 |------|------|-----------------|-------|
 | P1.1 | Download full English Wikipedia dump (`enwiki-*-pages-articles.xml.bz2`, ~25 GB) | 2–4 hours | From [dumps.wikimedia.org](https://dumps.wikimedia.org/); may already have from dev run |
-| P1.2 | Extract and import all articles into PostgreSQL using `scripts/extract_wikipedia.py` | 8–12 hours | ~7M articles; see [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md) |
-| P1.3 | Download and parse full YAGO temporal data using `scripts/yago_parser.py` | 2–4 hours | See [YagoParser-Setup.md](YagoParser-Setup.md) |
-| P1.4 | Normalize full YAGO output using `scripts/normalize_yago_output.py` | 4–8 hours | English URL mapping + page ID lookup; see [YagoNormalizer-Setup.md](YagoNormalizer-Setup.md) |
-| P1.5 | *(Optional)* Download and parse Wikidata temporal data using `scripts/wikidata_parser.py` | 12–24 hours | Broader coverage, ~900 GB extracted; see [WikidataParser-Setup.md](WikidataParser-Setup.md) |
+| P1.2 | Extract and import all articles into PostgreSQL using `scripts/extract_wikipedia.py` | 8–12 hours | ~7M articles; see [WikipediaMCP-Setup.md](legacy/WikipediaMCP-Setup.md) |
+| P1.3 | Download and parse full YAGO temporal data using `scripts/yago_parser.py` | 2–4 hours | See [YagoParser-Setup.md](legacy/YagoParser-Setup.md) |
+| P1.4 | Normalize full YAGO output using `scripts/normalize_yago_output.py` | 4–8 hours | English URL mapping + page ID lookup; see [YagoNormalizer-Setup.md](legacy/YagoNormalizer-Setup.md) |
+| P1.5 | *(Optional)* Download and parse Wikidata temporal data using `scripts/wikidata_parser.py` | 12–24 hours | Broader coverage, ~900 GB extracted; see [WikidataParser-Setup.md](legacy/WikidataParser-Setup.md) |
 | P1.6 | Augment Wikipedia DB with temporal metadata using `scripts/augment_wikipedia_temporal.py` | 1–2 hours | Adds `earliest_date`/`latest_date` to ~1.75M articles |
 | P1.7 | Generate text embeddings and index in OpenSearch using `scripts/process_and_index.py` | 12–24 hours | Enables semantic search for MCP server and year topics |
 | P1.8 | Verify MCP server search works with full index | 30 min | Required for year topics extraction |
@@ -508,7 +508,7 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 | P2.1 | Extract all pre-1969 Wikipedia articles from DB (SQL filter on temporal columns) | 1–2 hours | ~1.2M articles, ~2–4B tokens |
 | P2.2 | Clean extracted text (strip wikitext markup, normalize formatting) | 2–4 hours | Uses `scripts/extract_wikipedia.py` output pipeline |
 | P2.3 | Extract year topics using `scripts/extract_year_topics.py` (full year range) | 4–8 hours | Historical events for supplementary training data |
-| P2.4 | Retrieve Gutenberg full corpus using `scripts/retrieve_gutenberg.py` | 2–4 hours | ~500 books; see [ThemeFinetuning-DataPreparation-Phase1.md](ThemeFinetuning-DataPreparation-Phase1.md) |
+| P2.4 | Retrieve Gutenberg full corpus using `scripts/retrieve_gutenberg.py` | 2–4 hours | ~500 books; see [ThemeFinetuning-DataPreparation-Phase1.md](legacy/ThemeFinetuning-DataPreparation-Phase1.md) |
 | P2.5 | Chunk Gutenberg texts using `scripts/chunk_gutenberg.py` | 30 min | 1024-token paragraph-based chunks |
 | P2.6 | Filter Gutenberg chunks for thematic alignment using `scripts/keyword_filter.py` | 30 min | Pre-filter for theme-relevant passages |
 | P2.7 | Select tokenizer from prod base model (TinyLlama-1.1B tokenizer) | 30 min | Llama 2 BPE tokenizer; re-tokenize corpus (dev used SmolLM2 tokenizer) |
