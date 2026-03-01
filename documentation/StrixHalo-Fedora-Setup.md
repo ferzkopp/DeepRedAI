@@ -503,9 +503,9 @@ The script runs through these stages in order:
 | 11 | `opensearch` | No | Download, configure, deploy OpenSearch as systemd service |
 | 12 | `mcp_server` | No | Deploy MCP server + web GUI systemd service |
 | 13 | `firewall` | No | Configure firewalld rules for all service ports |
-| 14 | `ethernet_fix` | No | Check and apply Realtek r8169 fix if needed |
-| 15 | `llm_swap_helper` | No | Install `/usr/local/bin/llm-swap` helper script |
-| 16 | `verify` | No | Run health checks on all components |
+| 14 | `llm_swap_helper` | No | Install `/usr/local/bin/llm-swap` helper script |
+| 15 | `verify` | **Yes** | Run health checks on all components (reboot to confirm boot persistence) |
+| 16 | `reverify` | No | Post-reboot health check — verify services survive a restart |
 
 ### Script Usage
 
@@ -580,9 +580,45 @@ The setup script installs VSCode and the Copilot extensions, but you still need 
 # Swap to a different model
 llm-swap $DEEPRED_MODELS/llm/deepred-1b-q4_k_m.gguf "deepred/deepred" 4096
 
-# Swap back to default
-llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m.gguf
+# Swap back to default (point to first shard — llama.cpp loads all shards automatically)
+llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf
 ```
+
+### Using the Python Virtual Environment
+
+The setup script creates a Python venv at `$DEEPRED_VENV` (default: `/mnt/data/venv`) with PyTorch ROCm, training libraries, and pipeline dependencies pre-installed. You must activate it before running any DeepRedAI Python script.
+
+**Activate the venv:**
+
+```bash
+source $DEEPRED_VENV/bin/activate
+```
+
+Your shell prompt will change to show `(venv)` at the beginning — this confirms the venv is active. All `python` and `pip` commands now use the venv's interpreter and packages (including ROCm environment variables for Strix Halo).
+
+**Run scripts with the venv active:**
+
+```bash
+# Pipeline scripts
+python $DEEPRED_REPO/scripts/process_and_index.py
+python $DEEPRED_REPO/scripts/extract_wikipedia.py /path/to/dump.xml.bz2
+
+# Training scripts
+python $DEEPRED_REPO/scripts/finetune_temporal.py --config my_config.yaml
+python $DEEPRED_REPO/scripts/finetune_theme.py --config my_config.yaml
+```
+
+**Deactivate the venv** when done:
+
+```bash
+deactivate
+```
+
+> **Tip:** If you prefer a one-liner without activating, use the venv's Python directly:
+> ```bash
+> $DEEPRED_VENV/bin/python $DEEPRED_REPO/scripts/process_and_index.py
+> ```
+> The systemd services (e.g., `mcp.service`) already use this approach.
 
 ### Working Inside the Toolbox
 
@@ -639,4 +675,3 @@ All `/v1/chat/completions`, `/v1/embeddings`, `/v1/models` calls work identicall
 * [Increasing VRAM on AMD AI APUs](https://www.jeffgeerling.com/blog/2025/increasing-vram-allocation-on-amd-ai-apus-under-linux)
 * [StrixHalo Wiki](https://strixhalo.wiki/)
 * [Strix Halo Home Lab (deseven)](https://strixhalo-homelab.d7.wtf/)
-* [Ethernet Patch (Kernel Bugzilla)](https://bugzilla.kernel.org/show_bug.cgi?id=220770)

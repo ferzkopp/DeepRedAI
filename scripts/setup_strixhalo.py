@@ -474,6 +474,16 @@ def stage_toolbox_setup(user: str) -> None:
     # toolbox create often fails on third-party (non-Fedora) images due to
     # missing toolbox-specific labels. podman create gives the same result
     # with explicit control over bind mounts and device access.
+
+    # Ensure XDG_RUNTIME_DIR exists for rootless podman.
+    # systemd-logind normally creates this on interactive login, but it may
+    # not exist when the script is invoked via sudo.
+    uid = run_quiet(f"id -u {user}").stdout.strip()
+    runtime_dir = f"/run/user/{uid}"
+    pathlib.Path(runtime_dir).mkdir(parents=True, exist_ok=True)
+    run(f"chown {user}:{user} {runtime_dir}")
+    run(f"chmod 0700 {runtime_dir}")
+
     log.info("  Creating container '%s' via podman...", ROCM_TOOLBOX_NAME)
     result = run(
         f'su - {user} -c "'
@@ -490,7 +500,7 @@ def stage_toolbox_setup(user: str) -> None:
         f" --pid=host"
         f" --network=host"
         f" --volume /mnt/data:/mnt/data:rslave"
-        f" --volume /run/user/$(id -u):/run/user/$(id -u):rslave"
+        f" --volume {runtime_dir}:{runtime_dir}:rslave"
         f" {ROCM_TOOLBOX_IMAGE}"
         f" sleep infinity"
         f'"',
@@ -513,38 +523,61 @@ def stage_model_directories(user: str) -> None:
     for subdir in ["llm", "embedding"]:
         (MODELS_DIR / subdir).mkdir(parents=True, exist_ok=True)
 
-    # Set ownership
-    run(f"chown -R {user}:{user} {MODELS_DIR}")
-
-    # Install huggingface CLI in a temporary way (system pip or user pip)
+    # Install huggingface_hub Python package system-wide.
+    # Try --break-system-packages first (Fedora 39+).
     run("pip3 install --break-system-packages huggingface_hub 2>/dev/null || "
         "pip3 install huggingface_hub", check=False)
+
+    # Helper: use the Python API directly for downloads so we never depend
+    # on the huggingface-cli script being on PATH.
+    def hf_download(repo: str, filename: str, local_dir: pathlib.Path) -> None:
+        run(
+            f'python3 -c "'
+            f"from huggingface_hub import hf_hub_download; "
+            f"hf_hub_download("
+            f"'{repo}', '{filename}', local_dir='{local_dir}'"
+            f')"'
+        )
+
+    def hf_snapshot(repo: str, pattern: str, local_dir: pathlib.Path) -> None:
+        """Download files matching a glob pattern from a HF repo."""
+        run(
+            f'python3 -c "'
+            f"from huggingface_hub import snapshot_download; "
+            f"snapshot_download("
+            f"'{repo}', allow_patterns='{pattern}', local_dir='{local_dir}'"
+            f')"'
+        )
 
     # Download embedding model (if not already present)
     embed_model = MODELS_DIR / "embedding" / "nomic-embed-text-v1.5.f16.gguf"
     if not embed_model.exists():
         log.info("  Downloading embedding model...")
-        run(
-            f'su - {user} -c "'
-            f"huggingface-cli download nomic-ai/nomic-embed-text-v1.5-GGUF "
-            f"nomic-embed-text-v1.5.f16.gguf "
-            f'--local-dir {MODELS_DIR}/embedding/"'
+        hf_download(
+            "nomic-ai/nomic-embed-text-v1.5-GGUF",
+            "nomic-embed-text-v1.5.f16.gguf",
+            MODELS_DIR / "embedding",
         )
     else:
         log.info("  Embedding model already present")
 
-    # Download LLM (if not already present)
-    llm_model = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m.gguf"
-    if not llm_model.exists():
-        log.info("  Downloading LLM model (Qwen 2.5 7B)...")
-        run(
-            f'su - {user} -c "'
-            f"huggingface-cli download Qwen/Qwen2.5-7B-Instruct-GGUF "
-            f"qwen2.5-7b-instruct-q4_k_m.gguf "
-            f'--local-dir {MODELS_DIR}/llm/"'
+    # Download LLM (if not already present).
+    # The Q4_K_M quant is split into two shards on HuggingFace.
+    # llama.cpp natively handles split GGUFs — point it at the first shard.
+    llm_shard1 = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+    llm_shard2 = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf"
+    if not llm_shard1.exists() or not llm_shard2.exists():
+        log.info("  Downloading LLM model (Qwen 2.5 7B Q4_K_M, 2 shards)...")
+        hf_snapshot(
+            "Qwen/Qwen2.5-7B-Instruct-GGUF",
+            "qwen2.5-7b-instruct-q4_k_m*.gguf",
+            MODELS_DIR / "llm",
         )
     else:
         log.info("  LLM model already present")
+
+    # Set ownership after downloads so files belong to the target user
+    run(f"chown -R {user}:{user} {MODELS_DIR}")
 
 
 @stage("llama_server", "Deploy Podman Quadlet services for llama.cpp servers")
@@ -556,8 +589,6 @@ def stage_llama_server(user: str) -> None:
     write_file(
         "/etc/sysconfig/llama-server",
         textwrap.dedent("""\
-            # Required for Strix Halo gfx1151
-            HSA_OVERRIDE_GFX_VERSION=11.0.0
             # Enable unified memory for large models on APU
             GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
         """),
@@ -574,24 +605,24 @@ def stage_llama_server(user: str) -> None:
             [Container]
             Image={ROCM_TOOLBOX_IMAGE}
             Exec=llama-server \\
-                --model /models/llm/qwen2.5-7b-instruct-q4_k_m.gguf \\
+                --model /models/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \\
                 --host 0.0.0.0 \\
                 --port 1234 \\
                 --n-gpu-layers 999 \\
-                --flash-attn \\
+                --flash-attn on \\
                 --no-mmap \\
                 --ctx-size 8192 \\
                 --threads 16 \\
                 --parallel 2 \\
                 --alias "gpt-oss-20b"
-            Environment=HSA_OVERRIDE_GFX_VERSION=11.0.0
             Environment=GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
             AddDevice=/dev/kfd
             AddDevice=/dev/dri
-            Volume={MODELS_DIR}:/models:ro
+            Volume={MODELS_DIR}:/models:ro,z
             PublishPort=1234:1234
             GroupAdd=video
             GroupAdd=render
+            PodmanArgs=--security-opt seccomp=unconfined
 
             [Service]
             Restart=on-failure
@@ -617,20 +648,20 @@ def stage_llama_server(user: str) -> None:
                 --host 0.0.0.0 \\
                 --port 1235 \\
                 --n-gpu-layers 999 \\
-                --flash-attn \\
+                --flash-attn on \\
                 --no-mmap \\
                 --ctx-size 2048 \\
                 --threads 8 \\
                 --embedding \\
                 --alias "text-embedding-nomic-embed-text-v1.5@f16"
-            Environment=HSA_OVERRIDE_GFX_VERSION=11.0.0
             Environment=GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
             AddDevice=/dev/kfd
             AddDevice=/dev/dri
-            Volume={MODELS_DIR}:/models:ro
+            Volume={MODELS_DIR}:/models:ro,z
             PublishPort=1235:1235
             GroupAdd=video
             GroupAdd=render
+            PodmanArgs=--security-opt seccomp=unconfined
 
             [Service]
             Restart=on-failure
@@ -648,8 +679,8 @@ def stage_llama_server(user: str) -> None:
 
 @stage("python_venv", "Create Python venv with PyTorch ROCm and project dependencies")
 def stage_python_venv(user: str) -> None:
-    # Ensure python3-venv is available
-    run("dnf install -y python3-devel python3-pip python3-venv python3-setuptools")
+    # Ensure build deps are available (venv is built into python3 on Fedora)
+    run("dnf install -y python3-devel python3-pip python3-setuptools")
 
     # Create venv if it doesn't exist
     if not (VENV_DIR / "bin" / "activate").exists():
@@ -667,13 +698,14 @@ def stage_python_venv(user: str) -> None:
 
     # Training dependencies
     log.info("  Installing training dependencies...")
-    run(f'su - {user} -c "{pip} install transformers datasets accelerate peft '
-        f'bitsandbytes sentencepiece tiktoken tokenizers huggingface_hub"')
+    run(f'su - {user} -c "{pip} install transformers datasets accelerate peft trl '
+        f'bitsandbytes sentencepiece tiktoken tokenizers huggingface_hub wandb"')
 
     # Pipeline dependencies
     log.info("  Installing pipeline dependencies...")
     run(f'su - {user} -c "{pip} install fastapi uvicorn psycopg2-binary opensearch-py '
-        f'mediawiki-dump mwparserfromhell sentence-transformers pydantic requests tqdm"')
+        f'mediawiki-dump mwparserfromhell sentence-transformers pydantic requests tqdm '
+        f'beautifulsoup4 openai numpy"')
 
     # Add ROCm env vars to venv activate script
     activate = VENV_DIR / "bin" / "activate"
@@ -691,16 +723,53 @@ def stage_python_venv(user: str) -> None:
 
     run(f"chown -R {user}:{user} {VENV_DIR}")
 
+    # SELinux: label venv binaries as bin_t so systemd services (e.g. mcp.service
+    # running as the wiki user) can execute them. Files on /mnt/data default to
+    # unlabeled_t which confined service processes cannot execute.
+    run(f"chcon -R -t bin_t {VENV_DIR}/bin/")
+
 
 @stage("postgresql", "Install and configure PostgreSQL for Wikipedia pipeline")
 def stage_postgresql(user: str) -> None:
-    run("dnf install -y postgresql-server postgresql-contrib")
+    run("dnf install -y postgresql-server postgresql-contrib policycoreutils-python-utils")
+
+    # Use /mnt/data for PostgreSQL data to keep OS drive clean
+    pg_data_dir = DATA_DIR / "postgresql" / "data"
+    pg_data_dir.parent.mkdir(parents=True, exist_ok=True)
 
     # Initialize if not already done
-    pgdata = pathlib.Path("/var/lib/pgsql/data/PG_VERSION")
-    if not pgdata.exists():
-        run("postgresql-setup --initdb")
+    if not (pg_data_dir / "PG_VERSION").exists():
+        # Clean up partial initdb left by an interrupted previous run.
+        # initdb requires an empty directory — leftover files will make it fail.
+        if pg_data_dir.exists() and any(pg_data_dir.iterdir()):
+            log.warning("  Removing partial initdb directory: %s", pg_data_dir)
+            shutil.rmtree(pg_data_dir)
+            pg_data_dir.mkdir(parents=True, exist_ok=True)
 
+        # Ensure the postgres user owns the data directory
+        run(f"chown postgres:postgres {pg_data_dir.parent}")
+        run(f'su - postgres -c "initdb -D {pg_data_dir}"')
+
+    # SELinux: label the custom data directory so PostgreSQL can access it.
+    # Also label the data-disk mount point itself — a freshly formatted ext4
+    # partition root is 'unlabeled_t' which blocks postgresql_t from traversing.
+    run(f"semanage fcontext -a -t postgresql_db_t '{pg_data_dir.parent}(/.*)?'",
+        check=False)
+    run(f"restorecon -R {pg_data_dir.parent}")
+    # Ensure the data-disk mount point is traversable by system services
+    run(f"chcon -t mnt_t {DATA_DIR}", check=False)
+
+    # Configure systemd override to point PGDATA to /mnt/data
+    override_dir = pathlib.Path("/etc/systemd/system/postgresql.service.d")
+    override_dir.mkdir(parents=True, exist_ok=True)
+    write_file(
+        override_dir / "datadir.conf",
+        textwrap.dedent(f"""\
+            [Service]
+            Environment=PGDATA={pg_data_dir}
+        """),
+    )
+    run("systemctl daemon-reload")
     run("systemctl enable --now postgresql")
 
     # Create wiki user and database (idempotent)
@@ -711,23 +780,48 @@ def stage_postgresql(user: str) -> None:
     run("su - postgres -c 'psql -c \"ALTER USER wiki WITH PASSWORD '\\''wiki'\\''\"'",
         check=False)
 
+    log.info("  PostgreSQL data directory: %s", pg_data_dir)
     log.info("  PostgreSQL configured: user=wiki, db=wikidb")
 
 
 @stage("opensearch", "Download, configure, and deploy OpenSearch")
 def stage_opensearch(user: str) -> None:
     os_dir = pathlib.Path("/opt/opensearch")
+    tarball = pathlib.Path(f"/tmp/opensearch-{OPENSEARCH_VERSION}-linux-x64.tar.gz")
+    extracted_dir = pathlib.Path(f"/opt/opensearch-{OPENSEARCH_VERSION}")
 
-    if not os_dir.exists():
-        tarball = f"/tmp/opensearch-{OPENSEARCH_VERSION}-linux-x64.tar.gz"
-        if not pathlib.Path(tarball).exists():
-            log.info("  Downloading OpenSearch %s...", OPENSEARCH_VERSION)
-            run(f"wget -q -O {tarball} {OPENSEARCH_URL}")
+    # ── Cleanup artifacts from any previous failed / interrupted run ──
+    # This stage only executes on first attempt or --force, so cleanup is safe.
 
-        run(f"tar -xzf {tarball} -C /opt")
-        run(f"mv /opt/opensearch-{OPENSEARCH_VERSION} {os_dir}")
-    else:
-        log.info("  OpenSearch already present at %s", os_dir)
+    # Stop the service if it's running (needed for --force re-installs)
+    run("systemctl stop opensearch.service 2>/dev/null || true")
+
+    # Validate cached tarball; remove if corrupted (e.g. interrupted download)
+    if tarball.exists():
+        result = run_quiet(f"gzip -t {tarball}", check=False)
+        if result.returncode != 0:
+            log.warning("  Removing corrupted tarball: %s", tarball)
+            tarball.unlink()
+        else:
+            log.info("  Cached tarball OK: %s", tarball)
+
+    # Remove partial extraction left over from a failed tar/mv
+    if extracted_dir.exists():
+        log.info("  Removing partial extraction: %s", extracted_dir)
+        shutil.rmtree(extracted_dir)
+
+    # Remove existing installation so --force gets a clean re-install
+    if os_dir.exists():
+        log.info("  Removing previous installation: %s", os_dir)
+        shutil.rmtree(os_dir)
+
+    # ── Download and install ──
+    if not tarball.exists():
+        log.info("  Downloading OpenSearch %s...", OPENSEARCH_VERSION)
+        run(f"wget -q -O {tarball} {OPENSEARCH_URL}")
+
+    run(f"tar -xzf {tarball} -C /opt")
+    run(f"mv {extracted_dir} {os_dir}")
 
     # Create opensearch user
     result = run_quiet("id opensearch", check=False)
@@ -739,10 +833,18 @@ def stage_opensearch(user: str) -> None:
     # Configure
     config = os_dir / "config" / "opensearch.yml"
     if not file_contains(config, "plugins.security.disabled"):
+        # Store data and logs on /mnt/data to keep OS drive clean
+        os_data_dir = DATA_DIR / "opensearch" / "data"
+        os_logs_dir = DATA_DIR / "opensearch" / "logs"
+        os_data_dir.mkdir(parents=True, exist_ok=True)
+        os_logs_dir.mkdir(parents=True, exist_ok=True)
+        run(f"chown -R opensearch:opensearch {DATA_DIR / 'opensearch'}")
         with open(config, "a") as f:
             f.write("\nplugins.security.disabled: true\n")
             f.write("network.host: 0.0.0.0\n")
             f.write("discovery.type: single-node\n")
+            f.write(f"path.data: {os_data_dir}\n")
+            f.write(f"path.logs: {os_logs_dir}\n")
 
     # JVM heap
     jvm_opts = os_dir / "config" / "jvm.options"
@@ -840,7 +942,11 @@ def stage_firewall(user: str) -> None:
     # ourselves out on a headless server. firewall-cmd --permanent works
     # even when the daemon is stopped — it writes to the permanent config
     # that will be loaded when the service starts.
-    run("firewall-cmd --permanent --add-service=ssh", check=False)
+    result = run_quiet("firewall-cmd --permanent --query-service=ssh", check=False)
+    if result.returncode != 0:
+        run("firewall-cmd --permanent --add-service=ssh", check=False)
+    else:
+        log.info("  SSH already in firewall permanent config")
 
     ports = [
         ("1234/tcp", "port"),   # llama LLM
@@ -851,38 +957,15 @@ def stage_firewall(user: str) -> None:
     ]
 
     for spec, kind in ports:
-        run(f"firewall-cmd --permanent --add-port={spec}", check=False)
+        result = run_quiet(f"firewall-cmd --permanent --query-port={spec}", check=False)
+        if result.returncode != 0:
+            run(f"firewall-cmd --permanent --add-port={spec}", check=False)
+        else:
+            log.info("  Port %s already open", spec)
 
     # Now safe to enable — SSH is already in the permanent config
     run("systemctl enable --now firewalld")
     run("firewall-cmd --reload")
-
-
-@stage("ethernet_fix", "Check and apply Realtek r8169 ethernet fix if needed")
-def stage_ethernet_fix(user: str) -> None:
-    result = run_quiet("lspci -k", check=False)
-    if "r8169" not in result.stdout:
-        log.info("  r8169 driver not in use — skipping ethernet fix")
-        return
-
-    # Check kernel version — 6.18+ should already have the fix
-    uname = run_quiet("uname -r")
-    kernel = uname.stdout.strip()
-    log.info("  r8169 detected, kernel=%s", kernel)
-
-    # Parse major.minor
-    parts = kernel.split(".")
-    major, minor = int(parts[0]), int(parts[1])
-    if major > 6 or (major == 6 and minor >= 18):
-        log.info("  Kernel %s should include the r8169 fix — skipping", kernel)
-        return
-
-    patch_file = REPO_DIR / "patches" / "r8169_main_fix.patch"
-    if patch_file.exists():
-        log.info("  Patch available at %s — manual application may be needed", patch_file)
-        log.info("  See: https://bugzilla.kernel.org/show_bug.cgi?id=220770")
-    else:
-        log.info("  No patch file found and kernel may need r8169 fix")
 
 
 @stage("llm_swap_helper", "Install /usr/local/bin/llm-swap helper script")
@@ -938,21 +1021,22 @@ def stage_llm_swap_helper(user: str) -> None:
     )
 
 
-@stage("verify", "Run health checks on all components")
+@stage("verify", "Run health checks on all components", requires_reboot=True)
 def stage_verify(user: str) -> None:
+    # ── Pass/fail checks ──
     checks = [
         ("Kernel ≥ 6.18.4", "uname -r"),
         ("Firmware (not 20251125)", "rpm -q linux-firmware"),
         ("GPU groups", f"id -nG {user}"),
         ("GPU device nodes", "ls /dev/kfd /dev/dri/render* 2>/dev/null"),
         ("Podman", "podman --version"),
-        ("Toolbox list", "toolbox list --containers"),
+        ("Toolbox container", f'su - {user} -c "podman container exists {ROCM_TOOLBOX_NAME}" && echo "{ROCM_TOOLBOX_NAME}" || echo MISSING'),
         ("PostgreSQL", "pg_isready"),
         ("OpenSearch", "curl -sf http://localhost:9200 -o /dev/null && echo OK || echo DOWN"),
         ("LLM server", "curl -sf http://localhost:1234/v1/models -o /dev/null && echo OK || echo DOWN"),
         ("Embedding server", "curl -sf http://localhost:1235/v1/models -o /dev/null && echo OK || echo DOWN"),
         ("MCP server", "curl -sf http://localhost:7000/health -o /dev/null && echo OK || echo DOWN"),
-        ("VSCode", "code --version 2>/dev/null | head -1 || echo 'not found'"),
+        ("VSCode", f'su - {user} -c "code --version 2>/dev/null | head -1" || echo "not found"'),
     ]
 
     log.info("")
@@ -961,10 +1045,72 @@ def stage_verify(user: str) -> None:
     for label, cmd in checks:
         result = run_quiet(cmd, check=False)
         output = (result.stdout or "").strip()
-        status = "✓" if result.returncode == 0 and "DOWN" not in output else "✗"
-        if status == "✗":
+        failed = result.returncode != 0 or "DOWN" in output or "MISSING" in output
+        status = "✗" if failed else "✓"
+        if failed:
             all_ok = False
-        log.info("  %s %-25s %s", status, label, output[:60])
+        log.info("  %s %-25s %s", status, label, output[:80])
+
+    # ── GPU information ──
+    log.info("")
+    log.info("═══ GPU ═══")
+    # Device name from DRM
+    gpu_name = run_quiet(
+        "cat /sys/class/drm/card*/device/product_name 2>/dev/null || "
+        "lspci | grep -i 'VGA\\|Display' | head -1 | sed 's/.*: //'",
+        check=False,
+    )
+    log.info("  ℹ %-25s %s", "GPU", (gpu_name.stdout or "unknown").strip()[:80])
+
+    # GTT (dynamic GPU memory) from kernel
+    gtt_info = run_quiet(
+        "cat /sys/class/drm/card*/device/mem_info_gtt_total 2>/dev/null || echo 'N/A'",
+        check=False,
+    )
+    gtt_bytes = (gtt_info.stdout or "").strip()
+    if gtt_bytes.isdigit():
+        gtt_gb = int(gtt_bytes) / (1024 ** 3)
+        log.info("  ℹ %-25s %.1f GB", "GTT memory (dynamic)", gtt_gb)
+    else:
+        log.info("  ℹ %-25s %s", "GTT memory (dynamic)", gtt_bytes[:60])
+
+    # VRAM (fixed UMA / GART) from kernel
+    vram_info = run_quiet(
+        "cat /sys/class/drm/card*/device/mem_info_vram_total 2>/dev/null || echo 'N/A'",
+        check=False,
+    )
+    vram_bytes = (vram_info.stdout or "").strip()
+    if vram_bytes.isdigit():
+        vram_gb = int(vram_bytes) / (1024 ** 3)
+        log.info("  ℹ %-25s %.1f GB", "VRAM (fixed UMA/GART)", vram_gb)
+    else:
+        log.info("  ℹ %-25s %s", "VRAM (fixed UMA/GART)", vram_bytes[:60])
+
+    # ── Data disk & content sizes ──
+    log.info("")
+    log.info("═══ Data Disk (%s) ═══", DATA_DIR)
+    disk_info = run_quiet(f"df -h {DATA_DIR} --output=size,used,avail,pcent | tail -1", check=False)
+    if disk_info.returncode == 0:
+        parts = disk_info.stdout.strip().split()
+        if len(parts) >= 4:
+            log.info("  ℹ %-25s %s total, %s used, %s free (%s)",
+                     "Disk", parts[0], parts[1], parts[2], parts[3])
+
+    # Content folders with du (only if they exist)
+    content_dirs = [
+        ("Models", MODELS_DIR),
+        ("Wikipedia", DATA_DIR / "wikipedia"),
+        ("Gutenberg", DATA_DIR / "gutenberg"),
+        ("PostgreSQL", DATA_DIR / "postgresql"),
+        ("OpenSearch", DATA_DIR / "opensearch"),
+        ("Python venv", VENV_DIR),
+        ("Repo", REPO_DIR),
+    ]
+    for label, path in content_dirs:
+        if path.exists():
+            du = run_quiet(f"du -sh {path}", check=False)
+            size = (du.stdout or "").split()[0] if du.returncode == 0 else "?"
+            log.info("  ℹ %-25s %s", label, size)
 
     log.info("")
     if all_ok:
@@ -972,10 +1118,117 @@ def stage_verify(user: str) -> None:
     else:
         log.info("  Some checks failed — review above and re-run failed stages")
 
+    needs_reboot(
+        "Reboot to confirm all services start automatically on boot. "
+        "The next stage (reverify) will validate them."
+    )
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+
+@stage("reverify", "Post-reboot health check — verify services survive a restart")
+def stage_reverify(user: str) -> None:
+    """Re-verify after reboot: wait for services to come up, then health-check."""
+    # Quadlet-generated services start automatically via WantedBy=default.target,
+    # but Podman containers need time to pull layers / load models after a fresh boot.
+    # Give them up to 90 seconds to become healthy.
+
+    services = {
+        "llama-server-llm":   ("http://localhost:1234/health", "LLM server (port 1234)"),
+        "llama-server-embed": ("http://localhost:1235/health", "Embedding server (port 1235)"),
+    }
+
+    extra_checks = {
+        "PostgreSQL":   "pg_isready",
+        "OpenSearch":   "curl -sf http://localhost:9200 -o /dev/null && echo OK || echo DOWN",
+        "MCP server":   "curl -sf http://localhost:7000/health -o /dev/null && echo OK || echo DOWN",
+    }
+
+    max_wait = 90  # seconds
+    poll_interval = 5
+
+    # ── Wait for Podman container services ──
+    log.info("")
+    log.info("═══ Post-Reboot Service Check ═══")
+    log.info("  Waiting up to %ds for container services to become healthy...", max_wait)
+
+    all_ok = True
+    for svc, (health_url, label) in services.items():
+        healthy = False
+        elapsed = 0
+
+        # First check if the systemd unit is even active
+        r = run_quiet(f"systemctl is-active {svc}", check=False)
+        svc_state = (r.stdout or "").strip()
+        if svc_state != "active":
+            # Try to start it — may be 'inactive' if not enabled, or failed
+            log.info("  ⟳ %s is '%s', attempting start...", svc, svc_state)
+            run_quiet(f"systemctl start {svc}", check=False)
+            time.sleep(2)
+
+        while elapsed < max_wait:
+            r = run_quiet(f"curl -sf {health_url}", check=False)
+            if r.returncode == 0:
+                healthy = True
+                break
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+
+        if healthy:
+            log.info("  ✓ %-35s UP  (ready in ~%ds)", label, elapsed)
+        else:
+            all_ok = False
+            log.info("  ✗ %-35s DOWN after %ds", label, max_wait)
+            # Grab recent logs for diagnosis
+            r = run_quiet(f"journalctl -u {svc} --no-pager -n 5 2>/dev/null", check=False)
+            if r.returncode == 0 and (r.stdout or "").strip():
+                for line in r.stdout.strip().splitlines()[-3:]:
+                    log.info("      %s", line.strip())
+
+    # ── Check other services (non-container, should be instant) ──
+    for label, cmd in extra_checks.items():
+        r = run_quiet(cmd, check=False)
+        output = (r.stdout or "").strip()
+        if r.returncode != 0 or "DOWN" in output:
+            all_ok = False
+            log.info("  ✗ %-35s %s", label, output[:60] or "FAILED")
+        else:
+            log.info("  ✓ %-35s OK", label)
+
+    # ── Quick API smoke test if container services are up ──
+    log.info("")
+    log.info("═══ API Smoke Test ═══")
+
+    # LLM chat completion
+    r = run_quiet(
+        'curl -sf -m 30 http://localhost:1234/v1/chat/completions '
+        '-H "Content-Type: application/json" '
+        '-d \'{"model":"gpt-oss-20b","messages":[{"role":"user","content":"ping"}],"max_tokens":5}\'',
+        check=False,
+    )
+    if r.returncode == 0 and r.stdout and "choices" in r.stdout:
+        log.info("  ✓ %-35s chat completion OK", "LLM /v1/chat/completions")
+    else:
+        all_ok = False
+        log.info("  ✗ %-35s FAILED", "LLM /v1/chat/completions")
+
+    # Embedding
+    r = run_quiet(
+        'curl -sf -m 30 http://localhost:1235/v1/embeddings '
+        '-H "Content-Type: application/json" '
+        '-d \'{"model":"text-embedding-nomic-embed-text-v1.5@f16","input":"test"}\'',
+        check=False,
+    )
+    if r.returncode == 0 and r.stdout and "embedding" in r.stdout:
+        log.info("  ✓ %-35s embedding OK", "Embed /v1/embeddings")
+    else:
+        all_ok = False
+        log.info("  ✗ %-35s FAILED", "Embed /v1/embeddings")
+
+    log.info("")
+    if all_ok:
+        log.info("  Post-reboot verification passed — all services healthy!")
+    else:
+        log.info("  Some services failed post-reboot. Check logs and re-run:")
+        log.info("    sudo -E python3 %s --stage reverify --force", __file__)
 
 
 def list_stages(state: StateTracker) -> None:

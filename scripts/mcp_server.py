@@ -53,10 +53,13 @@ DEFAULT_LIMIT = 10
 MAX_LIMIT = 100
 
 # Embedding Configuration (for semantic search)
+# The embedding server runs on a dedicated port (1235), separate from the
+# LLM chat server (1234).  The model alias must match the --alias flag
+# in the llama-server-embed Quadlet (see setup_strixhalo.py).
 EMBEDDING_PROVIDER = os.environ.get('EMBEDDING_PROVIDER', 'lmstudio')
 LMSTUDIO_HOST = os.environ.get('LMSTUDIO_HOST', 'localhost')
-LMSTUDIO_PORT = int(os.environ.get('LMSTUDIO_PORT', 1234))
-LMSTUDIO_MODEL = os.environ.get('LMSTUDIO_MODEL', 'text-embedding-nomic-embed-text-v1.5')
+LMSTUDIO_PORT = int(os.environ.get('EMBEDDING_PORT', os.environ.get('LMSTUDIO_PORT', 1235)))
+LMSTUDIO_MODEL = os.environ.get('LMSTUDIO_MODEL', 'text-embedding-nomic-embed-text-v1.5@f16')
 
 # -----------------------------------------------------------------------------
 # Logging

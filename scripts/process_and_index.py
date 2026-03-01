@@ -84,12 +84,12 @@ logging.basicConfig(
 # Choose embedding provider: 'lmstudio' (recommended) or 'local'
 EMBEDDING_PROVIDER = 'lmstudio'
 
-# LM Studio Configuration (when EMBEDDING_PROVIDER = 'lmstudio')
-# Update LMSTUDIO_HOST to your LM Studio server IP address
-LMSTUDIO_HOST = 'localhost'  # LM Studio server IP
-LMSTUDIO_PORT = 1234
+# LM Studio / llama-server Configuration (when EMBEDDING_PROVIDER = 'lmstudio')
+# The dedicated embedding server runs on port 1235 (separate from the LLM on 1234).
+LMSTUDIO_HOST = 'localhost'  # Embedding server host
+LMSTUDIO_PORT = 1235
 LMSTUDIO_URL = f'http://{LMSTUDIO_HOST}:{LMSTUDIO_PORT}/v1/embeddings'
-LMSTUDIO_MODEL = 'text-embedding-nomic-embed-text-v1.5@f16'  # Model identifier from LM Studio
+LMSTUDIO_MODEL = 'text-embedding-nomic-embed-text-v1.5@f16'  # Must match --alias in Quadlet
 LMSTUDIO_CONTEXT_LENGTH = 2048  # Max tokens per text (model-dependent: 2048 or 8192)
 LMSTUDIO_MODEL_BATCH_SIZE = 1024  # Max batch size in tokens (model config limit)
 LMSTUDIO_TIMEOUT = 300  # Seconds per batch request (increased for larger batches)
