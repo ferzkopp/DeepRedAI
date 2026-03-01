@@ -64,9 +64,10 @@ STATE_FILE = REPO_DIR / ".setup_a4000_state.json"
 MODELS_DIR = pathlib.Path(os.environ.get("DEEPRED_MODELS", str(DATA_DIR / "models")))
 VENV_DIR = pathlib.Path(os.environ.get("DEEPRED_VENV", str(DATA_DIR / "venv")))
 
-# Container images
-# full-cuda includes llama-server, llama-cli, llama-bench, etc.
-LLAMA_CUDA_IMAGE = "ghcr.io/ggerganov/llama.cpp:full-cuda"
+# Container images — tags are pinned to a build number (no floating :latest).
+# See https://github.com/ggerganov/llama.cpp/pkgs/container/llama.cpp for tags.
+LLAMA_SERVER_IMAGE = "ghcr.io/ggerganov/llama.cpp:server-cuda-b4719"   # server only (smaller)
+LLAMA_FULL_IMAGE   = "ghcr.io/ggerganov/llama.cpp:full-cuda-b4719"     # all binaries (toolbox)
 CUDA_TOOLBOX_NAME = "llama-cuda"
 
 LOG_FILE = REPO_DIR / "setup_a4000.log"
@@ -468,8 +469,8 @@ def stage_toolbox_setup(user: str) -> None:
             break
 
     # Pull the image as the non-root user
-    log.info("  Pulling %s as %s (this may take a while)...", LLAMA_CUDA_IMAGE, user)
-    run(f'su - {user} -c "podman pull {LLAMA_CUDA_IMAGE}"')
+    log.info("  Pulling %s as %s (this may take a while)...", LLAMA_FULL_IMAGE, user)
+    run(f'su - {user} -c "podman pull {LLAMA_FULL_IMAGE}"')
 
     # Ensure XDG_RUNTIME_DIR exists for rootless podman
     uid = run_quiet(f"id -u {user}").stdout.strip()
@@ -491,7 +492,7 @@ def stage_toolbox_setup(user: str) -> None:
         f" --network=host"
         f" --volume {DATA_DIR}:{DATA_DIR}:rslave"
         f" --volume {runtime_dir}:{runtime_dir}:rslave"
-        f" {LLAMA_CUDA_IMAGE}"
+        f" {LLAMA_FULL_IMAGE}"
         f" sleep infinity"
         f'"',
         check=False,
@@ -570,6 +571,10 @@ def stage_llama_server(user: str) -> None:
     quadlet_dir = pathlib.Path("/etc/containers/systemd")
     quadlet_dir.mkdir(parents=True, exist_ok=True)
 
+    # Pull the server image (Quadlet uses a different, smaller image than the toolbox)
+    log.info("  Pulling server image %s...", LLAMA_SERVER_IMAGE)
+    run(f"podman pull {LLAMA_SERVER_IMAGE}")
+
     # LLM Server Quadlet (Port 1234)
     write_file(
         quadlet_dir / "llama-server-llm.container",
@@ -579,7 +584,7 @@ def stage_llama_server(user: str) -> None:
             After=network-online.target
 
             [Container]
-            Image={LLAMA_CUDA_IMAGE}
+            Image={LLAMA_SERVER_IMAGE}
             Exec=/llama-server \\
                 --model /models/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \\
                 --host 0.0.0.0 \\
@@ -612,7 +617,7 @@ def stage_llama_server(user: str) -> None:
             After=network-online.target
 
             [Container]
-            Image={LLAMA_CUDA_IMAGE}
+            Image={LLAMA_SERVER_IMAGE}
             Exec=/llama-server \\
                 --model /models/embedding/nomic-embed-text-v1.5.f16.gguf \\
                 --host 0.0.0.0 \\

@@ -35,8 +35,8 @@ This guide covers the setup of a secondary inference server running Fedora 43 on
 | **OS** | Fedora 43 | |
 | **Linux Kernel** | 6.18+ | Standard Fedora kernel |
 | **NVIDIA Driver** | 570+ (RPM Fusion akmod) | Ampere (SM 8.6) support — automatically rebuilt on kernel updates |
-| **NVIDIA Container Toolkit** | 1.17+ | CDI-based GPU injection for Podman |
-| **llama.cpp** | Latest (`full-cuda` image) | Official GHCR image with CUDA support |
+| **NVIDIA Container Toolkit** | 1.18+ | CDI-based GPU injection for Podman (auto-generates `/etc/cdi/nvidia.yaml`) |
+| **llama.cpp** | b4719+ (`server-cuda-b4719` / `full-cuda-b4719`) | Official GHCR images — tags pinned to build number |
 
 ### VRAM Budget (16 GB)
 
