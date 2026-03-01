@@ -629,6 +629,8 @@ def stage_llama_server(user: str) -> None:
                 --n-gpu-layers 999 \\
                 --flash-attn \\
                 --ctx-size 2048 \\
+                --batch-size 32768 \\
+                --ubatch-size 2048 \\
                 --threads 4 \\
                 --embedding \\
                 --alias "text-embedding-nomic-embed-text-v1.5@f16"

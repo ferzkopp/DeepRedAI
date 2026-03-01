@@ -238,6 +238,8 @@ python3 $DEEPRED_REPO/scripts/process_and_index.py
 
 **Checkpoint/Resume:** If interrupted (Ctrl+C, crash, reboot), simply run the same command again. The script automatically resumes from the last checkpoint.
 
+> **Live Querying:** The MCP server, search API, and VS Code Copilot integration all work while processing is still running. Results will be partial (only articles indexed so far) but grow as processing continues. This is useful for verifying the pipeline is working correctly without waiting for the full ~65-hour run.
+
 ```bash
 # Check progress
 python3 scripts/process_and_index.py --status
@@ -246,16 +248,11 @@ python3 scripts/process_and_index.py --status
 python3 scripts/process_and_index.py --reset
 ```
 
-**Performance:** Processing ~7 million articles takes approximately 24–48 hours on Strix Halo depending on embedding server configuration (embedding generation is the bottleneck). The script sends concurrent requests to utilize all parallel server slots.
-
-| Embedding Server | Rate | Est. Total Time |
-|------------------|------|-----------------|
-| llama.cpp (tuned, 4 parallel slots, `--cont-batching`) | ~30 articles/sec | ~65 hours |
-| LM Studio (legacy, nomic-embed-text-v1.5 f16) | ~40 articles/sec | ~48 hours |
-| llama.cpp (default, no tuning) | ~20 articles/sec | ~95 hours |
+**Performance:** Processing ~7 million articles takes approximately 65 hours on Strix Halo. Embedding generation is the bottleneck (~30 articles/sec). The script sends concurrent requests to utilize all parallel server slots.
 
 > **Tip:** The embedding server container config is at `/etc/containers/systemd/llama-server-embed.container`. Key tuning parameters:
-> - `--batch-size 4096 --ubatch-size 4096` — physical batch size (must be ≥ context length)
+> - `--batch-size 32768` — logical batch size (must hold all tokens in a single API request: 16 texts × up to 2048 tokens)
+> - `--ubatch-size 2048` — physical batch size (must be ≥ `--ctx-size` so any single text fits in one GPU call)
 > - `--cont-batching` — enables continuous batching across parallel slots
 > - `--parallel` is auto-detected (defaults to 4 slots on Strix Halo)
 >
@@ -384,8 +381,8 @@ curl localhost:1235/v1/models
 Current tuned configuration:
 ```
 --ctx-size 2048          # Model context window (nomic-bert native)
---batch-size 4096        # Logical batch size (≥ ctx-size for safety)
---ubatch-size 4096       # Physical batch size
+--batch-size 32768       # Logical batch size (16 texts × 2048 tokens per API call)
+--ubatch-size 2048       # Physical batch size (≥ ctx-size for single-text processing)
 --cont-batching          # Continuous batching across parallel slots
 --parallel auto          # Auto-detects 4 slots on Strix Halo
 --flash-attn on          # Flash attention for GPU efficiency
@@ -458,8 +455,12 @@ All variables are set automatically by `deepred-env.sh`. Override before sourcin
 | `PG_DATABASE` | `wikidb` | PostgreSQL database name |
 | `OS_HOST` | `localhost` | OpenSearch host |
 | `OS_PORT` | `9200` | OpenSearch port |
-| `LMSTUDIO_HOST` | `localhost` | Embedding server host |
+| `INFERENCE_HOST` | `localhost` | Inference server host (LLM + embedding) |
+| `INFERENCE_PORT` | `1234` | LLM inference server port |
 | `EMBEDDING_PORT` | `1235` | Embedding server port |
+| `REMOTE_HOST` | *(blank)* | Optional remote GPU server hostname/IP (see [Remote GPU Server](#remote-gpu-server)) |
+| `REMOTE_LLM_PORT` | `1234` | LLM port on the remote server |
+| `REMOTE_EMBED_PORT` | `1235` | Embedding port on the remote server |
 
 ### Database Schema
 
@@ -495,6 +496,65 @@ The `wikipedia` index uses:
 - English text analyzer for `title`, `section_title`, `text` fields
 - k-NN vector field (`embedding`, 768 dimensions, HNSW/cosine, Lucene engine)
 - Single shard, no replicas (single-node deployment)
+
+---
+
+## Remote GPU Server
+
+If a remote GPU inference server is available (e.g. an NVIDIA A4000 system — see [`A4000-Fedora-Setup.md`](A4000-Fedora-Setup.md)), it can offload embedding and LLM inference from the primary StrixHalo system. This is optional — all pipeline scripts work with local services only.
+
+### Enabling the Remote Server
+
+Set the `REMOTE_HOST` environment variable to the hostname or IP address of the remote system. The variable is defined in `deepred-env.sh` and defaults to blank (disabled).
+
+**Temporarily** (current session only):
+
+```bash
+export REMOTE_HOST="A4000AI"
+source /mnt/data/DeepRedAI/deepred-env.sh
+```
+
+**Permanently** (auto-load on login) — add to `~/.bashrc` **before** the `deepred-env.sh` source line:
+
+```bash
+# ── DeepRedAI environment
+export DEEPRED_ROOT="/mnt/data"
+export REMOTE_HOST="A4000AI"                        # ← enable remote GPU server
+[ -f "$DEEPRED_ROOT/DeepRedAI/deepred-env.sh" ] && source "$DEEPRED_ROOT/DeepRedAI/deepred-env.sh"
+```
+
+After editing, log out and back in (or `source ~/.bashrc`) to apply. The env summary will confirm:
+
+```
+DeepRedAI environment loaded
+  ...
+  REMOTE_HOST    = A4000AI (LLM :1234, embed :1235)
+```
+
+### Custom Ports
+
+If the remote services run on non-default ports, override before sourcing:
+
+```bash
+export REMOTE_HOST="A4000AI"
+export REMOTE_LLM_PORT=1234    # default
+export REMOTE_EMBED_PORT=1235  # default
+```
+
+### Testing the Connection
+
+Use the provided test script to verify the remote server is reachable and produces identical embeddings to the local server:
+
+```bash
+source $DEEPRED_VENV/bin/activate
+python3 $DEEPRED_REPO/scripts/test_remote.py
+```
+
+The script performs:
+1. **Availability check** — calls the remote embedding and LLM `/v1/models` endpoints
+2. **Embedding comparison** — generates embeddings for test sentences on both local and remote servers, then verifies they are identical (cosine similarity ≈ 1.0)
+
+All tests must pass before using the remote server for pipeline processing.
 
 ---
 

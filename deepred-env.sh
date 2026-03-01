@@ -31,13 +31,25 @@ export DEEPRED_VENV="${DEEPRED_VENV:-$DEEPRED_ROOT/venv}"
 
 # ── Service endpoints ────────────────────────────────────────────────────
 # Override these when services run on a different host or port.
-export LMSTUDIO_HOST="${LMSTUDIO_HOST:-localhost}"
-export LMSTUDIO_PORT="${LMSTUDIO_PORT:-1234}"
+export INFERENCE_HOST="${INFERENCE_HOST:-localhost}"
+export INFERENCE_PORT="${INFERENCE_PORT:-1234}"
 export EMBEDDING_PORT="${EMBEDDING_PORT:-1235}"
 export PG_HOST="${PG_HOST:-localhost}"
 export PG_PORT="${PG_PORT:-5432}"
 export OS_HOST="${OS_HOST:-localhost}"
 export OS_PORT="${OS_PORT:-9200}"
+
+# ── Optional remote GPU server ────────────────────────────────────────────
+# Set REMOTE_HOST to the hostname or IP of a remote inference server to
+# offload LLM and embedding work to a dedicated GPU.  Leave blank
+# (the default) to use only local services.
+#
+# To enable permanently, add to ~/.bashrc BEFORE the source line:
+#   export REMOTE_HOST="A4000AI"
+#
+export REMOTE_HOST="${REMOTE_HOST:-}"
+export REMOTE_LLM_PORT="${REMOTE_LLM_PORT:-1234}"
+export REMOTE_EMBED_PORT="${REMOTE_EMBED_PORT:-1235}"
 
 # ── Convenience: add scripts to PATH ────────────────────────────────────
 case ":$PATH:" in
@@ -53,3 +65,8 @@ echo "  WIKI_DATA      = $WIKI_DATA"
 echo "  GUTENBERG_DATA = $GUTENBERG_DATA"
 echo "  DEEPRED_MODELS = $DEEPRED_MODELS"
 echo "  DEEPRED_VENV   = $DEEPRED_VENV"
+if [ -n "$REMOTE_HOST" ]; then
+    echo "  REMOTE_HOST    = $REMOTE_HOST (LLM :$REMOTE_LLM_PORT, embed :$REMOTE_EMBED_PORT)"
+else
+    echo "  REMOTE_HOST    = (not set — remote GPU server disabled)"
+fi

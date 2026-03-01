@@ -88,10 +88,10 @@ EMBEDDING_PROVIDER = 'llamacpp'
 # llama.cpp Embedding Server Configuration (when EMBEDDING_PROVIDER = 'llamacpp')
 # The dedicated embedding server runs on port 1235 (separate from the LLM on 1234).
 # These can be overridden via environment variables from deepred-env.sh.
-EMBED_HOST = os.environ.get('EMBED_HOST', os.environ.get('LMSTUDIO_HOST', 'localhost'))
-EMBED_PORT = int(os.environ.get('EMBEDDING_PORT', os.environ.get('LMSTUDIO_PORT', 1235)))
+EMBED_HOST = os.environ.get('EMBED_HOST', os.environ.get('INFERENCE_HOST', 'localhost'))
+EMBED_PORT = int(os.environ.get('EMBEDDING_PORT', os.environ.get('INFERENCE_PORT', 1235)))
 EMBED_URL = f'http://{EMBED_HOST}:{EMBED_PORT}/v1/embeddings'
-EMBED_MODEL = os.environ.get('EMBED_MODEL', os.environ.get('LMSTUDIO_MODEL', 'text-embedding-nomic-embed-text-v1.5@f16'))
+EMBED_MODEL = os.environ.get('EMBED_MODEL', os.environ.get('EMBEDDING_MODEL', 'text-embedding-nomic-embed-text-v1.5@f16'))
 EMBED_CONTEXT_LENGTH = 2048  # Max tokens per text (model-dependent: 2048 or 8192)
 EMBED_MAX_CHARS = int(EMBED_CONTEXT_LENGTH * 1.5)  # Max chars per text (conservative truncation)
 EMBED_TIMEOUT = 300  # Seconds per batch request (increased for larger batches)
@@ -101,6 +101,13 @@ EMBED_TIMEOUT = 300  # Seconds per batch request (increased for larger batches)
 # keeps payloads reasonable while minimizing HTTP round-trip overhead.
 EMBED_BATCH_SIZE = 16  # Texts per embedding API call
 EMBED_CONCURRENT_BATCHES = 4  # Concurrent requests to embedding server (match --parallel N)
+
+# Remote embedding server (optional, for parallel acceleration)
+# When REMOTE_HOST is set and the remote embedding server is reachable,
+# batches are distributed round-robin across local and remote servers.
+REMOTE_HOST = os.environ.get('REMOTE_HOST', '')
+REMOTE_EMBED_PORT = int(os.environ.get('REMOTE_EMBED_PORT', 1235))
+REMOTE_EMBED_URL = f'http://{REMOTE_HOST}:{REMOTE_EMBED_PORT}/v1/embeddings' if REMOTE_HOST else ''
 
 # Local embedding configuration (when EMBEDDING_PROVIDER = 'local')
 LOCAL_MODEL = 'all-mpnet-base-v2'
@@ -636,6 +643,47 @@ class CheckpointManager:
         return self.state.copy()
 
 
+def probe_remote_embedding_server() -> bool:
+    """
+    Check whether the remote embedding server is available.
+    
+    Tests connectivity by hitting the /v1/models endpoint on the
+    remote host.  Returns True only when REMOTE_HOST is set *and*
+    the remote server responds successfully.
+    """
+    if not REMOTE_HOST:
+        return False
+    
+    url = f'http://{REMOTE_HOST}:{REMOTE_EMBED_PORT}/v1/models'
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        models = [m.get('id', '?') for m in data.get('data', [])]
+        logging.info(
+            f"Remote embedding server available at {REMOTE_HOST}:{REMOTE_EMBED_PORT} "
+            f"(models: {', '.join(models)})"
+        )
+        return True
+    except requests.ConnectionError:
+        logging.warning(
+            f"Remote embedding server at {REMOTE_HOST}:{REMOTE_EMBED_PORT} "
+            f"is not reachable — falling back to local only"
+        )
+        return False
+    except requests.Timeout:
+        logging.warning(
+            f"Remote embedding server at {REMOTE_HOST}:{REMOTE_EMBED_PORT} "
+            f"timed out — falling back to local only"
+        )
+        return False
+    except Exception as e:
+        logging.warning(
+            f"Remote embedding server probe failed: {e} — falling back to local only"
+        )
+        return False
+
+
 class EmbeddingProvider:
     """Abstract base for embedding providers."""
     
@@ -664,25 +712,39 @@ class LlamaCppEmbedding(EmbeddingProvider):
     throughput while staying within model limits. Based on benchmarks,
     paragraph-level text (~500 chars, 16-32 texts per batch) achieves
     best throughput for Wikipedia processing.
+    
+    When a reachable remote embedding server is detected (via REMOTE_HOST),
+    batches are distributed round-robin across local and remote endpoints
+    to roughly double embedding throughput.
     """
     
     # Retry configuration
     MAX_RETRIES = 3
     RETRY_DELAY = 2.0  # seconds, doubles with each retry
     
-    def __init__(self, skip_connection_test: bool = False):
+    def __init__(self, skip_connection_test: bool = False,
+                 endpoints: Optional[List[str]] = None):
         """
         Initialize llama.cpp embedding provider.
         
         Args:
             skip_connection_test: If True, don't test connection on init (for test mode)
+            endpoints: List of embedding API URLs.  When more than one URL is
+                       supplied, batches are spread across all endpoints.
+                       Defaults to [EMBED_URL].
         """
+        self.endpoints = endpoints or [EMBED_URL]
+        
         logging.info(f"Initializing llama.cpp embedding provider...")
-        logging.info(f"  Server: {EMBED_URL}")
+        for i, url in enumerate(self.endpoints):
+            tag = "Local" if i == 0 else "Remote"
+            logging.info(f"  Endpoint {i + 1} ({tag}): {url}")
         logging.info(f"  Model: {EMBED_MODEL}")
         logging.info(f"  Context length: {EMBED_CONTEXT_LENGTH} tokens")
         logging.info(f"  Max chars per text: {EMBED_MAX_CHARS}")
         logging.info(f"  Max texts per batch: {EMBED_BATCH_SIZE}")
+        if len(self.endpoints) > 1:
+            logging.info(f"  Dual-endpoint mode: batches distributed across {len(self.endpoints)} servers")
         
         if not skip_connection_test:
             success, msg = self.test_connection()
@@ -748,17 +810,19 @@ class LlamaCppEmbedding(EmbeddingProvider):
         
         return batches
     
-    def test_connection(self) -> Tuple[bool, str]:
+    def _test_single_endpoint(self, url: str) -> Tuple[bool, str]:
         """
-        Test connection to llama.cpp server and verify embedding generation.
+        Test connection to a single llama.cpp endpoint.
         
+        Args:
+            url: Full URL to the /v1/embeddings endpoint
+            
         Returns:
             Tuple of (success, message)
         """
         try:
-            # Try a simple embedding request
             response = requests.post(
-                EMBED_URL,
+                url,
                 json={'model': EMBED_MODEL, 'input': ['test connection']},
                 headers={'Content-Type': 'application/json'},
                 timeout=30
@@ -767,26 +831,47 @@ class LlamaCppEmbedding(EmbeddingProvider):
             
             data = response.json()
             
-            # Verify response structure
             if 'data' not in data or len(data['data']) == 0:
-                return False, "llama.cpp returned empty embedding data"
+                return False, f"llama.cpp at {url} returned empty embedding data"
             
             embedding = data['data'][0].get('embedding', [])
             if len(embedding) != EMBEDDING_DIM:
-                return False, f"Embedding dimension mismatch: expected {EMBEDDING_DIM}, got {len(embedding)}"
+                return False, f"Embedding dimension mismatch at {url}: expected {EMBEDDING_DIM}, got {len(embedding)}"
             
-            # Verify embedding is not all zeros (some models return zeros on error)
             if all(v == 0.0 for v in embedding):
-                return False, "llama.cpp returned zero vector - model may not be loaded correctly"
+                return False, f"llama.cpp at {url} returned zero vector - model may not be loaded correctly"
             
-            return True, f"llama.cpp connection verified (model: {EMBED_MODEL}, dim: {len(embedding)})"
+            return True, f"llama.cpp verified at {url} (model: {EMBED_MODEL}, dim: {len(embedding)})"
             
         except requests.exceptions.ConnectionError:
-            return False, f"Cannot connect to llama.cpp at {EMBED_URL}. Is the server running?"
+            return False, f"Cannot connect to llama.cpp at {url}. Is the server running?"
         except requests.exceptions.Timeout:
-            return False, f"Connection to llama.cpp timed out. Server may be overloaded."
+            return False, f"Connection to llama.cpp at {url} timed out. Server may be overloaded."
         except Exception as e:
-            return False, f"llama.cpp connection test failed: {e}"
+            return False, f"llama.cpp connection test failed at {url}: {e}"
+    
+    def test_connection(self) -> Tuple[bool, str]:
+        """
+        Test connection to all configured llama.cpp endpoints.
+        
+        Returns:
+            Tuple of (success, message) — success requires at least the
+            primary (local) endpoint to be reachable.
+        """
+        messages = []
+        primary_ok = False
+        
+        for i, url in enumerate(self.endpoints):
+            ok, msg = self._test_single_endpoint(url)
+            tag = "local" if i == 0 else "remote"
+            messages.append(f"[{tag}] {msg}")
+            if i == 0:
+                primary_ok = ok
+            if not ok and i > 0:
+                logging.warning(f"Remote endpoint failed connection test: {msg}")
+        
+        combined = "; ".join(messages)
+        return primary_ok, combined
     
     def _is_valid_embedding(self, embedding: List[float]) -> bool:
         """
@@ -810,7 +895,8 @@ class LlamaCppEmbedding(EmbeddingProvider):
     def _request_embeddings_with_retry(
         self, 
         texts: List[str], 
-        pre_truncated: bool = False
+        pre_truncated: bool = False,
+        embed_url: Optional[str] = None
     ) -> Tuple[List[Optional[List[float]]], List[int]]:
         """
         Request embeddings from llama.cpp with retry logic.
@@ -818,10 +904,13 @@ class LlamaCppEmbedding(EmbeddingProvider):
         Args:
             texts: List of text strings to embed
             pre_truncated: If True, texts are already truncated (skip truncation step)
+            embed_url: Override URL for this request (used for multi-endpoint)
             
         Returns:
             Tuple of (embeddings list with None for failures, list of failed indices)
         """
+        url = embed_url or self.endpoints[0]
+        
         # Truncate texts if not already done by batch creation
         if pre_truncated:
             request_texts = texts
@@ -844,7 +933,7 @@ class LlamaCppEmbedding(EmbeddingProvider):
         for attempt in range(self.MAX_RETRIES):
             try:
                 response = requests.post(
-                    EMBED_URL,
+                    url,
                     json={
                         'model': EMBED_MODEL,
                         'input': request_texts
@@ -952,28 +1041,39 @@ class LlamaCppEmbedding(EmbeddingProvider):
         
         # Log batch stats on first call or when debugging
         total_chars = sum(len(t) for batch in batches for _, t in batch)
+        endpoint_info = (
+            f", {len(self.endpoints)} endpoint(s)"
+            if len(self.endpoints) > 1 else ""
+        )
         logging.info(
             f"Embedding {len(texts)} texts in {len(batches)} batches "
             f"(~{len(texts)/max(len(batches),1):.1f} texts/batch, "
-            f"{total_chars:,} total chars)"
+            f"{total_chars:,} total chars{endpoint_info})"
         )
         
         # Pre-allocate result array
         all_embeddings: List[Optional[List[float]]] = [None] * len(texts)
         total_failed = 0
         
+        # Determine concurrency: when using multiple endpoints, scale the
+        # thread pool so each server gets its full share of parallel slots.
+        num_endpoints = len(self.endpoints)
+        max_workers = EMBED_CONCURRENT_BATCHES * num_endpoints
+        
         def _process_batch(batch_info):
             """Process a single batch and return (batch_idx, embeddings, original_indices, failed_indices)."""
             batch_idx, batch = batch_info
             batch_texts = [text for _, text in batch]
             original_indices = [idx for idx, _ in batch]
+            # Round-robin assignment: alternate batches across endpoints
+            endpoint_url = self.endpoints[batch_idx % num_endpoints]
             embeddings, failed_indices = self._request_embeddings_with_retry(
-                batch_texts, pre_truncated=True
+                batch_texts, pre_truncated=True, embed_url=endpoint_url
             )
             return batch_idx, embeddings, original_indices, failed_indices
         
         # Send batches concurrently to utilize server parallel slots
-        with ThreadPoolExecutor(max_workers=EMBED_CONCURRENT_BATCHES) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             completed = 0
             
@@ -1098,11 +1198,30 @@ def create_embedding_provider(skip_connection_test: bool = False) -> EmbeddingPr
     """
     Factory function to create the configured embedding provider.
     
+    When EMBEDDING_PROVIDER is 'llamacpp' and a REMOTE_HOST is set with a
+    reachable embedding server, the provider is configured with two endpoints
+    (local + remote) so batches are processed in parallel on both GPUs.
+    
     Args:
         skip_connection_test: If True, skip connection test during initialization
     """
     if EMBEDDING_PROVIDER == 'llamacpp':
-        return LlamaCppEmbedding(skip_connection_test=skip_connection_test)
+        endpoints = [EMBED_URL]
+        
+        # Probe the remote embedding server (only when not in test-only mode)
+        if REMOTE_HOST and REMOTE_EMBED_URL:
+            if probe_remote_embedding_server():
+                endpoints.append(REMOTE_EMBED_URL)
+                logging.info(
+                    "Dual-endpoint embedding enabled: local + remote "
+                    f"({REMOTE_HOST}:{REMOTE_EMBED_PORT})"
+                )
+            # If probe fails, warning was already logged; continue with local only
+        
+        return LlamaCppEmbedding(
+            skip_connection_test=skip_connection_test,
+            endpoints=endpoints
+        )
     elif EMBEDDING_PROVIDER == 'local':
         return LocalEmbedding(skip_connection_test=skip_connection_test)
     else:
@@ -1172,6 +1291,9 @@ All systems should process this content correctly if configured properly.
         
         # Test 3: Embedding Provider
         all_passed &= self._test_embedding_provider()
+        
+        # Test 3b: Remote embedding server (informational, never blocks)
+        self._test_remote_embedding()
         
         # Test 4: End-to-end pipeline (if all components work)
         if all_passed:
@@ -1294,6 +1416,39 @@ All systems should process this content correctly if configured properly.
             self.results.append((test_name, False, message))
             logging.error(f"  ✗ {message}")
             return False
+    
+    def _test_remote_embedding(self):
+        """Test remote embedding server availability (informational only)."""
+        logging.info("")
+        logging.info("Testing remote embedding server (REMOTE_HOST)...")
+        
+        if not REMOTE_HOST:
+            logging.info("  ⓘ REMOTE_HOST not set — remote acceleration disabled")
+            self.results.append((
+                "Remote Embedding (optional)", True,
+                "REMOTE_HOST not set — single-server mode"
+            ))
+            return
+        
+        available = probe_remote_embedding_server()
+        if available:
+            logging.info(
+                f"  ✓ Remote embedding server at {REMOTE_HOST}:{REMOTE_EMBED_PORT} "
+                f"is available — dual-endpoint mode will be used during processing"
+            )
+            self.results.append((
+                "Remote Embedding (optional)", True,
+                f"Remote server at {REMOTE_HOST}:{REMOTE_EMBED_PORT} reachable"
+            ))
+        else:
+            logging.warning(
+                f"  ⚠ Remote embedding server at {REMOTE_HOST}:{REMOTE_EMBED_PORT} "
+                f"is not reachable — will use local server only"
+            )
+            self.results.append((
+                "Remote Embedding (optional)", True,
+                f"Remote server at {REMOTE_HOST}:{REMOTE_EMBED_PORT} unreachable (non-fatal)"
+            ))
     
     def _test_full_pipeline(self) -> bool:
         """Test the full processing pipeline with dummy data."""

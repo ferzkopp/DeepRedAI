@@ -6,7 +6,8 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 
 ## Steps/Instructions
 
-- [How to setup an AMD "Strix Halo" device (Fedora)](documentation/StrixHalo-Fedora-Setup.md) — includes automated setup script
+- [How to setup an AMD "Strix Halo" device (Fedora)](documentation/StrixHalo-Fedora-Setup.md) — primary development and training system; includes automated setup script
+- [How to setup an optional second NVIDIA device (A4000)](documentation/A4000-Fedora-Setup.md) — dedicated GPU for training/inference; includes automated setup script
 - [How to set up the Wikipedia MCP server and data pipeline](documentation/WikipediaMCP-Setup.md) — extraction, indexing, search, and MCP server for Wikipedia content
 - [How to extract year-based historical topics from Wikipedia](documentation/Wikipedia-YearTopics.md) — enriched event data for temporal finetuning
 - [Model Training from Scratch](documentation/ModelTraining.md) — continued pre-training approach for temporal and thematic alignment
@@ -35,7 +36,7 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 
 - **`/documentation`** - Setup guides and planning documents for the project
 - **`/scripts`** - Python scripts for Wikipedia extraction, processing, indexing, YAGO parsing, Wikidata parsing, and the MCP server
-- **`/services`** - Systemd service files for automated startup (LMStudio, MCP server, OpenSearch, web GUI)
+- **`/services`** - Systemd service files for automated startup (inference servers, MCP server, OpenSearch, web GUI)
 - **`/webapp`** - React-based web interface for Wikipedia search with Vite configuration
 - **`/notebooks`** - Jupyter notebooks for testing embeddings and OpenSearch functionality
 - **`/patches`** - System patches (network driver fix for AMD Strix Halo)

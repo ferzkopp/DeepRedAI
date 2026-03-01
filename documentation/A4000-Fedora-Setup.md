@@ -43,7 +43,7 @@ This guide covers the setup of a secondary inference server running Fedora 43 on
 | Model | VRAM Usage | Notes |
 |-------|-----------|-------|
 | Qwen 2.5 7B Q4_K_M (LLM) | ~5–7 GB | Model (~4.7 GB) + KV cache (8192 ctx) |
-| nomic-embed-text-v1.5 F16 (embedding) | ~0.5 GB | Lightweight embedding model |
+| nomic-embed-text-v1.5 F16 (embedding) | ~0.5 GB | Lightweight embedding model; `--batch-size 32768` + `--ubatch-size 2048` for pipeline batch throughput |
 | **Total (both running)** | **~6–8 GB** | Leaves 8–10 GB headroom |
 
 > **Larger models:** The A4000 can also run Qwen 2.5 14B Q4_K_M (~9 GB + KV cache ≈ 11 GB) alongside the embedding model. Use `llm-swap` to switch models without rebuilding.
@@ -321,23 +321,34 @@ Stage progress is tracked in `$DEEPRED_REPO/.setup_a4000_state.json`. After a re
 
 ### Integration with StrixHalo
 
-To offload inference from the StrixHalo system to the A4000 VM, override the service endpoint variables before running scripts:
+To offload inference from the StrixHalo system to the A4000 VM, set the `REMOTE_HOST` environment variable. This is the recommended approach — `deepred-env.sh` defines the variable and pipeline scripts can use it.
+
+**Temporarily** (current session):
 
 ```bash
-# On StrixHalo — point LLM calls to the A4000 system
-export LMSTUDIO_HOST=A4000AI
-export LMSTUDIO_PORT=1234
-
-# Or point embedding calls to the A4000 system
-export EMBEDDING_PORT=1235
-export LMSTUDIO_HOST=A4000AI
-
-# Then run pipeline scripts as normal
-source $DEEPRED_VENV/bin/activate
-python $DEEPRED_REPO/scripts/process_and_index.py
+export REMOTE_HOST=A4000AI
+source /mnt/data/DeepRedAI/deepred-env.sh
 ```
 
-You can also edit `deepred-env.sh` on the StrixHalo system (or set the overrides in `~/.bashrc`) to make this permanent.
+**Permanently** — add to `~/.bashrc` on the StrixHalo system, **before** the `deepred-env.sh` source line:
+
+```bash
+# ── DeepRedAI environment
+export DEEPRED_ROOT="/mnt/data"
+export REMOTE_HOST="A4000AI"                        # ← enable remote GPU server
+[ -f "$DEEPRED_ROOT/DeepRedAI/deepred-env.sh" ] && source "$DEEPRED_ROOT/DeepRedAI/deepred-env.sh"
+```
+
+**Verify the connection:**
+
+```bash
+source $DEEPRED_VENV/bin/activate
+python3 $DEEPRED_REPO/scripts/test_remote.py
+```
+
+This tests reachability and confirms that remote and local embedding servers produce identical results. See [`WikipediaMCP-Setup.md` — Remote GPU Server](WikipediaMCP-Setup.md#remote-gpu-server) for full details.
+
+> **Legacy approach:** You can also override endpoint variables directly (`export INFERENCE_HOST=A4000AI`), but the `REMOTE_HOST` variable is preferred as it cleanly separates the remote server configuration from local service defaults.
 
 ### Swapping Models
 

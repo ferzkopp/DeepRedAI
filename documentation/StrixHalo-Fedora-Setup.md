@@ -460,8 +460,8 @@ These service-endpoint variables are also exported (but not printed):
 
 | Variable | Default | Purpose |
 |----------|---------|--------|
-| `LMSTUDIO_HOST` | `localhost` | LLM server host |
-| `LMSTUDIO_PORT` | `1234` | LLM server port |
+| `INFERENCE_HOST` | `localhost` | Inference server host (LLM + embedding) |
+| `INFERENCE_PORT` | `1234` | LLM inference server port |
 | `EMBEDDING_PORT` | `1235` | Embedding server port |
 | `PG_HOST` / `PG_PORT` | `localhost` / `5432` | PostgreSQL connection |
 | `OS_HOST` / `OS_PORT` | `localhost` / `9200` | OpenSearch connection |

@@ -657,6 +657,8 @@ def stage_llama_server(user: str) -> None:
                 --flash-attn on \\
                 --no-mmap \\
                 --ctx-size 2048 \\
+                --batch-size 32768 \\
+                --ubatch-size 2048 \\
                 --threads 8 \\
                 --embedding \\
                 --alias "text-embedding-nomic-embed-text-v1.5@f16"
@@ -987,8 +989,8 @@ def stage_mcp_server(user: str) -> None:
             User=wiki
             Group=wiki
             Environment="WIKI_DATA={DATA_DIR / 'wikipedia'}"
-            Environment="LMSTUDIO_HOST=localhost"
-            Environment="LMSTUDIO_PORT=1235"
+            Environment="INFERENCE_HOST=localhost"
+            Environment="EMBEDDING_PORT=1235"
             WorkingDirectory={scripts_dest}
             ExecStart={VENV_DIR}/bin/uvicorn mcp_server:app --host 0.0.0.0 --port 7000
             Restart=on-failure

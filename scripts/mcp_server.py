@@ -56,10 +56,10 @@ MAX_LIMIT = 100
 # The embedding server runs on a dedicated port (1235), separate from the
 # LLM chat server (1234).  The model alias must match the --alias flag
 # in the llama-server-embed Quadlet (see setup_strixhalo.py).
-EMBEDDING_PROVIDER = os.environ.get('EMBEDDING_PROVIDER', 'lmstudio')
-LMSTUDIO_HOST = os.environ.get('LMSTUDIO_HOST', 'localhost')
-LMSTUDIO_PORT = int(os.environ.get('EMBEDDING_PORT', os.environ.get('LMSTUDIO_PORT', 1235)))
-LMSTUDIO_MODEL = os.environ.get('LMSTUDIO_MODEL', 'text-embedding-nomic-embed-text-v1.5@f16')
+EMBEDDING_PROVIDER = os.environ.get('EMBEDDING_PROVIDER', 'llamacpp')
+EMBEDDING_HOST = os.environ.get('EMBEDDING_HOST', os.environ.get('INFERENCE_HOST', 'localhost'))
+EMBEDDING_PORT = int(os.environ.get('EMBEDDING_PORT', os.environ.get('INFERENCE_PORT', 1235)))
+EMBEDDING_MODEL = os.environ.get('EMBEDDING_MODEL', 'text-embedding-nomic-embed-text-v1.5@f16')
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -116,12 +116,12 @@ def generate_embedding(text: str) -> List[float]:
     """Generate embedding for text using configured provider."""
     global embedding_model
     
-    if EMBEDDING_PROVIDER == 'lmstudio':
+    if EMBEDDING_PROVIDER == 'llamacpp':
         import requests
-        url = f'http://{LMSTUDIO_HOST}:{LMSTUDIO_PORT}/v1/embeddings'
+        url = f'http://{EMBEDDING_HOST}:{EMBEDDING_PORT}/v1/embeddings'
         response = requests.post(
             url,
-            json={'model': LMSTUDIO_MODEL, 'input': [text]},
+            json={'model': EMBEDDING_MODEL, 'input': [text]},
             timeout=60
         )
         response.raise_for_status()
@@ -282,12 +282,12 @@ async def health_check():
     
     # Check embedding provider
     try:
-        if EMBEDDING_PROVIDER == 'lmstudio':
+        if EMBEDDING_PROVIDER == 'llamacpp':
             import requests
-            url = f'http://{LMSTUDIO_HOST}:{LMSTUDIO_PORT}/v1/models'
+            url = f'http://{EMBEDDING_HOST}:{EMBEDDING_PORT}/v1/models'
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
-                embed_status = f"healthy (lmstudio @ {LMSTUDIO_HOST})"
+                embed_status = f"healthy (llamacpp @ {EMBEDDING_HOST})"
             else:
                 embed_status = f"error: HTTP {response.status_code}"
         else:
