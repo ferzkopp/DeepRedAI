@@ -372,17 +372,23 @@ def stage_nvidia_container_toolkit(user: str) -> None:
             "nvidia-container-toolkit.repo | tee /etc/yum.repos.d/nvidia-container-toolkit.repo")
 
     # Install the toolkit
+    # nvidia-container-toolkit 1.18+ ships systemd units (nvidia-cdi-refresh.service)
+    # that automatically generate/refresh CDI specs — no manual runtime
+    # configuration is needed for Podman (CDI is Podman's native GPU path).
     run("dnf install -y nvidia-container-toolkit")
 
-    # Configure Podman runtime for NVIDIA
-    run("nvidia-ctk runtime configure --runtime=podman")
+    # Ensure the CDI spec exists.  The package %post scriptlet triggers
+    # nvidia-cdi-refresh.service which generates /etc/cdi/nvidia.yaml
+    # automatically.  If it hasn't run yet, generate the spec manually.
+    cdi_spec = pathlib.Path("/etc/cdi/nvidia.yaml")
+    if not cdi_spec.exists():
+        cdi_dir = pathlib.Path("/etc/cdi")
+        cdi_dir.mkdir(parents=True, exist_ok=True)
+        run("nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml")
+    else:
+        log.info("  CDI spec already present at %s", cdi_spec)
 
-    # Generate CDI (Container Device Interface) specification
-    cdi_dir = pathlib.Path("/etc/cdi")
-    cdi_dir.mkdir(parents=True, exist_ok=True)
-    run("nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml")
-
-    # Verify CDI spec was created
+    # Verify CDI spec lists the GPU
     result = run_quiet("nvidia-ctk cdi list", check=False)
     if result.returncode == 0 and "nvidia.com/gpu" in (result.stdout or ""):
         log.info("  ✓ CDI spec generated — GPU devices available to containers")
