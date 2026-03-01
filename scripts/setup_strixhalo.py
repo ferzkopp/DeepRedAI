@@ -324,6 +324,39 @@ def stage_disable_sleep(user: str) -> None:
                 check=False,
             )
 
+    # Disable auto-suspend in GDM greeter session (independent from user session)
+    # GDM has its own dconf database — without this override, the greeter will
+    # trigger "The system will suspend now!" when the login screen is idle.
+    gdm_profile = pathlib.Path("/etc/dconf/profile/gdm")
+    gdm_db_dir = pathlib.Path("/etc/dconf/db/gdm.d")
+    gdm_override = gdm_db_dir / "99-no-suspend"
+    if not gdm_override.exists():
+        # Ensure GDM dconf profile exists and includes the gdm-local db
+        gdm_db_dir.mkdir(parents=True, exist_ok=True)
+        if not gdm_profile.exists() or "gdm" not in gdm_profile.read_text():
+            write_file(
+                gdm_profile,
+                textwrap.dedent("""\
+                    user-db:user
+                    system-db:gdm
+                    file-db:/usr/share/gdm/greeter-dconf-defaults
+                """),
+            )
+        write_file(
+            gdm_override,
+            textwrap.dedent("""\
+                [org/gnome/settings-daemon/plugins/power]
+                sleep-inactive-ac-type='nothing'
+                sleep-inactive-ac-timeout=uint32 0
+                sleep-inactive-battery-type='nothing'
+                sleep-inactive-battery-timeout=uint32 0
+            """),
+        )
+        run("dconf update")
+        log.info("  GDM greeter auto-suspend disabled via dconf override")
+    else:
+        log.info("  GDM greeter no-suspend override already present")
+
     # Verify
     result = run_quiet("systemctl is-enabled suspend.target", check=False)
     if "masked" in result.stdout:

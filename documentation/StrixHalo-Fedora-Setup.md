@@ -158,6 +158,29 @@ if command -v gsettings &>/dev/null; then
   gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing'
   gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-timeout 0
 fi
+
+# Disable auto-suspend in GDM greeter session
+# ⚠️ GDM has its own dconf database — without this, the login screen will
+# trigger "The system will suspend now!" even with everything above disabled.
+sudo mkdir -p /etc/dconf/db/gdm.d
+
+# Ensure GDM dconf profile exists
+cat <<'EOF' | sudo tee /etc/dconf/profile/gdm
+user-db:user
+system-db:gdm
+file-db:/usr/share/gdm/greeter-dconf-defaults
+EOF
+
+# Override power settings in the GDM greeter
+cat <<'EOF' | sudo tee /etc/dconf/db/gdm.d/99-no-suspend
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+sleep-inactive-ac-timeout=uint32 0
+sleep-inactive-battery-type='nothing'
+sleep-inactive-battery-timeout=uint32 0
+EOF
+
+sudo dconf update
 ```
 
 Verify all sleep targets are masked:
