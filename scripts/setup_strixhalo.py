@@ -276,7 +276,8 @@ def stage(
 def stage_system_packages(user: str) -> None:
     run("dnf install -y @development-tools cmake gcc-c++ git curl wget "
         "python3-devel python3-pip python3-setuptools python3-wheel "
-        "lld clang clang-devel compiler-rt libcurl-devel")
+        "lld clang clang-devel compiler-rt libcurl-devel "
+        "radeontop")
 
 
 @stage("disable_sleep", "Disable sleep/suspend for always-on server operation")
@@ -793,6 +794,62 @@ def stage_postgresql(user: str) -> None:
 
     log.info("  PostgreSQL data directory: %s", pg_data_dir)
     log.info("  PostgreSQL configured: user=wiki, db=wikidb")
+
+
+@stage("wikipedia_schema", "Create Wikipedia database schema and extensions")
+def stage_wikipedia_schema(user: str) -> None:
+    # Install pg_trgm extension (requires PostgreSQL superuser)
+    run('su - postgres -c "psql -d wikidb -c \'CREATE EXTENSION IF NOT EXISTS pg_trgm;\'"')
+
+    # Write schema to a file, then apply as wiki user
+    schema_file = DATA_DIR / "wikipedia" / "schema.sql"
+    schema_file.parent.mkdir(parents=True, exist_ok=True)
+    write_file(
+        schema_file,
+        textwrap.dedent("""\
+            -- Wikipedia MCP database schema
+            CREATE TABLE IF NOT EXISTS articles (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT,
+                url TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS sections (
+                id SERIAL PRIMARY KEY,
+                article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
+                section_title TEXT,
+                section_text TEXT,
+                section_order INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS redirects (
+                source_title TEXT PRIMARY KEY,
+                target_title TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_articles_title ON articles(title);
+            CREATE INDEX IF NOT EXISTS idx_sections_article_id ON sections(article_id);
+            CREATE INDEX IF NOT EXISTS idx_sections_text_trgm ON sections USING gin(section_text gin_trgm_ops);
+        """),
+    )
+
+    run(f"PGPASSWORD=wiki psql -h localhost -U wiki -d wikidb -f {schema_file}")
+
+    # Verify tables were created
+    result = run_quiet(
+        "PGPASSWORD=wiki psql -h localhost -U wiki -d wikidb -tc "
+        "\"SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema='public' AND table_name IN ('articles','sections','redirects');\"",
+    )
+    count = result.stdout.strip()
+    if count == "3":
+        log.info("  ✓ Wikipedia schema created: articles, sections, redirects")
+    else:
+        log.warning("  Schema verification found %s/3 tables — check manually", count)
+
+    run(f"chown -R wiki:wiki {DATA_DIR / 'wikipedia'}", check=False)
 
 
 @stage("opensearch", "Download, configure, and deploy OpenSearch")

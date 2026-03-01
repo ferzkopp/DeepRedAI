@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Extract Wikipedia articles from XML dump to clean JSON format using parallel processing.
+"""
+Extract Wikipedia articles from XML dump to clean JSON format using parallel processing.
 
 Features:
 - Uses mediawiki-dump for XML parsing
@@ -11,28 +12,16 @@ Features:
 Prerequisites:
 - mediawiki-dump: pip install mediawiki-dump
 - mwparserfromhell: pip install mwparserfromhell
-- Python 3.12+ recommended
-
-Environment Variables:
-    WIKI_DATA       Path to Wikipedia data directory (default: $DEEPRED_ROOT/wikipedia)
-    DEEPRED_ROOT    Base data directory (default: /mnt/data)
+- Python 3.8+ recommended for multiprocessing stability
 
 Usage:
-    # Source environment first
-    source deepred-env.sh
-
-    # Extract using environment defaults
-    python scripts/extract_wikipedia.py
-
-    # Override paths via arguments
-    python scripts/extract_wikipedia.py --dump-file /path/to/dump.xml.bz2 --output-dir /path/to/output
+    python extract_wikipedia.py
 """
 
 import io
 import bz2
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from multiprocessing import Pool, cpu_count
@@ -464,40 +453,8 @@ def extract_articles(dump_file, output_dir, batch_size=1000, backup_dir=None):
     logging.info(f"Extraction complete! Total articles: {total_articles}")
 
 if __name__ == '__main__':
-    import argparse
-
-    _DEEPRED_ROOT = os.environ.get('DEEPRED_ROOT', '/mnt/data')
-    _WIKI_DATA = os.environ.get('WIKI_DATA', os.path.join(_DEEPRED_ROOT, 'wikipedia'))
-
-    parser = argparse.ArgumentParser(
-        description='Extract Wikipedia articles from XML dump to clean JSON files.',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''\nExamples:\n  python extract_wikipedia.py                    # Use $WIKI_DATA defaults\n  python extract_wikipedia.py --batch-size 500    # Smaller batch files\n'''
-    )
-    parser.add_argument(
-        '--dump-file',
-        default=os.path.join(_WIKI_DATA, 'dumps', 'enwiki-latest-pages-articles.xml.bz2'),
-        help='Path to Wikipedia XML dump (bz2 compressed)'
-    )
-    parser.add_argument(
-        '--output-dir',
-        default=os.path.join(_WIKI_DATA, 'extracted'),
-        help='Directory to write extracted JSON files'
-    )
-    parser.add_argument(
-        '--batch-size',
-        type=int,
-        default=1000,
-        help='Number of articles per batch file (default: 1000)'
-    )
-    args = parser.parse_args()
-
-    logging.info(f'Dump file: {args.dump_file}')
-    logging.info(f'Output dir: {args.output_dir}')
-    logging.info(f'Batch size: {args.batch_size}')
-
     extract_articles(
-        dump_file=args.dump_file,
-        output_dir=args.output_dir,
-        batch_size=args.batch_size
+        dump_file='/srv/wikipedia/dumps/enwiki-latest-pages-articles.xml.bz2',
+        output_dir='/srv/wikipedia/extracted',
+        batch_size=1000
     )

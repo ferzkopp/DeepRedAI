@@ -7,6 +7,8 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 ## Steps/Instructions
 
 - [How to setup an AMD "Strix Halo" device (Fedora)](documentation/StrixHalo-Fedora-Setup.md) — includes automated setup script
+- [How to set up the Wikipedia MCP server and data pipeline](documentation/WikipediaMCP-Setup.md) — extraction, indexing, search, and MCP server for Wikipedia content
+- [How to extract year-based historical topics from Wikipedia](documentation/Wikipedia-YearTopics.md) — enriched event data for temporal finetuning
 - [Model Training from Scratch](documentation/ModelTraining.md) — continued pre-training approach for temporal and thematic alignment
 
 ## Legacy Steps/Instructions

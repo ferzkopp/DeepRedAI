@@ -6,13 +6,13 @@ This script:
 1. Reads JSON files from /srv/wikipedia/extracted/wikipedia_batch_*.json
 2. Splits articles into sections based on headers
 3. Inserts articles and sections into PostgreSQL
-4. Generates embeddings using llama.cpp API (default) or sentence-transformers (fallback)
+4. Generates embeddings using LM Studio API (default) or sentence-transformers (fallback)
 5. Creates OpenSearch index with k-NN vector search support
 6. Bulk indexes documents with embeddings for fast retrieval
 7. Supports checkpoint/resume for long-running processing jobs
 
 Embedding Provider Options:
-- 'llamacpp': Use external llama.cpp server with nomic-embed-text-v1.5 (GPU accelerated)
+- 'lmstudio': Use external LM Studio server with nomic-embed-text-v1.5 (GPU accelerated)
 - 'local': Use local sentence-transformers model (CPU, slower)
 
 Checkpoint/Resume Feature:
@@ -44,9 +44,9 @@ Examples:
     # Start over from the beginning (deletes previous progress)
     python3 process_and_index.py --reset
     
-    # Use llama.cpp on a remote server for embeddings
-    # (edit EMBED_HOST in the script configuration section)
-    python3 process_and_index.py --provider llamacpp
+    # Use LM Studio on a remote server for embeddings
+    # (edit LMSTUDIO_HOST in the script configuration section)
+    python3 process_and_index.py --provider lmstudio
 
 Environment Variables:
     WIKI_DATA   Required. Path to the Wikipedia data directory containing:
@@ -63,7 +63,6 @@ import os
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 
@@ -82,25 +81,21 @@ logging.basicConfig(
 # =============================================================================
 # EMBEDDING CONFIGURATION
 # =============================================================================
-# Choose embedding provider: 'llamacpp' (recommended) or 'local'
-EMBEDDING_PROVIDER = 'llamacpp'
+# Choose embedding provider: 'lmstudio' (recommended) or 'local'
+EMBEDDING_PROVIDER = 'lmstudio'
 
-# llama.cpp Embedding Server Configuration (when EMBEDDING_PROVIDER = 'llamacpp')
+# LM Studio / llama-server Configuration (when EMBEDDING_PROVIDER = 'lmstudio')
 # The dedicated embedding server runs on port 1235 (separate from the LLM on 1234).
-# These can be overridden via environment variables from deepred-env.sh.
-EMBED_HOST = os.environ.get('EMBED_HOST', os.environ.get('LMSTUDIO_HOST', 'localhost'))
-EMBED_PORT = int(os.environ.get('EMBEDDING_PORT', os.environ.get('LMSTUDIO_PORT', 1235)))
-EMBED_URL = f'http://{EMBED_HOST}:{EMBED_PORT}/v1/embeddings'
-EMBED_MODEL = os.environ.get('EMBED_MODEL', os.environ.get('LMSTUDIO_MODEL', 'text-embedding-nomic-embed-text-v1.5@f16'))
-EMBED_CONTEXT_LENGTH = 2048  # Max tokens per text (model-dependent: 2048 or 8192)
-EMBED_MAX_CHARS = int(EMBED_CONTEXT_LENGTH * 1.5)  # Max chars per text (conservative truncation)
-EMBED_TIMEOUT = 300  # Seconds per batch request (increased for larger batches)
-# Batch sizing: the server handles internal GPU batching across its --batch-size,
-# so we only need to limit texts-per-request for HTTP/JSON overhead reasons.
-# With typical Wikipedia sections truncated to ~3072 chars, 16 texts per request
-# keeps payloads reasonable while minimizing HTTP round-trip overhead.
-EMBED_BATCH_SIZE = 16  # Texts per embedding API call
-EMBED_CONCURRENT_BATCHES = 4  # Concurrent requests to embedding server (match --parallel N)
+LMSTUDIO_HOST = 'localhost'  # Embedding server host
+LMSTUDIO_PORT = 1235
+LMSTUDIO_URL = f'http://{LMSTUDIO_HOST}:{LMSTUDIO_PORT}/v1/embeddings'
+LMSTUDIO_MODEL = 'text-embedding-nomic-embed-text-v1.5@f16'  # Must match --alias in Quadlet
+LMSTUDIO_CONTEXT_LENGTH = 2048  # Max tokens per text (model-dependent: 2048 or 8192)
+LMSTUDIO_MODEL_BATCH_SIZE = 1024  # Max batch size in tokens (model config limit)
+LMSTUDIO_TIMEOUT = 300  # Seconds per batch request (increased for larger batches)
+# Optimized for Wikipedia paragraph-level text (~500 chars, ~125 tokens per paragraph)
+# Based on benchmarks: 16-32 paragraphs per batch achieves best throughput
+LMSTUDIO_BATCH_SIZE = 32  # Texts per embedding API call (optimized for paragraph-level)
 
 # Local embedding configuration (when EMBEDDING_PROVIDER = 'local')
 LOCAL_MODEL = 'all-mpnet-base-v2'
@@ -112,10 +107,9 @@ EMBEDDING_DIM = 768
 # =============================================================================
 # GENERAL CONFIGURATION
 # =============================================================================
-# WIKI_DATA environment variable points to the Wikipedia data directory.
-# Set automatically by sourcing deepred-env.sh, or set manually.
-_DEEPRED_ROOT = os.environ.get('DEEPRED_ROOT', '/mnt/data')
-WIKI_DATA_DIR = os.environ.get('WIKI_DATA', os.path.join(_DEEPRED_ROOT, 'wikipedia'))
+# WIKI_DATA environment variable is required and must point to the Wikipedia data directory
+# containing: extracted/wikipedia_batch_*.json
+WIKI_DATA_DIR = os.environ.get('WIKI_DATA', '')
 EXTRACTED_DIR = os.path.join(WIKI_DATA_DIR, 'extracted') if WIKI_DATA_DIR else ''
 BATCH_SIZE = 100
 OPENSEARCH_BULK_SIZE = 500
@@ -156,19 +150,17 @@ def validate_wiki_data_env() -> Tuple[bool, str]:
     
     return True, f"WIKI_DATA validated: {len(batch_files)} batch file(s) found in {EXTRACTED_DIR}"
 
-# Database configuration (matches setup_strixhalo.py postgresql stage)
+# Database configuration
 DB_CONFIG = {
-    'host': os.environ.get('PG_HOST', 'localhost'),
-    'port': int(os.environ.get('PG_PORT', 5432)),
-    'database': os.environ.get('PG_DATABASE', 'wikidb'),
-    'user': os.environ.get('PG_USER', 'wiki'),
-    'password': os.environ.get('PG_PASSWORD', 'wiki')
+    'host': 'localhost',
+    'database': 'wikidb',
+    'user': 'wiki',
+    'password': 'wikipass'
 }
 
 # OpenSearch configuration
 OPENSEARCH_CONFIG = {
-    'hosts': [{'host': os.environ.get('OS_HOST', 'localhost'),
-               'port': int(os.environ.get('OS_PORT', 9200))}],
+    'hosts': [{'host': 'localhost', 'port': 9200}],
     'http_auth': None,
     'use_ssl': False,
     'verify_certs': False
@@ -656,9 +648,9 @@ class EmbeddingProvider:
         raise NotImplementedError
 
 
-class LlamaCppEmbedding(EmbeddingProvider):
+class LMStudioEmbedding(EmbeddingProvider):
     """
-    Generate embeddings using llama.cpp's OpenAI-compatible API.
+    Generate embeddings using LM Studio's OpenAI-compatible API.
     
     Optimized for batch processing with token-aware batching to maximize
     throughput while staying within model limits. Based on benchmarks,
@@ -672,30 +664,29 @@ class LlamaCppEmbedding(EmbeddingProvider):
     
     def __init__(self, skip_connection_test: bool = False):
         """
-        Initialize llama.cpp embedding provider.
+        Initialize LM Studio embedding provider.
         
         Args:
             skip_connection_test: If True, don't test connection on init (for test mode)
         """
-        logging.info(f"Initializing llama.cpp embedding provider...")
-        logging.info(f"  Server: {EMBED_URL}")
-        logging.info(f"  Model: {EMBED_MODEL}")
-        logging.info(f"  Context length: {EMBED_CONTEXT_LENGTH} tokens")
-        logging.info(f"  Max chars per text: {EMBED_MAX_CHARS}")
-        logging.info(f"  Max texts per batch: {EMBED_BATCH_SIZE}")
+        logging.info(f"Initializing LM Studio embedding provider...")
+        logging.info(f"  Server: {LMSTUDIO_URL}")
+        logging.info(f"  Model: {LMSTUDIO_MODEL}")
+        logging.info(f"  Context length: {LMSTUDIO_CONTEXT_LENGTH} tokens")
+        logging.info(f"  Model batch size: {LMSTUDIO_MODEL_BATCH_SIZE} tokens")
+        logging.info(f"  Max texts per batch: {LMSTUDIO_BATCH_SIZE}")
         
         if not skip_connection_test:
             success, msg = self.test_connection()
             if not success:
                 raise ConnectionError(msg)
-            logging.info("llama.cpp connection verified")
+            logging.info("LM Studio connection verified")
     
     @staticmethod
     def estimate_tokens(text: str) -> int:
         """
         Estimate token count for a text (rough approximation).
-        Uses ~3 chars per token as a conservative estimate for mixed content.
-        Number-heavy text (codes, lists) can be ~2 chars/token.
+        Uses ~4 chars per token as a conservative estimate.
         
         Args:
             text: The text to estimate tokens for
@@ -703,15 +694,33 @@ class LlamaCppEmbedding(EmbeddingProvider):
         Returns:
             Estimated token count
         """
-        return len(text) // 3 + 1
+        return len(text) // 4 + 1
     
-    def _create_batches(self, texts: List[str]) -> List[List[Tuple[int, str]]]:
+    @staticmethod
+    def max_safe_text_length(num_texts: int = 1) -> int:
         """
-        Create batches of texts for embedding, truncating each to fit the model context.
+        Calculate maximum safe text length in characters for a batch.
         
-        Batching is by count only (EMBED_BATCH_SIZE texts per batch). The server
-        handles internal GPU batching via --batch-size/--ubatch-size, so we don't
-        need to track per-batch token budgets.
+        Args:
+            num_texts: Number of texts in the batch
+            
+        Returns:
+            Maximum characters per text to stay within limits
+        """
+        # Use the more restrictive limit
+        tokens_per_text = min(
+            LMSTUDIO_CONTEXT_LENGTH // max(num_texts, 1),
+            LMSTUDIO_MODEL_BATCH_SIZE // max(num_texts, 1)
+        )
+        # Conservative: 3 chars per token to leave headroom
+        return max(tokens_per_text * 3, 50)
+    
+    def _create_token_aware_batches(self, texts: List[str]) -> List[List[Tuple[int, str]]]:
+        """
+        Create batches that respect both text count and token limits.
+        
+        This ensures we don't exceed LMSTUDIO_MODEL_BATCH_SIZE tokens per batch
+        while also respecting LMSTUDIO_BATCH_SIZE max texts per batch.
         
         Args:
             texts: List of text strings to batch
@@ -721,36 +730,36 @@ class LlamaCppEmbedding(EmbeddingProvider):
         """
         batches = []
         current_batch = []
-        truncated_count = 0
+        current_tokens = 0
         
         for i, text in enumerate(texts):
-            # Truncate text to fit model context window
-            # 1.5 chars/token is conservative: handles number-heavy text (~2 chars/token)
-            # while not over-truncating normal English text (~4 chars/token)
-            truncated_text = text[:EMBED_MAX_CHARS] if len(text) > EMBED_MAX_CHARS else text
-            if len(text) > EMBED_MAX_CHARS:
-                truncated_count += 1
+            # Truncate text if it exceeds context length
+            max_chars = int(LMSTUDIO_CONTEXT_LENGTH * 3.5)
+            truncated_text = text[:max_chars] if len(text) > max_chars else text
+            text_tokens = self.estimate_tokens(truncated_text)
             
-            current_batch.append((i, truncated_text))
+            # Check if adding this text would exceed limits
+            would_exceed_tokens = current_tokens + text_tokens > LMSTUDIO_MODEL_BATCH_SIZE
+            would_exceed_count = len(current_batch) >= LMSTUDIO_BATCH_SIZE
             
-            if len(current_batch) >= EMBED_BATCH_SIZE:
+            if current_batch and (would_exceed_tokens or would_exceed_count):
+                # Start a new batch
                 batches.append(current_batch)
                 current_batch = []
+                current_tokens = 0
+            
+            current_batch.append((i, truncated_text))
+            current_tokens += text_tokens
         
         # Don't forget the last batch
         if current_batch:
             batches.append(current_batch)
         
-        if truncated_count > 0:
-            logging.debug(
-                f"Truncated {truncated_count}/{len(texts)} texts to {EMBED_MAX_CHARS} chars"
-            )
-        
         return batches
     
     def test_connection(self) -> Tuple[bool, str]:
         """
-        Test connection to llama.cpp server and verify embedding generation.
+        Test connection to LM Studio server and verify embedding generation.
         
         Returns:
             Tuple of (success, message)
@@ -758,8 +767,8 @@ class LlamaCppEmbedding(EmbeddingProvider):
         try:
             # Try a simple embedding request
             response = requests.post(
-                EMBED_URL,
-                json={'model': EMBED_MODEL, 'input': ['test connection']},
+                LMSTUDIO_URL,
+                json={'model': LMSTUDIO_MODEL, 'input': ['test connection']},
                 headers={'Content-Type': 'application/json'},
                 timeout=30
             )
@@ -769,7 +778,7 @@ class LlamaCppEmbedding(EmbeddingProvider):
             
             # Verify response structure
             if 'data' not in data or len(data['data']) == 0:
-                return False, "llama.cpp returned empty embedding data"
+                return False, "LM Studio returned empty embedding data"
             
             embedding = data['data'][0].get('embedding', [])
             if len(embedding) != EMBEDDING_DIM:
@@ -777,16 +786,16 @@ class LlamaCppEmbedding(EmbeddingProvider):
             
             # Verify embedding is not all zeros (some models return zeros on error)
             if all(v == 0.0 for v in embedding):
-                return False, "llama.cpp returned zero vector - model may not be loaded correctly"
+                return False, "LM Studio returned zero vector - model may not be loaded correctly"
             
-            return True, f"llama.cpp connection verified (model: {EMBED_MODEL}, dim: {len(embedding)})"
+            return True, f"LM Studio connection verified (model: {LMSTUDIO_MODEL}, dim: {len(embedding)})"
             
         except requests.exceptions.ConnectionError:
-            return False, f"Cannot connect to llama.cpp at {EMBED_URL}. Is the server running?"
+            return False, f"Cannot connect to LM Studio at {LMSTUDIO_URL}. Is the server running?"
         except requests.exceptions.Timeout:
-            return False, f"Connection to llama.cpp timed out. Server may be overloaded."
+            return False, f"Connection to LM Studio timed out. Server may be overloaded."
         except Exception as e:
-            return False, f"llama.cpp connection test failed: {e}"
+            return False, f"LM Studio connection test failed: {e}"
     
     def _is_valid_embedding(self, embedding: List[float]) -> bool:
         """
@@ -813,7 +822,7 @@ class LlamaCppEmbedding(EmbeddingProvider):
         pre_truncated: bool = False
     ) -> Tuple[List[Optional[List[float]]], List[int]]:
         """
-        Request embeddings from llama.cpp with retry logic.
+        Request embeddings from LM Studio with retry logic.
         
         Args:
             texts: List of text strings to embed
@@ -822,19 +831,12 @@ class LlamaCppEmbedding(EmbeddingProvider):
         Returns:
             Tuple of (embeddings list with None for failures, list of failed indices)
         """
-        # Truncate texts if not already done by batch creation
+        # Truncate texts if not already done by token-aware batching
         if pre_truncated:
             request_texts = texts
         else:
-            request_texts = [text[:EMBED_MAX_CHARS] for text in texts]
-        
-        # Filter out empty/whitespace-only texts (these cause 400 errors)
-        valid_mask = [bool(t.strip()) for t in request_texts]
-        if not all(valid_mask):
-            empty_count = sum(1 for v in valid_mask if not v)
-            logging.warning(f"Filtering {empty_count} empty/whitespace texts from batch of {len(request_texts)}")
-            # Replace empty texts with a placeholder to preserve index alignment
-            request_texts = [t if t.strip() else "empty" for t in request_texts]
+            max_chars = int(LMSTUDIO_CONTEXT_LENGTH * 3.5)
+            request_texts = [text[:max_chars] for text in texts]
         
         embeddings: List[Optional[List[float]]] = [None] * len(texts)
         failed_indices: List[int] = []
@@ -844,13 +846,13 @@ class LlamaCppEmbedding(EmbeddingProvider):
         for attempt in range(self.MAX_RETRIES):
             try:
                 response = requests.post(
-                    EMBED_URL,
+                    LMSTUDIO_URL,
                     json={
-                        'model': EMBED_MODEL,
+                        'model': LMSTUDIO_MODEL,
                         'input': request_texts
                     },
                     headers={'Content-Type': 'application/json'},
-                    timeout=EMBED_TIMEOUT
+                    timeout=LMSTUDIO_TIMEOUT
                 )
                 response.raise_for_status()
                 
@@ -884,40 +886,21 @@ class LlamaCppEmbedding(EmbeddingProvider):
                 
             except requests.exceptions.Timeout as e:
                 last_error = e
-                logging.warning(f"llama.cpp timeout (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}")
+                logging.warning(f"LM Studio timeout (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}")
             except requests.exceptions.ConnectionError as e:
                 last_error = e
-                logging.warning(f"llama.cpp connection error (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}")
+                logging.warning(f"LM Studio connection error (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}")
             except requests.exceptions.HTTPError as e:
                 last_error = e
-                status_code = e.response.status_code if e.response else None
-                # Log response body for debugging (try multiple ways)
-                error_body = 'No response'
+                # Log response body for debugging
                 try:
-                    if e.response is not None:
-                        error_body = e.response.text[:500] if e.response.text else '(empty body)'
-                        if not error_body or error_body == '(empty body)':
-                            error_body = e.response.content[:500].decode('utf-8', errors='replace') if e.response.content else '(no content)'
+                    error_body = e.response.text[:500] if e.response else 'No response body'
+                    logging.warning(f"LM Studio HTTP error (attempt {attempt + 1}/{self.MAX_RETRIES}): {e} - {error_body}")
                 except Exception:
-                    pass
-                
-                text_lengths = [len(t) for t in request_texts]
-                logging.warning(
-                    f"llama.cpp HTTP {status_code} (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}\n"
-                    f"  Response body: {error_body}\n"
-                    f"  Batch: {len(request_texts)} texts, lengths: "
-                    f"min={min(text_lengths)}, max={max(text_lengths)}, "
-                    f"mean={sum(text_lengths)//len(text_lengths)}"
-                )
-                
-                # On 400/500 (likely token overflow), try aggressive truncation before retrying
-                if status_code in (400, 500) and attempt < self.MAX_RETRIES - 1:
-                    # Halve text lengths to stay within server limits
-                    request_texts = [t[:len(t) // 2] for t in request_texts]
-                    logging.info(f"Truncating texts to ~{max(len(t) for t in request_texts)} chars and retrying...")
+                    logging.warning(f"LM Studio HTTP error (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}")
             except Exception as e:
                 last_error = e
-                logging.warning(f"llama.cpp error (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}")
+                logging.warning(f"LM Studio error (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}")
             
             # Wait before retry (exponential backoff)
             if attempt < self.MAX_RETRIES - 1:
@@ -926,17 +909,17 @@ class LlamaCppEmbedding(EmbeddingProvider):
                 time.sleep(delay)
         
         # All retries failed
-        logging.error(f"llama.cpp API failed after {self.MAX_RETRIES} attempts: {last_error}")
+        logging.error(f"LM Studio API failed after {self.MAX_RETRIES} attempts: {last_error}")
         failed_indices = list(range(len(texts)))
         return embeddings, failed_indices
     
     def get_embeddings(self, texts: List[str]) -> List[Optional[List[float]]]:
         """
-        Get embeddings from llama.cpp server with count-based batching.
+        Get embeddings from LM Studio server with token-aware batching.
         
-        Sends EMBED_BATCH_SIZE texts per API request, with EMBED_CONCURRENT_BATCHES
-        requests in flight simultaneously. Each text is truncated to EMBED_MAX_CHARS
-        to fit the model context window. The server handles internal GPU batching.
+        Uses dynamic batch sizing based on estimated token counts to maximize
+        throughput while staying within model limits (context_length and 
+        model_batch_size).
         
         Args:
             texts: List of text strings to embed
@@ -947,63 +930,44 @@ class LlamaCppEmbedding(EmbeddingProvider):
         if not texts:
             return []
         
-        # Create count-based batches with per-text truncation
-        batches = self._create_batches(texts)
-        
-        # Log batch stats on first call or when debugging
-        total_chars = sum(len(t) for batch in batches for _, t in batch)
-        logging.info(
-            f"Embedding {len(texts)} texts in {len(batches)} batches "
-            f"(~{len(texts)/max(len(batches),1):.1f} texts/batch, "
-            f"{total_chars:,} total chars)"
-        )
+        # Create token-aware batches
+        batches = self._create_token_aware_batches(texts)
         
         # Pre-allocate result array
         all_embeddings: List[Optional[List[float]]] = [None] * len(texts)
         total_failed = 0
         
-        def _process_batch(batch_info):
-            """Process a single batch and return (batch_idx, embeddings, original_indices, failed_indices)."""
-            batch_idx, batch = batch_info
+        for batch_idx, batch in enumerate(batches):
+            # Extract texts and original indices
             batch_texts = [text for _, text in batch]
             original_indices = [idx for idx, _ in batch]
+            
+            # Request embeddings (texts are pre-truncated by _create_token_aware_batches)
             embeddings, failed_indices = self._request_embeddings_with_retry(
                 batch_texts, pre_truncated=True
             )
-            return batch_idx, embeddings, original_indices, failed_indices
-        
-        # Send batches concurrently to utilize server parallel slots
-        with ThreadPoolExecutor(max_workers=EMBED_CONCURRENT_BATCHES) as executor:
-            futures = {}
-            completed = 0
             
-            for batch_idx, batch in enumerate(batches):
-                future = executor.submit(_process_batch, (batch_idx, batch))
-                futures[future] = batch_idx
+            # Map embeddings back to original indices
+            for i, embedding in enumerate(embeddings):
+                orig_idx = original_indices[i]
+                all_embeddings[orig_idx] = embedding
             
-            for future in as_completed(futures):
-                batch_idx, embeddings, original_indices, failed_indices = future.result()
-                completed += 1
-                
-                # Map embeddings back to original indices
-                for i, embedding in enumerate(embeddings):
-                    orig_idx = original_indices[i]
-                    all_embeddings[orig_idx] = embedding
-                
-                if failed_indices:
-                    total_failed += len(failed_indices)
-                    for idx in failed_indices[:3]:
-                        orig_idx = original_indices[idx]
-                        logging.warning(
-                            f"Failed to embed text at index {orig_idx}: "
-                            f"'{texts[orig_idx][:100]}...'"
-                        )
-                    if len(failed_indices) > 3:
-                        logging.warning(f"... and {len(failed_indices) - 3} more failed in this batch")
-                
-                # Log progress periodically
-                if len(batches) > 4 and completed % max(len(batches) // 4, 1) == 0:
-                    logging.info(f"Embedding progress: {completed}/{len(batches)} batches done")
+            if failed_indices:
+                total_failed += len(failed_indices)
+                # Log sample of failed texts for debugging
+                for idx in failed_indices[:3]:  # Only log first 3
+                    orig_idx = original_indices[idx]
+                    logging.warning(
+                        f"Failed to embed text at index {orig_idx}: "
+                        f"'{texts[orig_idx][:100]}...'"
+                    )
+                if len(failed_indices) > 3:
+                    logging.warning(f"... and {len(failed_indices) - 3} more failed in this batch")
+            
+            # Log progress for large datasets
+            if len(batches) > 10 and (batch_idx + 1) % 10 == 0:
+                processed = sum(len(b) for b in batches[:batch_idx + 1])
+                logging.info(f"Embedding progress: {processed}/{len(texts)} texts ({batch_idx + 1}/{len(batches)} batches)")
         
         if total_failed > 0:
             logging.warning(
@@ -1026,13 +990,13 @@ class LocalEmbedding(EmbeddingProvider):
         """
         logging.info("Initializing local sentence-transformers embedding provider...")
         logging.info(f"  Model: {LOCAL_MODEL}")
-        logging.info("  Note: This will be slow on CPU. Consider using llama.cpp with GPU.")
+        logging.info("  Note: This will be slow on CPU. Consider using LM Studio with GPU.")
         
         self.model = None
         self.embedding_dim = EMBEDDING_DIM
         
         if not skip_connection_test:
-            # Lazy import to avoid loading torch when using llama.cpp
+            # Lazy import to avoid loading torch when using LM Studio
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(LOCAL_MODEL)
             self.embedding_dim = self.model.get_sentence_embedding_dimension()
@@ -1101,8 +1065,8 @@ def create_embedding_provider(skip_connection_test: bool = False) -> EmbeddingPr
     Args:
         skip_connection_test: If True, skip connection test during initialization
     """
-    if EMBEDDING_PROVIDER == 'llamacpp':
-        return LlamaCppEmbedding(skip_connection_test=skip_connection_test)
+    if EMBEDDING_PROVIDER == 'lmstudio':
+        return LMStudioEmbedding(skip_connection_test=skip_connection_test)
     elif EMBEDDING_PROVIDER == 'local':
         return LocalEmbedding(skip_connection_test=skip_connection_test)
     else:
@@ -1745,112 +1709,6 @@ class WikipediaProcessor:
 
 
 # =============================================================================
-# SCHEMA INITIALIZATION
-# =============================================================================
-
-SCHEMA_SQL = """\
--- Wikipedia MCP database schema
--- Creates tables for articles, sections, and redirects with appropriate indices.
-
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
-CREATE TABLE IF NOT EXISTS articles (
-    id SERIAL PRIMARY KEY,
-    title TEXT NOT NULL,
-    content TEXT,
-    url TEXT,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS sections (
-    id SERIAL PRIMARY KEY,
-    article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
-    section_title TEXT,
-    section_text TEXT,
-    section_order INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS redirects (
-    source_title TEXT PRIMARY KEY,
-    target_title TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_articles_title ON articles(title);
-CREATE INDEX IF NOT EXISTS idx_sections_article_id ON sections(article_id);
-CREATE INDEX IF NOT EXISTS idx_sections_text_trgm ON sections USING gin(section_text gin_trgm_ops);
-"""
-
-
-def init_schema() -> bool:
-    """
-    Create the Wikipedia database schema (tables, indices, extensions).
-    
-    The pg_trgm extension requires superuser privileges in PostgreSQL.
-    If CREATE EXTENSION fails, the script will attempt to continue — it may
-    already have been installed by setup_strixhalo.py or a DBA.
-    
-    Returns:
-        True if schema was created successfully, False otherwise
-    """
-    logging.info("Initializing Wikipedia database schema...")
-    
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        conn.autocommit = True
-        cursor = conn.cursor()
-        
-        # Execute schema SQL statement by statement
-        for statement in SCHEMA_SQL.split(';'):
-            statement = statement.strip()
-            if not statement or statement.startswith('--'):
-                continue
-            try:
-                cursor.execute(statement + ';')
-                logging.info(f"  ✓ {statement.split()[0:4]}")
-            except psycopg2.Error as e:
-                err_str = str(e).lower()
-                # pg_trgm extension and its dependent index require superuser.
-                # Warn but continue — the trgm index is optional for operation.
-                if 'pg_trgm' in err_str or 'gin_trgm_ops' in err_str or (
-                    'permission denied' in err_str and 'extension' in statement.lower()
-                ):
-                    logging.warning(
-                        f"  ⚠ Skipped (requires superuser): {statement.split()[0:6]}"
-                    )
-                    logging.warning(
-                        f"    To fix: sudo -u postgres psql -d wikidb "
-                        f"-c 'CREATE EXTENSION IF NOT EXISTS pg_trgm;'"
-                    )
-                    logging.warning(
-                        f"    Then re-run: python3 scripts/process_and_index.py --init"
-                    )
-                else:
-                    logging.error(f"  ✗ Failed: {e}")
-                    raise
-        
-        # Verify tables were created
-        cursor.execute("""
-            SELECT table_name FROM information_schema.tables 
-            WHERE table_schema = 'public' AND table_name IN ('articles', 'sections', 'redirects')
-        """)
-        tables = [row[0] for row in cursor.fetchall()]
-        
-        cursor.close()
-        conn.close()
-        
-        if len(tables) == 3:
-            logging.info("  ✓ Schema created successfully: %s", ', '.join(sorted(tables)))
-            return True
-        else:
-            logging.error(f"  ✗ Expected 3 tables, found {len(tables)}: {tables}")
-            return False
-            
-    except Exception as e:
-        logging.error(f"Schema initialization failed: {e}")
-        return False
-
-
-# =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 
@@ -1874,7 +1732,7 @@ Checkpoint/Resume:
 Test mode verifies:
   - PostgreSQL connection and schema
   - OpenSearch connection and k-NN support
-  - Embedding provider (llama.cpp or local)
+  - Embedding provider (LM Studio or local)
   - Full pipeline with dummy data (insert, embed, index, search)
   - Automatic cleanup of test data
 '''
@@ -1887,14 +1745,8 @@ Test mode verifies:
     )
     
     parser.add_argument(
-        '--init',
-        action='store_true',
-        help='Create database schema (tables, indices, extensions) and exit'
-    )
-    
-    parser.add_argument(
         '--provider',
-        choices=['llamacpp', 'local'],
+        choices=['lmstudio', 'local'],
         default=None,
         help='Override embedding provider (default: use EMBEDDING_PROVIDER config)'
     )
@@ -1935,15 +1787,6 @@ def main():
         # Run test mode (includes WIKI_DATA validation)
         tester = ConnectivityTester()
         success = tester.run_all_tests()
-        sys.exit(0 if success else 1)
-    
-    if args.init:
-        # Create database schema only
-        success = init_schema()
-        if success:
-            logging.info("Schema initialization complete. You can now run full processing.")
-        else:
-            logging.error("Schema initialization failed.")
         sys.exit(0 if success else 1)
     
     # Validate WIKI_DATA environment variable before any processing

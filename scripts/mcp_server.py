@@ -40,7 +40,7 @@ WIKI_DATA = os.environ.get('WIKI_DATA', os.path.join(_DEEPRED_ROOT, 'wikipedia')
 PG_HOST = os.environ.get('PG_HOST', 'localhost')
 PG_PORT = int(os.environ.get('PG_PORT', 5432))
 PG_USER = os.environ.get('PG_USER', 'wiki')
-PG_PASSWORD = os.environ.get('PG_PASSWORD', 'wikipass')
+PG_PASSWORD = os.environ.get('PG_PASSWORD', 'wiki')
 PG_DATABASE = os.environ.get('PG_DATABASE', 'wikidb')
 
 # OpenSearch Configuration
