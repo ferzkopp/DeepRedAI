@@ -369,6 +369,8 @@ Examples:
     parser.add_argument('--json', help='Export results to JSON file')
     parser.add_argument('--verbose', '-v', action='store_true', 
                        help='Print verbose progress information')
+    parser.add_argument('--force', action='store_true',
+                       help='Overwrite existing output files (default: skip if output exists)')
     parser.add_argument('--limit', type=int, default=20,
                        help='Number of entities to display in summary (default: 20)')
     parser.add_argument('--no-summary', action='store_true',
@@ -377,6 +379,16 @@ Examples:
     args = parser.parse_args()
     
     try:
+        # Check if output files already exist (unless --force)
+        if args.csv and Path(args.csv).exists() and not args.force:
+            print(f"Output file already exists: {args.csv}")
+            print("Use --force to overwrite, or specify a different output path")
+            sys.exit(1)
+        if args.json and Path(args.json).exists() and not args.force:
+            print(f"Output file already exists: {args.json}")
+            print("Use --force to overwrite, or specify a different output path")
+            sys.exit(1)
+
         # Create parser and process file
         extractor = YagoTimeExtractor(args.ttl_file)
         extractor.parse_file(verbose=args.verbose)

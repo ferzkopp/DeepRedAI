@@ -292,7 +292,7 @@ def stage_system_packages(user: str) -> None:
     run("dnf install -y @development-tools cmake gcc-c++ git curl wget "
         "python3-devel python3-pip python3-setuptools python3-wheel "
         "lld clang clang-devel compiler-rt libcurl-devel "
-        "radeontop")
+        "radeontop unzip bzip2")
 
 
 @stage("disable_sleep", "Disable sleep/suspend for always-on server operation")
@@ -738,7 +738,7 @@ def stage_python_venv(user: str) -> None:
     log.info("  Installing pipeline dependencies...")
     run(f'su - {user} -c "{pip} install fastapi uvicorn psycopg2-binary opensearch-py '
         f'mediawiki-dump mwparserfromhell sentence-transformers pydantic requests tqdm '
-        f'beautifulsoup4 openai numpy"')
+        f'beautifulsoup4 openai numpy rapidfuzz"')
 
     # Add ROCm env vars to venv activate script
     activate = VENV_DIR / "bin" / "activate"

@@ -10,6 +10,7 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 - [How to setup an optional second NVIDIA device (A4000)](documentation/A4000-Fedora-Setup.md) — dedicated GPU for training/inference; includes automated setup script
 - [How to set up the Wikipedia MCP server and data pipeline](documentation/WikipediaMCP-Setup.md) — extraction, indexing, search, and MCP server for Wikipedia content
 - [How to extract year-based historical topics from Wikipedia](documentation/Wikipedia-YearTopics.md) — enriched event data for temporal finetuning
+- [How to augment Wikipedia with temporal metadata](documentation/TemporalAugmentation-Setup.md) — YAGO/Wikidata parsing, normalization, and database augmentation for time-period filtering
 - [Model Training from Scratch](documentation/ModelTraining.md) — continued pre-training approach for temporal and thematic alignment
 
 ## Legacy Steps/Instructions
