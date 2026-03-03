@@ -200,6 +200,32 @@ python3 scripts/extract_wikipedia.py --batch-size 500     # Smaller batch files
 python3 scripts/extract_wikipedia.py --dump-file /path/to/custom/dump.xml.bz2
 ```
 
+#### Test Extraction (without real data)
+
+The script includes a self-test mode that generates a small synthetic Wikipedia dump in `/tmp`, runs the full extraction pipeline against it, and displays the results. This is useful for verifying the parser after making changes — no real data or existing files are touched.
+
+```bash
+# Run the test
+python3 scripts/extract_wikipedia.py --test
+```
+
+The test dump contains 4 pages that exercise the main code paths:
+- **Test Article Alpha** — wiki headings, categories, inline URLs
+- **Test Article Beta** — bulleted lists, wiki tables, headings
+- **Redirect page** — should be filtered out (`#REDIRECT`)
+- **Namespace page** — should be filtered out (colon in title)
+
+Expected output: 2 extracted articles (Alpha and Beta). Each article's ID, title, URL, text length, and a 500-character preview are printed to stdout.
+
+At the end the script logs the temp directory path. Clean up with:
+
+```bash
+# Remove test output (substitute the actual path from the log)
+python3 scripts/extract_wikipedia.py --test-cleanup /tmp/wiki_extract_test_<suffix>
+```
+
+The cleanup command refuses to delete any directory that doesn't contain `wiki_extract_test_` in its name.
+
 ### Phase 3: Process and Index
 
 This is the longest phase. It reads all extracted JSON files, stores articles/sections in PostgreSQL, generates embeddings via the llama.cpp embedding server, and indexes everything to OpenSearch with k-NN vectors.
@@ -670,6 +696,8 @@ python3 scripts/process_and_index.py --reset
 
 ```bash
 python3 scripts/extract_wikipedia.py [--dump-file PATH] [--output-dir PATH] [--batch-size N]
+python3 scripts/extract_wikipedia.py --test              # Run test extraction with synthetic data
+python3 scripts/extract_wikipedia.py --test-cleanup DIR  # Remove test output directory
 ```
 
 ### process_and_index.py

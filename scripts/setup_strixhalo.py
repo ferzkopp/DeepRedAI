@@ -82,6 +82,21 @@ LOG_FILE = REPO_DIR / "setup.log"
 
 log = logging.getLogger("setup")
 
+# ---------------------------------------------------------------------------
+# ANSI colour helpers (auto-disabled when output is not a terminal)
+# ---------------------------------------------------------------------------
+
+_USE_COLOR = sys.stdout.isatty()
+
+def _c(code: str, text: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if _USE_COLOR else text
+
+def _green(text: str) -> str:  return _c("32", text)
+def _red(text: str) -> str:    return _c("31", text)
+def _yellow(text: str) -> str: return _c("33", text)
+def _cyan(text: str) -> str:   return _c("36", text)
+def _bold(text: str) -> str:   return _c("1", text)
+
 
 def setup_logging() -> None:
     fmt = "%(asctime)s [%(levelname)s] %(message)s"
@@ -805,7 +820,9 @@ def stage_postgresql(user: str) -> None:
 @stage("wikipedia_schema", "Create Wikipedia database schema and extensions")
 def stage_wikipedia_schema(user: str) -> None:
     # Install pg_trgm extension (requires PostgreSQL superuser)
-    run('su - postgres -c "psql -d wikidb -c \'CREATE EXTENSION IF NOT EXISTS pg_trgm;\'"')
+    # Use --quiet and client_min_messages=warning to suppress "already exists" NOTICEs
+    run('su - postgres -c "psql --quiet -d wikidb -c '
+        '\'SET client_min_messages=warning; CREATE EXTENSION IF NOT EXISTS pg_trgm;\'"')
 
     # Write schema to a file, then apply as wiki user
     schema_file = DATA_DIR / "wikipedia" / "schema.sql"
@@ -813,6 +830,9 @@ def stage_wikipedia_schema(user: str) -> None:
     write_file(
         schema_file,
         textwrap.dedent("""\
+            -- Suppress "already exists" NOTICEs on idempotent re-runs
+            SET client_min_messages = warning;
+
             -- Wikipedia MCP database schema
             CREATE TABLE IF NOT EXISTS articles (
                 id SERIAL PRIMARY KEY,
@@ -841,7 +861,7 @@ def stage_wikipedia_schema(user: str) -> None:
         """),
     )
 
-    run(f"PGPASSWORD=wiki psql -h localhost -U wiki -d wikidb -f {schema_file}")
+    run(f"PGPASSWORD=wiki psql --quiet -h localhost -U wiki -d wikidb -f {schema_file}")
 
     # Verify tables were created
     result = run_quiet(
@@ -1185,20 +1205,24 @@ def stage_verify(user: str) -> None:
     ]
 
     log.info("")
-    log.info("═══ Health Check ═══")
+    log.info(_bold("═══ Health Check ═══"))
     all_ok = True
     for label, cmd in checks:
         result = run_quiet(cmd, check=False)
         output = (result.stdout or "").strip()
         failed = result.returncode != 0 or "DOWN" in output or "MISSING" in output
-        status = "✗" if failed else "✓"
         if failed:
             all_ok = False
-        log.info("  %s %-25s %s", status, label, output[:80])
+            status = _red("✗")
+            output_c = _red(output[:80])
+        else:
+            status = _green("✓")
+            output_c = _green(output[:80])
+        log.info("  %s %-25s %s", status, label, output_c)
 
     # ── GPU information ──
     log.info("")
-    log.info("═══ GPU ═══")
+    log.info(_bold("═══ GPU ═══"))
     # Device name from DRM
     gpu_name = run_quiet(
         "cat /sys/class/drm/card*/device/product_name 2>/dev/null || "
@@ -1233,7 +1257,7 @@ def stage_verify(user: str) -> None:
 
     # ── Data disk & content sizes ──
     log.info("")
-    log.info("═══ Data Disk (%s) ═══", DATA_DIR)
+    log.info(_bold("═══ Data Disk (%s) ═══"), DATA_DIR)
     disk_info = run_quiet(f"df -h {DATA_DIR} --output=size,used,avail,pcent | tail -1", check=False)
     if disk_info.returncode == 0:
         parts = disk_info.stdout.strip().split()
@@ -1259,9 +1283,9 @@ def stage_verify(user: str) -> None:
 
     log.info("")
     if all_ok:
-        log.info("  All checks passed!")
+        log.info("  %s", _green("All checks passed!"))
     else:
-        log.info("  Some checks failed — review above and re-run failed stages")
+        log.info("  %s", _red("Some checks failed — review above and re-run failed stages"))
 
     needs_reboot(
         "Reboot to confirm all services start automatically on boot. "
@@ -1293,7 +1317,7 @@ def stage_reverify(user: str) -> None:
 
     # ── Wait for Podman container services ──
     log.info("")
-    log.info("═══ Post-Reboot Service Check ═══")
+    log.info(_bold("═══ Post-Reboot Service Check ═══"))
     log.info("  Waiting up to %ds for container services to become healthy...", max_wait)
 
     all_ok = True
@@ -1319,10 +1343,10 @@ def stage_reverify(user: str) -> None:
             elapsed += poll_interval
 
         if healthy:
-            log.info("  ✓ %-35s UP  (ready in ~%ds)", label, elapsed)
+            log.info("  %s %-35s %s", _green("✓"), label, _green(f"UP  (ready in ~{elapsed}s)"))
         else:
             all_ok = False
-            log.info("  ✗ %-35s DOWN after %ds", label, max_wait)
+            log.info("  %s %-35s %s", _red("✗"), label, _red(f"DOWN after {max_wait}s"))
             # Grab recent logs for diagnosis
             r = run_quiet(f"journalctl -u {svc} --no-pager -n 5 2>/dev/null", check=False)
             if r.returncode == 0 and (r.stdout or "").strip():
@@ -1335,13 +1359,13 @@ def stage_reverify(user: str) -> None:
         output = (r.stdout or "").strip()
         if r.returncode != 0 or "DOWN" in output:
             all_ok = False
-            log.info("  ✗ %-35s %s", label, output[:60] or "FAILED")
+            log.info("  %s %-35s %s", _red("✗"), label, _red(output[:60] or "FAILED"))
         else:
-            log.info("  ✓ %-35s OK", label)
+            log.info("  %s %-35s %s", _green("✓"), label, _green("OK"))
 
     # ── Quick API smoke test if container services are up ──
     log.info("")
-    log.info("═══ API Smoke Test ═══")
+    log.info(_bold("═══ API Smoke Test ═══"))
 
     # LLM chat completion
     r = run_quiet(
@@ -1351,10 +1375,10 @@ def stage_reverify(user: str) -> None:
         check=False,
     )
     if r.returncode == 0 and r.stdout and "choices" in r.stdout:
-        log.info("  ✓ %-35s chat completion OK", "LLM /v1/chat/completions")
+        log.info("  %s %-35s %s", _green("✓"), "LLM /v1/chat/completions", _green("chat completion OK"))
     else:
         all_ok = False
-        log.info("  ✗ %-35s FAILED", "LLM /v1/chat/completions")
+        log.info("  %s %-35s %s", _red("✗"), "LLM /v1/chat/completions", _red("FAILED"))
 
     # Embedding
     r = run_quiet(
@@ -1364,16 +1388,16 @@ def stage_reverify(user: str) -> None:
         check=False,
     )
     if r.returncode == 0 and r.stdout and "embedding" in r.stdout:
-        log.info("  ✓ %-35s embedding OK", "Embed /v1/embeddings")
+        log.info("  %s %-35s %s", _green("✓"), "Embed /v1/embeddings", _green("embedding OK"))
     else:
         all_ok = False
-        log.info("  ✗ %-35s FAILED", "Embed /v1/embeddings")
+        log.info("  %s %-35s %s", _red("✗"), "Embed /v1/embeddings", _red("FAILED"))
 
     log.info("")
     if all_ok:
-        log.info("  Post-reboot verification passed — all services healthy!")
+        log.info("  %s", _green("Post-reboot verification passed — all services healthy!"))
     else:
-        log.info("  Some services failed post-reboot. Check logs and re-run:")
+        log.info("  %s", _red("Some services failed post-reboot. Check logs and re-run:"))
         log.info("    sudo -E python3 %s --stage reverify --force", __file__)
 
 

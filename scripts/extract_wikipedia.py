@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 from multiprocessing import Pool, cpu_count
 from mediawiki_dump.dumps import IteratorDump
@@ -463,6 +464,150 @@ def extract_articles(dump_file, output_dir, batch_size=1000, backup_dir=None):
 
     logging.info(f"Extraction complete! Total articles: {total_articles}")
 
+
+def generate_test_dump(dump_path):
+    """Generate a small synthetic Wikipedia XML dump for testing.
+
+    Creates a bz2-compressed MediaWiki XML file with sample articles that
+    exercise headings, categories, tables, bulleted lists, and inline URLs.
+
+    Args:
+        dump_path: Path to write the test dump file.
+    """
+    # Each article needs >100 chars of cleaned text to pass the filter
+    xml_lines = [
+        '<mediawiki>',
+        '  <page>',
+        '    <title>Test Article Alpha</title>',
+        '    <ns>0</ns>',
+        '    <id>999990001</id>',
+        '    <revision>',
+        '      <id>1</id>',
+        '      <text>',
+        "Test Article Alpha is a sample article used for testing the extraction pipeline.",
+        '',
+        '== History ==',
+        'The history of this topic is long and varied. It spans several centuries and includes',
+        'many notable events that shaped the modern understanding of the subject.',
+        '',
+        '== Details ==',
+        'Here are some details about the topic with a URL: http://example.com/test-page and',
+        'more content to ensure we pass the minimum length requirement easily.',
+        '',
+        '[[Category:Test articles]][[Category:Sample content]]',
+        '      </text>',
+        '    </revision>',
+        '  </page>',
+        '  <page>',
+        '    <title>Test Article Beta</title>',
+        '    <ns>0</ns>',
+        '    <id>999990002</id>',
+        '    <revision>',
+        '      <id>2</id>',
+        '      <text>',
+        "Test Article Beta is another sample article for testing Wikipedia extraction.",
+        '',
+        '== Overview ==',
+        'This article covers the topic of testing Wikipedia extraction scripts. The extraction',
+        'process involves parsing XML dumps and converting wikitext to clean plaintext suitable',
+        'for downstream processing and indexing.',
+        '',
+        '== Features ==',
+        '*Feature one*Feature two*Feature three',
+        '',
+        '{| class="wikitable"',
+        '! Header1 !! Header2',
+        '|-',
+        '| Cell1 || Cell2',
+        '|-',
+        '| Cell3 || Cell4',
+        '|}',
+        '',
+        '[[Category:Testing]]',
+        '      </text>',
+        '    </revision>',
+        '  </page>',
+        '  <page>',
+        '    <title>Test Redirect Page</title>',
+        '    <ns>0</ns>',
+        '    <id>999990003</id>',
+        '    <revision>',
+        '      <id>3</id>',
+        '      <text>#REDIRECT [[Test Article Alpha]]</text>',
+        '    </revision>',
+        '  </page>',
+        '  <page>',
+        '    <title>Test:Namespace Page</title>',
+        '    <ns>0</ns>',
+        '    <id>999990004</id>',
+        '    <revision>',
+        '      <id>4</id>',
+        '      <text>This page has a colon in the title and should be skipped.</text>',
+        '    </revision>',
+        '  </page>',
+        '</mediawiki>',
+    ]
+    xml = '\n'.join(xml_lines)
+    Path(dump_path).parent.mkdir(parents=True, exist_ok=True)
+    with bz2.open(dump_path, 'wt', encoding='utf-8') as f:
+        f.write(xml)
+    logging.info(f"Test dump created: {dump_path}")
+
+
+def run_test():
+    """Run extraction on a synthetic dump in /tmp and display results."""
+    test_dir = Path(tempfile.mkdtemp(prefix='wiki_extract_test_'))
+    dump_file = test_dir / 'test_dump.xml.bz2'
+    output_dir = test_dir / 'extracted'
+
+    logging.info(f"Test directory: {test_dir}")
+
+    # Generate and extract
+    generate_test_dump(str(dump_file))
+    extract_articles(
+        dump_file=str(dump_file),
+        output_dir=str(output_dir),
+        batch_size=10
+    )
+
+    # Display results
+    output_files = sorted(output_dir.glob('*.json'))
+    if not output_files:
+        logging.error("No output files produced!")
+        return str(test_dir)
+
+    logging.info(f"Output files: {[f.name for f in output_files]}")
+    for fpath in output_files:
+        with open(fpath, 'r', encoding='utf-8') as f:
+            for line in f:
+                article = json.loads(line)
+                print(f"\n{'='*60}")
+                print(f"ID: {article['id']}  Title: {article['title']}")
+                print(f"URL: {article['url']}")
+                print(f"Text length: {len(article['text'])} chars")
+                print(f"-"*60)
+                # Show first 500 chars of text
+                print(article['text'][:500])
+                if len(article['text']) > 500:
+                    print('...')
+    print(f"\n{'='*60}")
+    logging.info(f"Test complete. Output in: {test_dir}")
+    return str(test_dir)
+
+
+def cleanup_test(test_dir):
+    """Remove a test directory created by run_test()."""
+    test_path = Path(test_dir)
+    if not test_path.exists():
+        logging.warning(f"Directory does not exist: {test_dir}")
+        return
+    if 'wiki_extract_test_' not in test_path.name:
+        logging.error(f"Refusing to delete directory without 'wiki_extract_test_' in name: {test_dir}")
+        return
+    shutil.rmtree(test_dir)
+    logging.info(f"Cleaned up test directory: {test_dir}")
+
+
 if __name__ == '__main__':
     import argparse
 
@@ -472,7 +617,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Extract Wikipedia articles from XML dump to clean JSON files.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''\nExamples:\n  python extract_wikipedia.py                    # Use $WIKI_DATA defaults\n  python extract_wikipedia.py --batch-size 500    # Smaller batch files\n'''
+        epilog='''\nExamples:\n  python extract_wikipedia.py                    # Use $WIKI_DATA defaults\n  python extract_wikipedia.py --batch-size 500    # Smaller batch files\n  python extract_wikipedia.py --test              # Run test extraction\n  python extract_wikipedia.py --test-cleanup DIR  # Remove test output\n'''
     )
     parser.add_argument(
         '--dump-file',
@@ -490,14 +635,29 @@ if __name__ == '__main__':
         default=1000,
         help='Number of articles per batch file (default: 1000)'
     )
+    parser.add_argument(
+        '--test',
+        action='store_true',
+        help='Run extraction on a small synthetic dump in /tmp (does not touch real data)'
+    )
+    parser.add_argument(
+        '--test-cleanup',
+        metavar='DIR',
+        help='Remove a test directory previously created by --test'
+    )
     args = parser.parse_args()
 
-    logging.info(f'Dump file: {args.dump_file}')
-    logging.info(f'Output dir: {args.output_dir}')
-    logging.info(f'Batch size: {args.batch_size}')
+    if args.test_cleanup:
+        cleanup_test(args.test_cleanup)
+    elif args.test:
+        run_test()
+    else:
+        logging.info(f'Dump file: {args.dump_file}')
+        logging.info(f'Output dir: {args.output_dir}')
+        logging.info(f'Batch size: {args.batch_size}')
 
-    extract_articles(
-        dump_file=args.dump_file,
-        output_dir=args.output_dir,
-        batch_size=args.batch_size
-    )
+        extract_articles(
+            dump_file=args.dump_file,
+            output_dir=args.output_dir,
+            batch_size=args.batch_size
+        )

@@ -51,6 +51,11 @@ export REMOTE_HOST="${REMOTE_HOST:-}"
 export REMOTE_LLM_PORT="${REMOTE_LLM_PORT:-1234}"
 export REMOTE_EMBED_PORT="${REMOTE_EMBED_PORT:-1235}"
 
+# ── Activate Python virtual environment ──────────────────────────────────
+if [ -f "$DEEPRED_VENV/bin/activate" ]; then
+    source "$DEEPRED_VENV/bin/activate"
+fi
+
 # ── Convenience: add scripts to PATH ────────────────────────────────────
 case ":$PATH:" in
     *":$DEEPRED_REPO/scripts:"*) ;;   # already present

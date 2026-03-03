@@ -500,12 +500,14 @@ The script runs through these stages in order:
 | 8 | `llama_server` | No | Deploy Podman Quadlet services for LLM + embedding servers |
 | 9 | `python_venv` | No | Create venv at `$DEEPRED_VENV`, install PyTorch ROCm + dependencies |
 | 10 | `postgresql` | No | Install, initialize, configure PostgreSQL + wiki database |
-| 11 | `opensearch` | No | Download, configure, deploy OpenSearch as systemd service |
-| 12 | `mcp_server` | No | Deploy MCP server + web GUI systemd service |
-| 13 | `firewall` | No | Configure firewalld rules for all service ports |
-| 14 | `llm_swap_helper` | No | Install `/usr/local/bin/llm-swap` helper script |
-| 15 | `verify` | **Yes** | Run health checks on all components (reboot to confirm boot persistence) |
-| 16 | `reverify` | No | Post-reboot health check — verify services survive a restart |
+| 11 | `wikipedia_schema` | No | Create Wikipedia database schema and extensions |
+| 12 | `opensearch` | No | Download, configure, deploy OpenSearch as systemd service |
+| 13 | `mcp_server` | No | Deploy MCP server systemd service |
+| 14 | `web_gui` | No | Build and deploy Wikipedia web GUI (port 8080) |
+| 15 | `firewall` | No | Configure firewalld rules for all service ports |
+| 16 | `llm_swap_helper` | No | Install `/usr/local/bin/llm-swap` helper script |
+| 17 | `verify` | **Yes** | Run health checks on all components (reboot to confirm boot persistence) |
+| 18 | `reverify` | No | Post-reboot health check — verify services survive a restart |
 
 ### Script Usage
 
@@ -553,14 +555,15 @@ The setup script installs VSCode and the Copilot extensions, but you still need 
 | `llama-server-embed` | 1235 | 0.0.0.0 | Embedding generation — Podman Quadlet |
 | `opensearch.service` | 9200 | 0.0.0.0 | Full-text and semantic search |
 | `postgresql.service` | 5432 | localhost | Wikipedia metadata storage |
-| `mcp.service` | 7000 | 0.0.0.0 | Wikipedia MCP server + Web GUI |
+| `mcp.service` | 7000 | 0.0.0.0 | Wikipedia MCP server (REST API) |
+| `wiki-gui.service` | 8080 | 0.0.0.0 | Wikipedia web GUI (React frontend) |
 
-> **Network exposure:** Ports 1234, 1235, 7000, and 9200 are opened in firewalld (LAN-accessible). PostgreSQL is localhost-only. To restrict other services, adjust firewalld rules or service bind addresses.
+> **Network exposure:** Ports 1234, 1235, 7000, 8080, and 9200 are opened in firewalld (LAN-accessible). PostgreSQL is localhost-only. To restrict other services, adjust firewalld rules or service bind addresses.
 
 ```
 ┌──────────────┐     ┌──────────────────┐     ┌──────────────────────────┐
-│  webapp/     │────▶│  mcp_server.py   │────▶│  llama-server-embed      │
-│  App.jsx     │:7000│  (FastAPI)       │:1235│  (port 1235)             │
+│  Web GUI     │────▶│  mcp_server.py   │────▶│  llama-server-embed      │
+│  (:8080)     │:7000│  (FastAPI :7000)  │:1235│  (port 1235)             │
 └──────────────┘     └────────┬─────────┘     └──────────────────────────┘
                               │
                      ┌────────────────┐
