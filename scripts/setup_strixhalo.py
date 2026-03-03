@@ -958,7 +958,7 @@ def stage_opensearch(user: str) -> None:
     run("systemctl enable --now opensearch.service")
 
 
-@stage("mcp_server", "Deploy MCP server and web GUI systemd service")
+@stage("mcp_server", "Deploy MCP server systemd service")
 def stage_mcp_server(user: str) -> None:
     scripts_dest = DATA_DIR / "wikipedia" / "scripts"
     scripts_dest.mkdir(parents=True, exist_ok=True)
@@ -967,11 +967,6 @@ def stage_mcp_server(user: str) -> None:
     src_scripts = REPO_DIR / "scripts"
     for py_file in src_scripts.glob("*.py"):
         shutil.copy2(py_file, scripts_dest)
-
-    src_webapp = REPO_DIR / "webapp"
-    if src_webapp.exists():
-        for f in src_webapp.iterdir():
-            shutil.copy2(f, scripts_dest)
 
     # Create wiki user if needed (system user for the service)
     result = run_quiet("id wiki", check=False)
@@ -1006,6 +1001,63 @@ def stage_mcp_server(user: str) -> None:
 
     run("systemctl daemon-reload")
     run("systemctl enable --now mcp.service", check=False)
+
+
+@stage("web_gui", "Build and deploy Wikipedia web GUI")
+def stage_web_gui(user: str) -> None:
+    # Install Node.js and npm
+    run("dnf install -y nodejs npm")
+
+    frontend_dir = DATA_DIR / "wikipedia" / "frontend"
+    frontend_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy webapp source files from the repo
+    src_webapp = REPO_DIR / "webapp"
+    if not src_webapp.exists():
+        log.error("  Webapp source not found at %s", src_webapp)
+        sys.exit(1)
+
+    for f in src_webapp.iterdir():
+        if f.is_file():
+            shutil.copy2(f, frontend_dir)
+
+    # Install dependencies and build
+    run(f"cd {frontend_dir} && npm install")
+    run(f"cd {frontend_dir} && npm run build")
+
+    # Set ownership to wiki user
+    run(f"chown -R wiki:wiki {frontend_dir}")
+
+    # SELinux: label node_modules/.bin executables so the wiki user's
+    # systemd service can execute them from /mnt/data
+    node_bin = frontend_dir / "node_modules" / ".bin"
+    if node_bin.exists():
+        run(f"chcon -R -t bin_t {node_bin}")
+
+    # Deploy systemd service
+    write_file(
+        "/etc/systemd/system/wiki-gui.service",
+        textwrap.dedent(f"""\
+            [Unit]
+            Description=Wikipedia Web GUI
+            After=network.target mcp.service
+
+            [Service]
+            Type=simple
+            User=wiki
+            Group=wiki
+            WorkingDirectory={frontend_dir}
+            ExecStart=/usr/bin/npm run preview
+            Restart=on-failure
+            Environment="NODE_ENV=production"
+
+            [Install]
+            WantedBy=multi-user.target
+        """),
+    )
+
+    run("systemctl daemon-reload")
+    run("systemctl enable --now wiki-gui.service", check=False)
 
 
 @stage("firewall", "Configure firewalld rules for all service ports")
@@ -1127,6 +1179,7 @@ def stage_verify(user: str) -> None:
         ("LLM server", "curl -sf http://localhost:1234/v1/models -o /dev/null && echo OK || echo DOWN"),
         ("Embedding server", "curl -sf http://localhost:1235/v1/models -o /dev/null && echo OK || echo DOWN"),
         ("MCP server", "curl -sf http://localhost:7000/health -o /dev/null && echo OK || echo DOWN"),
+        ("Web GUI", "curl -sf http://localhost:8080 -o /dev/null && echo OK || echo DOWN"),
         ("llm-swap helper", 'test -x /usr/local/bin/llm-swap && echo "installed" || echo "MISSING"'),
         ("VSCode", f'su - {user} -s /bin/sh -c "code --version 2>/dev/null | head -1" || echo "not found"'),
     ]
@@ -1232,6 +1285,7 @@ def stage_reverify(user: str) -> None:
         "PostgreSQL":   "pg_isready",
         "OpenSearch":   "curl -sf http://localhost:9200 -o /dev/null && echo OK || echo DOWN",
         "MCP server":   "curl -sf http://localhost:7000/health -o /dev/null && echo OK || echo DOWN",
+        "Web GUI":      "curl -sf http://localhost:8080 -o /dev/null && echo OK || echo DOWN",
     }
 
     max_wait = 90  # seconds
