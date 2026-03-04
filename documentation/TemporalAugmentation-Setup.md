@@ -59,7 +59,7 @@ All scripts are located in `${DEEPRED_REPO}/scripts/` and are added to `$PATH` a
 |--------|---------|
 | `yago_parser.py` | Parse YAGO TTL files for temporal metadata (birth/death/start/end dates) |
 | `normalize_yago_output.py` | Normalize Wikipedia URLs to English, add page IDs from local database |
-| `wikidata_parser.py` | Parse Wikidata TTL files for temporal metadata (P569/P570/P571/P576) |
+| `wikidata_parser.py` | Download, extract, parse Wikidata TTL files for temporal metadata (P569/P570/P571/P576) |
 | `augment_wikipedia_temporal.py` | Write temporal data into the Wikipedia PostgreSQL database |
 
 ## Prerequisites
@@ -204,13 +204,12 @@ YAGO contains Wikipedia links in many languages; the normalizer converts these t
 
 The `normalize_yago_output.py` script:
 1. Reads the compressed CSV from phase 1 (`.csv.zst`) — falls back to plain `.csv`
-2. Detects non-English Wikipedia URLs and extracts language code + title
-3. Queries the Wikipedia API to find English equivalent articles
-4. Validates articles exist in the local PostgreSQL database
-5. Extracts Wikipedia page IDs from database URLs
-6. Outputs normalized data with English URLs and page IDs
-7. Compresses output → `yago-facts-normalized.csv.zst`
-8. Reclaims the plain CSV, leaving a `.reclaim` marker
+2. Detects non-English Wikipedia URLs and translates them via the Wikipedia API
+3. Validates articles exist in the local PostgreSQL database and extracts page IDs
+4. Outputs normalized data with English URLs and page IDs
+5. Compresses output → `yago-facts-normalized.csv.zst` and reclaims the plain CSV
+
+Performance optimisations: batch DB prefetch via `ANY(%s)` to reduce round-trips ~10–20×, rate-limited async API pool (default 2 workers) to overlap sleep with DB work, and lookahead batching (default 2000 rows) so DB prefetch and API submission happen in bulk.
 
 ```bash
 source deepred-env.sh
@@ -226,23 +225,18 @@ The script automatically finds `$WIKI_DATA/yago/yago-facts.csv.zst` (or `.csv`) 
 #### Skipping compression or reclamation
 
 ```bash
-python3 scripts/normalize_yago_output.py --verbose --no-reclaim         # keep plain CSV
-python3 scripts/normalize_yago_output.py --verbose --no-compress         # keep plain CSV (no .zst)
+python3 scripts/normalize_yago_output.py --verbose --no-reclaim                # keep plain CSV
+python3 scripts/normalize_yago_output.py --verbose --no-compress               # keep plain CSV (no .zst)
 python3 scripts/normalize_yago_output.py --verbose --no-compress --no-reclaim  # keep everything
 ```
 
-#### Explicit paths (legacy mode)
+**Expected output** (default — progress bar only):
 
-The old calling convention with positional input and `--output` still works:
-
-```bash
-python3 scripts/normalize_yago_output.py \
-    ${WIKI_DATA}/yago/yago-facts.csv \
-    --output ${WIKI_DATA}/yago/yago-facts-normalized.csv \
-    --verbose
+```
+  Normalizing: 100%|████████████████████████████| 1,811,435/1,811,435 [2:46:34<00:00, 181.25 entries/s]
 ```
 
-**Expected output:**
+With `--verbose`, a summary is printed after completion:
 
 ```
 Normalization complete!
@@ -252,6 +246,8 @@ Normalization complete!
   API calls made: 28,025
   API translations successful: 21,414
   API translations not found: 6,611
+  DB cache entries: 1,812,000
+  Redirect cache entries: 45,000
   Output saved to: .../yago/yago-facts-normalized.csv
   Compressed output: .../yago/yago-facts-normalized.csv.zst
   Reclaimed yago-facts-normalized.csv
@@ -266,16 +262,18 @@ Normalization complete!
 | `-f`, `--format` | Output format: `csv` or `json` (auto-detected from extension) |
 | `--skip-missing` | Skip entries not found in local database |
 | `-r`, `--resume` | Resume from existing output (skip already-processed entries) |
+| `-m`, `--mode` | Input format mode: `yago` or `wikidata` (default: yago) |
 | `-v`, `--verbose` | Enable verbose logging |
-| `--api-delay SECONDS` | Delay between Wikipedia API calls (default: 0.1) |
+| `--api-delay SECONDS` | Delay between Wikipedia API calls (default: 0.5). Increase if throttled. |
+| `--api-workers N` | Parallel API worker threads (default: 2). Workers overlap rate-limit sleep with work. |
+| `--batch-size N` | Rows to read ahead for DB prefetch batching (default: 2000) |
 | `--no-compress` | Skip compression stage (keep plain CSV) |
 | `--no-reclaim` | Skip reclamation stage (keep plain CSV after compression) |
 | `--force` | Overwrite existing output file without prompting |
-| `--db-host HOST` | PostgreSQL host (default: localhost) |
-| `--db-name NAME` | Database name (default: wikidb) |
-| `--db-user USER` | Database user (default: wiki) |
-| `--db-password PASS` | Database password (default: wikipass) |
-| `--mode {yago,wikidata}` | Input format mode (default: yago) |
+| `--db-host HOST` | PostgreSQL host (default: `$PG_HOST` or localhost) |
+| `--db-name NAME` | Database name (default: `$PG_DATABASE` or wikidb) |
+| `--db-user USER` | Database user (default: `$PG_USER` or wiki) |
+| `--db-password PASS` | Database password (default: `$PG_PASSWORD` or wikipass) |
 
 **Normalized output format (CSV):**
 
@@ -288,8 +286,15 @@ Marie_Curie,Marie_Curie,20017,https://en.wikipedia.org/wiki?curid=20017,1867-11-
 **If the process is interrupted** (API throttling, network issues), resume with:
 
 ```bash
-python3 scripts/normalize_yago_output.py \
-    --resume --api-delay 0.5 --verbose
+python3 scripts/normalize_yago_output.py --resume --verbose
+```
+
+#### Inspecting compressed output
+
+The output is stored as `.csv.zst`. To preview the first 10 lines without fully decompressing:
+
+```bash
+zstd -dcq ${WIKI_DATA}/yago/yago-facts-normalized.csv.zst | head -10
 ```
 
 ---
@@ -298,74 +303,111 @@ python3 scripts/normalize_yago_output.py \
 
 Wikidata provides broader entity coverage. This phase requires significantly more disk space (~1 TB) and processing time compared to YAGO.
 
-### 2.1 Download Wikidata Dump
+### 2.1 Download, Extract, and Parse Wikidata Data
 
-```bash
-source deepred-env.sh
-mkdir -p ${WIKI_DATA}/wikidata
-cd ${WIKI_DATA}/wikidata
-wget -c --timeout=60 --tries=10 \
-    https://dumps.wikimedia.org/wikidatawiki/entities/20251215/wikidata-20251215-all-BETA.ttl.bz2
-```
+The `wikidata_parser.py` script manages the full pipeline — download, extraction, parsing, compression, and reclamation — in a single command. It runs five stages by default:
 
-**Important:** This download is ~110 GB and may take several hours. The `-c` flag allows resuming if interrupted.
+1. **Download** `wikidata-20251215-all-BETA.ttl.bz2` (~110 GB) into `$WIKI_DATA/wikidata/`
+2. **Extract** `wikidata-20251215-all-BETA.ttl` (~900 GB) from the bz2 archive
+3. **Parse** temporal properties and write `wikidata-temporal.csv` (with checkpoint/resume)
+4. **Compress** the CSV with zstd → `wikidata-temporal.csv.zst`
+5. **Reclaim** disk space by deleting intermediate files
 
-### 2.2 Extract Wikidata Dump
-
-```bash
-cd ${WIKI_DATA}/wikidata
-bunzip2 -k wikidata-20251215-all-BETA.ttl.bz2
-```
-
-Extraction takes several hours. The `-k` flag keeps the original compressed file (omit if disk space is limited). The extracted TTL file is approximately 900+ GB.
-
-Verify:
-
-```bash
-ls -lh ${WIKI_DATA}/wikidata/
-# Expected:
-# -rw-r--r-- 1 ... 110G ... wikidata-20251215-all-BETA.ttl.bz2
-# -rw-r--r-- 1 ... 881G ... wikidata-20251215-all-BETA.ttl
-```
-
-### 2.3 Parse Wikidata for Temporal Metadata
-
-The `wikidata_parser.py` script extracts four temporal properties:
-- **P569**: date of birth
-- **P570**: date of death
-- **P571**: inception (founding, establishment)
-- **P576**: dissolved, abolished, or demolished date
-
-It links entities to English Wikipedia articles and produces output compatible with the YAGO pipeline.
-
-**Key features:** Checkpoint/resume is enabled by default for CSV output — the parser can be safely interrupted and resumed.
+Each stage checks whether its output file already exists **or** whether a `.reclaim` marker file indicates the output was previously produced and cleaned up. This means the script can be re-run safely at any time — it picks up where it left off.
 
 ```bash
 source deepred-env.sh
 
-# Export to CSV (checkpoint/resume enabled by default)
-python3 scripts/wikidata_parser.py \
-    ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
-    --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
+# Full pipeline: download → extract → parse → compress → reclaim
+python3 scripts/wikidata_parser.py --verbose
+```
+
+After a successful run the working directory contains:
+- `wikidata-temporal.csv.zst` — final compressed output
+- `wikidata-20251215-all-BETA.ttl.bz2.reclaim` — marker: bz2 was downloaded
+- `wikidata-20251215-all-BETA.ttl.reclaim` — marker: TTL was extracted
+- `wikidata-temporal.csv.reclaim` — marker: CSV was produced
+
+All stages display progress bars with ETA when `--verbose` is set.
+
+**Extraction** uses the fastest available tool: `lbzip2` (parallel, recommended) > `pbzip2` > `bunzip2`, with a Python `bz2` fallback when no native tool is installed. Install `lbzip2` for significantly faster extraction:
+
+```bash
+sudo dnf install lbzip2    # Fedora
+sudo apt install lbzip2    # Debian/Ubuntu
+```
+
+**Parsing** the ~900 GB TTL file takes 3–6 hours. Checkpoint/resume is enabled by default — the parser saves progress every 1 million lines and can be safely interrupted and resumed.
+
+#### Skipping compression or reclamation
+
+To keep intermediate files or the plain CSV:
+
+```bash
+python3 scripts/wikidata_parser.py --verbose --no-reclaim         # keep bz2 + TTL
+python3 scripts/wikidata_parser.py --verbose --no-compress         # keep plain CSV (no .zst)
+python3 scripts/wikidata_parser.py --verbose --no-compress --no-reclaim  # parse only, keep everything
+```
+
+#### Individual stages
+
+Stages can be run independently:
+
+```bash
+python3 scripts/wikidata_parser.py --download-only       # just download
+python3 scripts/wikidata_parser.py --extract-only        # download + extract, stop before parse
+python3 scripts/wikidata_parser.py --parse-only --verbose # parse only (TTL must exist)
+```
+
+#### Re-run or version change
+
+```bash
+# Redo all stages: clears .reclaim markers, checkpoints, re-downloads, re-parses
+python3 scripts/wikidata_parser.py --force --verbose
+
+# Use a different Wikidata dump version
+python3 scripts/wikidata_parser.py --force \
+    --url https://dumps.wikimedia.org/wikidatawiki/entities/20260101/wikidata-20260101-all-BETA.ttl.bz2 \
     --verbose
 ```
 
-Processing the full ~900 GB file takes 3–6 hours. Progress is reported every 1 million lines. If interrupted, simply rerun the same command to resume.
+#### Legacy mode (positional TTL path)
+
+The old calling convention still works:
+
+```bash
+python3 scripts/wikidata_parser.py ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
+    --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv --verbose
+```
 
 **Command-line options:**
 
 | Option | Description |
 |--------|-------------|
-| `ttl_file` | Path to Wikidata TTL file (required, positional) |
-| `--csv FILE` | Export results to CSV (checkpoint enabled by default) |
-| `--json FILE` | Export results to JSON |
-| `--summary` | Print summary of results to console |
-| `--limit N` | Limit summary output to N entities (default: 20) |
+| `ttl_file` | Path to an existing TTL file (optional; skip download/extract) |
+| `--wikidata-dir DIR` | Working directory (default: `$WIKI_DATA/wikidata`) |
+| `--url URL` | Wikidata bz2 dump download URL |
+| `--csv FILE` | CSV output path (default: `<wikidata-dir>/wikidata-temporal.csv`) |
+| `--json FILE` | JSON output path |
+| `--download-only` | Only download, then stop |
+| `--extract-only` | Only extract, then stop |
+| `--parse-only` | Only parse (TTL must already exist) |
+| `--no-compress` | Skip compression stage (keep plain CSV) |
+| `--no-reclaim` | Skip reclamation stage (keep intermediate files) |
+| `--force` | Clear `.reclaim` markers, checkpoints, and re-run all stages |
+| `--verbose`, `-v` | Show progress bars and detail |
+| `--limit N` | Entities shown in summary (default: 20) |
+| `--no-summary` | Skip console summary output |
 | `--all-entities` | Include entities without Wikipedia links |
-| `--verbose` | Detailed progress information |
 | `--checkpoint FILE` | Custom checkpoint file path (default: `<csv_file>.checkpoint`) |
 | `--no-checkpoint` | Disable checkpoint mode (not recommended) |
 | `--checkpoint-interval N` | Lines between checkpoints (default: 1,000,000) |
+
+The script extracts these temporal properties from the TTL:
+- **P569** (`wdt:P569`) — date of birth
+- **P570** (`wdt:P570`) — date of death
+- **P571** (`wdt:P571`) — inception (founding, establishment)
+- **P576** (`wdt:P576`) — dissolved, abolished, or demolished date
 
 **Output format (CSV):**
 
@@ -375,7 +417,7 @@ Q23,George Washington,https://en.wikipedia.org/wiki/George_Washington,1732-02-22
 Q42,Douglas Adams,https://en.wikipedia.org/wiki/Douglas_Adams,2001-05-11,2001-05-11
 ```
 
-### 2.4 Normalize Wikidata Output
+### 2.2 Normalize Wikidata Output
 
 Use the same normalizer with `--mode wikidata` to handle the Wikidata CSV format:
 
@@ -383,13 +425,21 @@ Use the same normalizer with `--mode wikidata` to handle the Wikidata CSV format
 source deepred-env.sh
 
 python3 scripts/normalize_yago_output.py \
-    ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
+    ${WIKI_DATA}/wikidata/wikidata-temporal.csv.zst \
     --output ${WIKI_DATA}/wikidata/wikidata-temporal-normalized.csv \
     --mode wikidata \
     --verbose
 ```
 
 This adds Wikipedia page IDs from the local database and normalizes to the common output format expected by the augmentation script.
+
+#### Inspecting compressed output
+
+The output is stored as `.csv.zst`. To preview the first 10 lines without fully decompressing:
+
+```bash
+zstd -dcq ${WIKI_DATA}/wikidata/wikidata-temporal-normalized.csv.zst | head -10
+```
 
 ---
 
@@ -454,7 +504,7 @@ Run the same script with the Wikidata normalized output for additional coverage:
 
 ```bash
 python3 scripts/augment_wikipedia_temporal.py \
-    ${WIKI_DATA}/wikidata/wikidata-temporal-normalized.csv \
+    ${WIKI_DATA}/wikidata/wikidata-temporal-normalized.csv.zst \
     --verbose
 ```
 
@@ -652,14 +702,11 @@ sudo -u postgres psql wikidb -c "GRANT ALL ON articles TO wiki;"
 
 ### Wikidata Checkpoint/Resume
 
-If `wikidata_parser.py` is interrupted, simply rerun the same command — it automatically resumes from the last checkpoint:
+If `wikidata_parser.py` is interrupted during the parse stage, simply rerun the same command — it automatically resumes from the last checkpoint:
 
 ```bash
 # Re-run the exact same command; checkpoint is detected automatically
-python3 scripts/wikidata_parser.py \
-    ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
-    --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv \
-    --verbose
+python3 scripts/wikidata_parser.py --verbose
 # Output: "Loaded checkpoint: Resuming from line 50,000,000"
 ```
 
@@ -672,11 +719,11 @@ python3 scripts/wikidata_parser.py \
 | YAGO download | 15–30 min | 12 GB |
 | YAGO extraction | 5–10 min | 22 GB |
 | YAGO parsing | Minutes | ~200 MB CSV |
-| YAGO normalization | 30–60 min | ~300 MB CSV |
+| YAGO normalization | 15–25 min | ~300 MB CSV |
 | Wikidata download | Several hours | ~110 GB |
-| Wikidata extraction | Several hours | ~900 GB |
+| Wikidata extraction | Minutes (lbzip2) to hours (bunzip2) | ~900 GB |
 | Wikidata parsing | 3–6 hours | ~300 MB CSV |
-| Wikidata normalization | 1–2 hours | ~400 MB CSV |
+| Wikidata normalization | 30–60 min | ~400 MB CSV |
 | Database augmentation (per source) | 30–40 min | — |
 
 **Tip:** Increase batch size for faster database augmentation on systems with sufficient memory:

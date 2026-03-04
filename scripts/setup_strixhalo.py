@@ -292,7 +292,7 @@ def stage_system_packages(user: str) -> None:
     run("dnf install -y @development-tools cmake gcc-c++ git curl wget "
         "python3-devel python3-pip python3-setuptools python3-wheel "
         "lld clang clang-devel compiler-rt libcurl-devel "
-        "radeontop unzip bzip2")
+        "radeontop unzip bzip2 lbzip2")
 
 
 @stage("disable_sleep", "Disable sleep/suspend for always-on server operation")
