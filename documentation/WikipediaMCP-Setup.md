@@ -511,6 +511,10 @@ CREATE TABLE articles (
     title TEXT NOT NULL,
     content TEXT,
     url TEXT,
+    wikipedia_page_id INTEGER,
+    has_temporal_info BOOLEAN DEFAULT FALSE,
+    earliest_date DATE,
+    latest_date DATE,
     created_at TIMESTAMP DEFAULT NOW()
 );
 

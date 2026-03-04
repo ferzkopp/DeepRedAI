@@ -183,6 +183,24 @@ class ArticleResponse(BaseModel):
     sections: List[Section]
 
 
+class TemporalRequest(BaseModel):
+    """Request model for batch temporal lookup."""
+    article_ids: List[int] = Field(..., description="List of article IDs to look up", min_length=1, max_length=500)
+
+
+class TemporalInfo(BaseModel):
+    """Temporal information for a single article."""
+    article_id: int
+    has_temporal_info: bool
+    earliest_date: Optional[str] = None
+    latest_date: Optional[str] = None
+
+
+class TemporalResponse(BaseModel):
+    """Response model for batch temporal lookup."""
+    results: List[TemporalInfo]
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str
@@ -455,6 +473,52 @@ async def search(request: SearchRequest):
     )
 
 
+@app.post("/mcp/temporal", response_model=TemporalResponse, tags=["MCP"])
+async def get_temporal_info(request: TemporalRequest):
+    """
+    Batch-retrieve temporal augmentation data for a list of article IDs.
+
+    Returns has_temporal_info, earliest_date, and latest_date for each
+    requested article.  Articles that are not found in the database are
+    returned with has_temporal_info=False.
+    """
+    try:
+        conn = get_pg_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT wikipedia_page_id, has_temporal_info, earliest_date, latest_date
+                FROM articles
+                WHERE wikipedia_page_id = ANY(%s)
+                """,
+                (request.article_ids,)
+            )
+            rows = {r['wikipedia_page_id']: r for r in cur.fetchall()}
+        conn.close()
+
+        results = []
+        for aid in request.article_ids:
+            row = rows.get(aid)
+            if row and row.get('has_temporal_info'):
+                results.append(TemporalInfo(
+                    article_id=aid,
+                    has_temporal_info=True,
+                    earliest_date=row['earliest_date'].isoformat() if row.get('earliest_date') else None,
+                    latest_date=row['latest_date'].isoformat() if row.get('latest_date') else None,
+                ))
+            else:
+                results.append(TemporalInfo(
+                    article_id=aid,
+                    has_temporal_info=False,
+                ))
+
+        return TemporalResponse(results=results)
+
+    except Exception as e:
+        logger.error(f"Temporal lookup error: {e}")
+        raise HTTPException(status_code=500, detail=f"Temporal lookup failed: {str(e)}")
+
+
 @app.get("/mcp/article/{article_id}", response_model=ArticleResponse, tags=["MCP"])
 async def get_article(article_id: int):
     """
@@ -465,17 +529,25 @@ async def get_article(article_id: int):
     try:
         conn = get_pg_connection()
         with conn.cursor() as cur:
-            # Get article
+            # Get article — look up by wikipedia_page_id first (callers
+            # pass the Wikipedia page ID from OpenSearch), fall back to
+            # serial id for backward compatibility.
             cur.execute(
-                "SELECT id, title, content, url FROM articles WHERE id = %s",
+                "SELECT id, title, content, url FROM articles WHERE wikipedia_page_id = %s",
                 (article_id,)
             )
             article = cur.fetchone()
+            if not article:
+                cur.execute(
+                    "SELECT id, title, content, url FROM articles WHERE id = %s",
+                    (article_id,)
+                )
+                article = cur.fetchone()
             
             if not article:
                 raise HTTPException(status_code=404, detail=f"Article {article_id} not found")
             
-            # Get sections
+            # Get sections using the internal serial id
             cur.execute(
                 """
                 SELECT id, section_title, section_text, section_order 
@@ -483,7 +555,7 @@ async def get_article(article_id: int):
                 WHERE article_id = %s 
                 ORDER BY section_order
                 """,
-                (article_id,)
+                (article['id'],)
             )
             sections_data = cur.fetchall()
         

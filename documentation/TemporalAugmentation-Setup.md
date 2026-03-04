@@ -2,7 +2,7 @@
 
 ## Overview
 
-The temporal augmentation pipeline enriches the local Wikipedia PostgreSQL database with time-related metadata extracted from external knowledge bases (YAGO and Wikidata). This adds temporal columns to the articles table — tracking when entities existed or events occurred — enabling filtering by time period for model training.
+The temporal augmentation pipeline enriches the local Wikipedia PostgreSQL database with time-related metadata extracted from external knowledge bases (YAGO and Wikidata). This populates the temporal columns on the articles table — tracking when entities existed or events occurred — enabling filtering by time period for model training.
 
 For the Deep Red project, this means selecting only content relevant before the July 1969 temporal cutoff.
 
@@ -20,10 +20,10 @@ For the Deep Red project, this means selecting only content relevant before the 
       │  Extract temporal  │           │ Extract temporal   │
       │  metadata          │           │ metadata           │
       └────────┬───────────┘           └────────┬───────────┘
-               │ CSV.zst                         │ CSV
+               │ CSV.zst                         │ CSV.zst
                ▼                                ▼
       ┌──────────────────────────────────────────────────┐
-      │         normalize_yago_output.py                 │
+      │         normalize_temporal_output.py              │
       │   Normalize to English Wikipedia + page IDs      │
       │   + compress → .csv.zst                          │
       └────────────────────┬─────────────────────────────┘
@@ -31,7 +31,7 @@ For the Deep Red project, this means selecting only content relevant before the 
                            ▼
       ┌──────────────────────────────────────────────────┐
       │      augment_wikipedia_temporal.py               │
-      │   Add temporal columns to PostgreSQL articles    │
+      │   Populate temporal columns in PostgreSQL         │
       └────────────────────┬─────────────────────────────┘
                            │
                            ▼
@@ -58,7 +58,7 @@ All scripts are located in `${DEEPRED_REPO}/scripts/` and are added to `$PATH` a
 | Script | Purpose |
 |--------|---------|
 | `yago_parser.py` | Parse YAGO TTL files for temporal metadata (birth/death/start/end dates) |
-| `normalize_yago_output.py` | Normalize Wikipedia URLs to English, add page IDs from local database |
+| `normalize_temporal_output.py` | Normalize Wikipedia URLs to English, add page IDs from local database |
 | `wikidata_parser.py` | Download, extract, parse Wikidata TTL files for temporal metadata (P569/P570/P571/P576) |
 | `augment_wikipedia_temporal.py` | Write temporal data into the Wikipedia PostgreSQL database |
 
@@ -202,7 +202,7 @@ Marie_Curie,https://fr.wikipedia.org/wiki/Marie_Curie,1867-11-07,1934-07-04
 
 YAGO contains Wikipedia links in many languages; the normalizer converts these to English Wikipedia and adds page IDs from the local database.
 
-The `normalize_yago_output.py` script:
+The `normalize_temporal_output.py` script:
 1. Reads the compressed CSV from phase 1 (`.csv.zst`) — falls back to plain `.csv`
 2. Detects non-English Wikipedia URLs and translates them via the Wikipedia API
 3. Validates articles exist in the local PostgreSQL database and extracts page IDs
@@ -215,7 +215,7 @@ Performance optimisations: batch DB prefetch via `ANY(%s)` to reduce round-trips
 source deepred-env.sh
 
 # Full pipeline: reads yago-facts.csv.zst, writes yago-facts-normalized.csv.zst
-python3 scripts/normalize_yago_output.py --verbose
+python3 scripts/normalize_temporal_output.py --verbose
 ```
 
 The script automatically finds `$WIKI_DATA/yago/yago-facts.csv.zst` (or `.csv`) and writes the normalized output alongside it. After a successful run the working directory contains:
@@ -225,9 +225,9 @@ The script automatically finds `$WIKI_DATA/yago/yago-facts.csv.zst` (or `.csv`) 
 #### Skipping compression or reclamation
 
 ```bash
-python3 scripts/normalize_yago_output.py --verbose --no-reclaim                # keep plain CSV
-python3 scripts/normalize_yago_output.py --verbose --no-compress               # keep plain CSV (no .zst)
-python3 scripts/normalize_yago_output.py --verbose --no-compress --no-reclaim  # keep everything
+python3 scripts/normalize_temporal_output.py --verbose --no-reclaim                # keep plain CSV
+python3 scripts/normalize_temporal_output.py --verbose --no-compress               # keep plain CSV (no .zst)
+python3 scripts/normalize_temporal_output.py --verbose --no-compress --no-reclaim  # keep everything
 ```
 
 **Expected output** (default — progress bar only):
@@ -273,7 +273,7 @@ Normalization complete!
 | `--db-host HOST` | PostgreSQL host (default: `$PG_HOST` or localhost) |
 | `--db-name NAME` | Database name (default: `$PG_DATABASE` or wikidb) |
 | `--db-user USER` | Database user (default: `$PG_USER` or wiki) |
-| `--db-password PASS` | Database password (default: `$PG_PASSWORD` or wikipass) |
+| `--db-password PASS` | Database password (default: `$PG_PASSWORD` or wiki) |
 
 **Normalized output format (CSV):**
 
@@ -286,7 +286,7 @@ Marie_Curie,Marie_Curie,20017,https://en.wikipedia.org/wiki?curid=20017,1867-11-
 **If the process is interrupted** (API throttling, network issues), resume with:
 
 ```bash
-python3 scripts/normalize_yago_output.py --resume --verbose
+python3 scripts/normalize_temporal_output.py --resume --verbose
 ```
 
 #### Inspecting compressed output
@@ -330,12 +330,7 @@ After a successful run the working directory contains:
 
 All stages display progress bars with ETA when `--verbose` is set.
 
-**Extraction** uses the fastest available tool: `lbzip2` (parallel, recommended) > `pbzip2` > `bunzip2`, with a Python `bz2` fallback when no native tool is installed. Install `lbzip2` for significantly faster extraction:
-
-```bash
-sudo dnf install lbzip2    # Fedora
-sudo apt install lbzip2    # Debian/Ubuntu
-```
+**Extraction** uses the fastest available tool: `lbzip2` (parallel, recommended) > `pbzip2` > `bunzip2`, with a Python `bz2` fallback when no native tool is installed.
 
 **Parsing** the ~900 GB TTL file takes 3–6 hours. Checkpoint/resume is enabled by default — the parser saves progress every 1 million lines and can be safely interrupted and resumed.
 
@@ -369,15 +364,6 @@ python3 scripts/wikidata_parser.py --force --verbose
 python3 scripts/wikidata_parser.py --force \
     --url https://dumps.wikimedia.org/wikidatawiki/entities/20260101/wikidata-20260101-all-BETA.ttl.bz2 \
     --verbose
-```
-
-#### Legacy mode (positional TTL path)
-
-The old calling convention still works:
-
-```bash
-python3 scripts/wikidata_parser.py ${WIKI_DATA}/wikidata/wikidata-20251215-all-BETA.ttl \
-    --csv ${WIKI_DATA}/wikidata/wikidata-temporal.csv --verbose
 ```
 
 **Command-line options:**
@@ -424,7 +410,7 @@ Use the same normalizer with `--mode wikidata` to handle the Wikidata CSV format
 ```bash
 source deepred-env.sh
 
-python3 scripts/normalize_yago_output.py \
+python3 scripts/normalize_temporal_output.py \
     ${WIKI_DATA}/wikidata/wikidata-temporal.csv.zst \
     --output ${WIKI_DATA}/wikidata/wikidata-temporal-normalized.csv \
     --mode wikidata \
@@ -445,26 +431,26 @@ zstd -dcq ${WIKI_DATA}/wikidata/wikidata-temporal-normalized.csv.zst | head -10
 
 ## Phase 3: Database Augmentation
 
-The `augment_wikipedia_temporal.py` script adds temporal columns to the Wikipedia articles table and populates them from the normalized CSV files.
+The `augment_wikipedia_temporal.py` script populates the temporal columns on the Wikipedia articles table from the normalized CSV files.
 
-### Database Schema Changes
+### Database Schema
 
-The script adds four columns to the `articles` table:
+The temporal columns (`wikipedia_page_id`, `has_temporal_info`, `earliest_date`, `latest_date`) are part of the base Wikipedia database schema created during initial setup (see [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md)). The augmentation script ensures they exist (using `ADD COLUMN IF NOT EXISTS`) and then populates them:
 
 ```sql
--- Extract Wikipedia page ID from URL for fast lookups
+-- Ensure columns exist (idempotent — no-op on a fresh schema)
 ALTER TABLE articles ADD COLUMN IF NOT EXISTS wikipedia_page_id INTEGER;
-UPDATE articles SET wikipedia_page_id = (regexp_match(url, 'curid=(\d+)'))[1]::INTEGER
-  WHERE url ~ 'curid=' AND wikipedia_page_id IS NULL;
-CREATE INDEX IF NOT EXISTS idx_articles_wikipedia_page_id ON articles(wikipedia_page_id);
-
--- Temporal information columns
 ALTER TABLE articles ADD COLUMN IF NOT EXISTS has_temporal_info BOOLEAN DEFAULT FALSE;
 ALTER TABLE articles ADD COLUMN IF NOT EXISTS earliest_date DATE;
 ALTER TABLE articles ADD COLUMN IF NOT EXISTS latest_date DATE;
+
+-- Extract Wikipedia page ID from URL for fast lookups
+UPDATE articles SET wikipedia_page_id = (regexp_match(url, 'curid=(\d+)'))[1]::INTEGER
+  WHERE url ~ 'curid=' AND wikipedia_page_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_articles_wikipedia_page_id ON articles(wikipedia_page_id);
 ```
 
-The script is **idempotent** — safe to run multiple times. It uses `ADD COLUMN IF NOT EXISTS` and updates overwrite previous values.
+The script is **idempotent** — safe to run multiple times. Updates overwrite previous values.
 
 ### 3.1 Augment with YAGO Data
 
@@ -479,23 +465,30 @@ python3 scripts/augment_wikipedia_temporal.py \
 **Expected output:**
 
 ```
-=== Database Statistics (After Update) ===
-Total articles: 7,036,771
-Articles with temporal info: 1,752,611 (24.91%)
-Articles without temporal info: 5,284,160
-Temporal date range: 0100-01-01 to 2025-12-01
-
+...
 Top centuries by article count:
-  1800s: 294,559 articles
-  1900s: 1,261,590 articles
-  2000s: 58,852 articles
-
-=== Update Summary ===
-Temporal records in CSV: 1,751,636
-Articles updated successfully: 1,751,636 (100.0%)
-Articles not found in database: 0 (0.0%)
-
-Database augmentation complete!
+2026-03-03 21:50:53,649 - INFO -   0s: 1,147 articles
+2026-03-03 21:50:53,649 - INFO -   100s: 1,263 articles
+2026-03-03 21:50:53,649 - INFO -   200s: 1,241 articles
+2026-03-03 21:50:53,649 - INFO -   300s: 1,277 articles
+2026-03-03 21:50:53,649 - INFO -   400s: 1,198 articles
+2026-03-03 21:50:53,649 - INFO -   500s: 1,584 articles
+2026-03-03 21:50:53,649 - INFO -   600s: 1,957 articles
+2026-03-03 21:50:53,649 - INFO -   700s: 1,894 articles
+2026-03-03 21:50:53,649 - INFO -   800s: 2,303 articles
+2026-03-03 21:50:53,649 - INFO -   900s: 2,572 articles
+2026-03-03 21:50:53,649 - INFO -   1000s: 3,179 articles
+2026-03-03 21:50:53,649 - INFO -   1100s: 4,571 articles
+2026-03-03 21:50:53,649 - INFO -   1200s: 5,643 articles
+2026-03-03 21:50:53,649 - INFO -   1300s: 6,521 articles
+2026-03-03 21:50:53,649 - INFO -   1400s: 9,596 articles
+2026-03-03 21:50:53,649 - INFO -   1500s: 21,825 articles
+2026-03-03 21:50:53,649 - INFO -   1600s: 27,673 articles
+2026-03-03 21:50:53,649 - INFO -   1700s: 57,950 articles
+2026-03-03 21:50:53,649 - INFO -   1800s: 294,749 articles
+2026-03-03 21:50:53,649 - INFO -   1900s: 1,261,931 articles
+2026-03-03 21:50:53,649 - INFO -   2000s: 58,846 articles
+...
 ```
 
 ### 3.2 Augment with Wikidata Data
@@ -531,6 +524,19 @@ WHERE has_temporal_info = TRUE
 "
 ```
 
+**Expected output:**
+
+```
+total_articles | with_temporal | coverage_pct
+----------------+---------------+--------------
+        7041771 |       2617703 |        37.17
+
+
+count
+---------
+ 1676270
+```
+
 **Command-line options for `augment_wikipedia_temporal.py`:**
 
 | Option | Description |
@@ -542,7 +548,7 @@ WHERE has_temporal_info = TRUE
 | `--db-host HOST` | PostgreSQL host (default: localhost) |
 | `--db-name NAME` | Database name (default: wikidb) |
 | `--db-user USER` | Database user (default: wiki) |
-| `--db-password PASS` | Database password (default: wikipass) |
+| `--db-password PASS` | Database password (default: wiki) |
 
 ---
 
@@ -550,7 +556,7 @@ WHERE has_temporal_info = TRUE
 
 With the temporal database in place, year-based historical topics can be extracted from Wikipedia year pages and enriched with article references. This provides additional event-level temporal data for finetuning datasets.
 
-See [Wikipedia-YearTopics.md](Wikipedia-YearTopics.md) for the complete year topics extraction guide using `extract_year_topics.py`.
+See [Wikipedia-YearTopics-Setup.md](Wikipedia-YearTopics-Setup.md) for the complete year topics extraction guide using `extract_year_topics.py`.
 
 ---
 
@@ -608,7 +614,7 @@ import psycopg2
 
 conn = psycopg2.connect(
     host='localhost', database='wikidb',
-    user='wiki', password='wikipass'
+    user='wiki', password='wiki'
 )
 cur = conn.cursor()
 
@@ -680,24 +686,8 @@ ERROR - API THROTTLING ERROR (403 Forbidden)
 
 ```bash
 # Resume with increased delay between API calls
-python3 scripts/normalize_yago_output.py input.csv \
-    --output normalized.csv --resume --api-delay 0.5
-```
-
-### Low Match Rate in Augmentation
-
-```
-Articles updated successfully: 50,000 (3%)
-Articles not found in database: 1,700,000 (97%)
-```
-
-Verify you are using the **normalized** CSV file (not the raw parser output). The normalized file must have the `Wikipedia_ID` column with numeric page IDs.
-
-### Permission Denied on Database Table
-
-```bash
-# Ensure correct database permissions
-sudo -u postgres psql wikidb -c "GRANT ALL ON articles TO wiki;"
+python3 scripts/normalize_temporal_output.py input.csv \
+    --output normalized.csv --resume --api-delay 1.0
 ```
 
 ### Wikidata Checkpoint/Resume
@@ -708,28 +698,6 @@ If `wikidata_parser.py` is interrupted during the parse stage, simply rerun the 
 # Re-run the exact same command; checkpoint is detected automatically
 python3 scripts/wikidata_parser.py --verbose
 # Output: "Loaded checkpoint: Resuming from line 50,000,000"
-```
-
----
-
-## Performance Notes
-
-| Operation | Estimated Time | Disk Space |
-|-----------|---------------|------------|
-| YAGO download | 15–30 min | 12 GB |
-| YAGO extraction | 5–10 min | 22 GB |
-| YAGO parsing | Minutes | ~200 MB CSV |
-| YAGO normalization | 15–25 min | ~300 MB CSV |
-| Wikidata download | Several hours | ~110 GB |
-| Wikidata extraction | Minutes (lbzip2) to hours (bunzip2) | ~900 GB |
-| Wikidata parsing | 3–6 hours | ~300 MB CSV |
-| Wikidata normalization | 30–60 min | ~400 MB CSV |
-| Database augmentation (per source) | 30–40 min | — |
-
-**Tip:** Increase batch size for faster database augmentation on systems with sufficient memory:
-
-```bash
-python3 scripts/augment_wikipedia_temporal.py input.csv --batch-size 5000
 ```
 
 ---
@@ -752,7 +720,7 @@ psql -h localhost -U wiki -d wikidb < articles_backup.sql
 
 - **Local Documentation**
   - [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md) — Wikipedia database and MCP server setup
-  - [Wikipedia-YearTopics.md](Wikipedia-YearTopics.md) — Year topics extraction for temporal enrichment
+  - [Wikipedia-YearTopics-Setup.md](Wikipedia-YearTopics-Setup.md) — Year topics extraction for temporal enrichment
   - [ModelTraining.md](ModelTraining.md) — Model training using temporally filtered data
 - **External Resources**
   - [YAGO Knowledge Base](https://yago-knowledge.org/)

@@ -2,26 +2,29 @@
 """
 Augment Wikipedia Database with Temporal Information
 
-This script augments the local Wikipedia PostgreSQL database with temporal 
-information from normalized YAGO data. It adds three columns to the articles table:
+This script augments the local Wikipedia PostgreSQL database with temporal
+information from normalized YAGO or Wikidata data.  It adds three columns to
+the articles table:
 - has_temporal_info: Boolean flag indicating if temporal data is available
-- earliest_date: Earliest date associated with the article from YAGO
-- latest_date: Latest date associated with the article from YAGO
+- earliest_date: Earliest date associated with the article
+- latest_date: Latest date associated with the article
 
 The script:
 1. Adds the three new columns to the articles table (if they don't exist)
-2. Reads temporal data from normalized YAGO CSV file
-3. Updates articles using Wikipedia page IDs from the YAGO data
+2. Reads temporal data from a normalized CSV file (.csv or .csv.zst)
+3. COPYs the data into a temporary table and performs a single bulk UPDATE
+   using LEAST/GREATEST to merge with existing temporal data
 4. Outputs summary statistics showing coverage of temporal information
 
 Usage:
-    python augment_wikipedia_temporal.py yago-facts-normalized.csv
-    python augment_wikipedia_temporal.py yago-facts-normalized.csv --dry-run
-    python augment_wikipedia_temporal.py yago-facts-normalized.csv --batch-size 500
+    python augment_wikipedia_temporal.py yago-facts-normalized.csv.zst
+    python augment_wikipedia_temporal.py yago-facts-normalized.csv.zst --dry-run
+    python augment_wikipedia_temporal.py wikidata-temporal-normalized.csv.zst --verbose
 """
 
 import argparse
 import csv
+import io
 import logging
 import os
 import sys
@@ -29,7 +32,6 @@ from datetime import datetime
 from typing import Dict, Tuple
 
 import psycopg2
-from psycopg2.extras import execute_batch
 
 # Configure logging
 logging.basicConfig(
@@ -43,7 +45,7 @@ DB_CONFIG = {
     'port': int(os.environ.get('PG_PORT', 5432)),
     'database': os.environ.get('PG_DATABASE', 'wikidb'),
     'user': os.environ.get('PG_USER', 'wiki'),
-    'password': os.environ.get('PG_PASSWORD', 'wikipass')
+    'password': os.environ.get('PG_PASSWORD', 'wiki')
 }
 
 # ANSI color codes for terminal output
@@ -52,8 +54,26 @@ COLOR_YELLOW = '\033[33m'
 COLOR_RESET = '\033[0m'
 
 
+# ---------------------------------------------------------------------------
+# Helpers – transparent zstd reading
+# ---------------------------------------------------------------------------
+
+def _open_input(path: str, mode: str = 'r'):
+    """Return a text-mode file handle; transparently decompress ``.zst`` files."""
+    if path.endswith('.zst'):
+        import zstandard as zstd
+        dctx = zstd.ZstdDecompressor()
+        raw = open(path, 'rb')
+        return io.TextIOWrapper(
+            dctx.stream_reader(raw, closefd=True),
+            encoding='utf-8',
+            newline='',
+        )
+    return open(path, mode, encoding='utf-8')
+
+
 class TemporalAugmenter:
-    """Augment Wikipedia database with temporal information from YAGO"""
+    """Augment Wikipedia database with temporal information from YAGO or Wikidata"""
     
     def __init__(self, db_config: Dict = None):
         """
@@ -280,254 +300,185 @@ class TemporalAugmenter:
     
     def load_temporal_data(self, csv_file: str) -> Dict[int, Tuple[str, str]]:
         """
-        Load temporal data from normalized YAGO CSV file
-        
+        Load temporal data from a normalized CSV file (.csv or .csv.zst).
+
         Args:
-            csv_file: Path to normalized YAGO CSV file
-            
+            csv_file: Path to normalized CSV file (plain or zstd-compressed)
+
         Returns:
             Dictionary mapping Wikipedia page IDs to (earliest_date, latest_date) tuples
         """
         temporal_data = {}
         skipped_count = 0
-        
+
         logging.info(f"Loading temporal data from {csv_file}...")
-        
+
         try:
-            with open(csv_file, 'r', encoding='utf-8') as f:
+            with _open_input(csv_file) as f:
                 reader = csv.DictReader(f)
-                
+
                 for row in reader:
                     try:
                         # Skip entries without Wikipedia IDs
                         if not row.get('Wikipedia_ID') or row['Wikipedia_ID'] == '':
                             skipped_count += 1
                             continue
-                        
+
                         # Skip header row if it appears (Wikipedia_ID would be the string 'Wikipedia_ID')
                         if row['Wikipedia_ID'] == 'Wikipedia_ID':
                             continue
-                        
+
                         wiki_id = int(row['Wikipedia_ID'])
                         earliest = row.get('Earliest_Date', '').strip()
                         latest = row.get('Latest_Date', '').strip()
-                        
+
                         # Skip entries without valid dates
                         if not earliest or not latest:
                             skipped_count += 1
                             continue
-                        
+
                         # Validate date format (YYYY-MM-DD or negative years)
                         # This prevents header text like 'Earliest_Date' from being treated as a date
                         if not self._is_valid_date_string(earliest) or not self._is_valid_date_string(latest):
                             skipped_count += 1
                             continue
-                        
+
                         temporal_data[wiki_id] = (earliest, latest)
-                        
+
                     except (ValueError, KeyError) as e:
                         logging.debug(f"Skipping malformed row: {row} - {e}")
                         skipped_count += 1
                         continue
-            
+
             logging.info(f"Loaded temporal data for {len(temporal_data):,} articles")
             if skipped_count > 0:
                 logging.info(f"Skipped {skipped_count:,} invalid/incomplete entries")
             return temporal_data
-            
+
         except FileNotFoundError:
             logging.error(f"File not found: {csv_file}")
             return {}
         except Exception as e:
             logging.error(f"Error loading temporal data: {e}")
             return {}
-    
-    def load_existing_temporal_data(self, wiki_ids: list) -> Dict[int, Tuple[str, str]]:
-        """
-        Load existing temporal data from database for given Wikipedia IDs
-        
-        Args:
-            wiki_ids: List of Wikipedia page IDs to query
-            
-        Returns:
-            Dictionary mapping Wikipedia page IDs to (earliest_date, latest_date) tuples
-        """
-        existing_data = {}
-        
-        if not wiki_ids:
-            return existing_data
-        
-        try:
-            # Process in chunks to avoid too large IN clause
-            chunk_size = 10000
-            for i in range(0, len(wiki_ids), chunk_size):
-                chunk = wiki_ids[i:i + chunk_size]
-                placeholders = ','.join(['%s'] * len(chunk))
-                
-                self.cursor.execute(f"""
-                    SELECT wikipedia_page_id, earliest_date, latest_date
-                    FROM articles 
-                    WHERE has_temporal_info = TRUE 
-                    AND wikipedia_page_id IN ({placeholders})
-                """, chunk)
-                
-                for row in self.cursor.fetchall():
-                    wiki_id, earliest, latest = row
-                    if earliest and latest:
-                        existing_data[wiki_id] = (earliest.isoformat(), latest.isoformat())
-            
-            logging.info(f"Loaded existing temporal data for {len(existing_data):,} articles")
-            return existing_data
-            
-        except psycopg2.Error as e:
-            logging.error(f"Failed to load existing temporal data: {e}")
-            return {}
-    
-    def _compare_dates(self, date1: str, date2: str, use_min: bool = True) -> str:
-        """
-        Compare two date strings and return the min or max
-        
-        Args:
-            date1: First date string (YYYY-MM-DD)
-            date2: Second date string (YYYY-MM-DD)
-            use_min: If True, return minimum date; if False, return maximum
-            
-        Returns:
-            The min or max date string
-        """
-        try:
-            d1 = datetime.strptime(date1, '%Y-%m-%d')
-            d2 = datetime.strptime(date2, '%Y-%m-%d')
-            result = min(d1, d2) if use_min else max(d1, d2)
-            return result.strftime('%Y-%m-%d')
-        except (ValueError, TypeError):
-            # If parsing fails, return date1 as fallback
-            return date1
-    
+
     def update_articles(self, temporal_data: Dict[int, Tuple[str, str]], batch_size: int = 1000, dry_run: bool = False) -> Dict[str, int]:
         """
-        Update articles table with temporal information, merging with existing data
-        
+        Bulk-update articles table with temporal information using COPY + SQL merge.
+
+        Loads the CSV data into a PostgreSQL temporary table via COPY FROM,
+        then performs a single UPDATE … FROM with LEAST/GREATEST to merge
+        new dates with any existing temporal data.  This is dramatically
+        faster than row-by-row execute_batch.
+
         For articles with existing temporal info:
-        - earliest_date = MIN(existing_earliest, new_earliest)
-        - latest_date = MAX(existing_latest, new_latest)
-        
+        - earliest_date = LEAST(existing_earliest, new_earliest)
+        - latest_date   = GREATEST(existing_latest, new_latest)
+
         Args:
             temporal_data: Dictionary mapping Wikipedia IDs to (earliest_date, latest_date)
-            batch_size: Number of records to update in each batch
+            batch_size: Unused (kept for CLI compatibility); bulk COPY+UPDATE is always used
             dry_run: If True, don't commit changes to database
-            
+
         Returns:
             Dictionary with update statistics
         """
         from datetime import timedelta
-        
+
         stats = {
             'total_attempted': len(temporal_data),
             'new_articles': 0,
             'updated_articles': 0,
             'unchanged_articles': 0,
-            'failed': 0
+            'failed': 0,
         }
-        
+
         if dry_run:
             logging.info(f"{COLOR_YELLOW}DRY RUN MODE: No changes will be committed to database{COLOR_RESET}")
-        
-        logging.info(f"Updating articles with temporal information (batch size: {batch_size:,})...")
-        
-        # Load existing temporal data for articles we're about to update
-        wiki_ids = list(temporal_data.keys())
-        existing_temporal = self.load_existing_temporal_data(wiki_ids)
-        
-        # Prepare batch update data, merging with existing dates
-        update_data = []
-        new_articles_ids = []
-        updated_articles_ids = []
-        unchanged_articles_ids = []
-        
-        for wiki_id, (new_earliest, new_latest) in temporal_data.items():
-            if wiki_id in existing_temporal:
-                existing_earliest, existing_latest = existing_temporal[wiki_id]
-                
-                # Calculate MIN of earliest dates and MAX of latest dates
-                merged_earliest = self._compare_dates(existing_earliest, new_earliest, use_min=True)
-                merged_latest = self._compare_dates(existing_latest, new_latest, use_min=False)
-                
-                # Check if dates actually changed
-                if merged_earliest != existing_earliest or merged_latest != existing_latest:
-                    update_data.append((True, merged_earliest, merged_latest, wiki_id))
-                    updated_articles_ids.append(wiki_id)
-                else:
-                    unchanged_articles_ids.append(wiki_id)
-            else:
-                # New article - use new dates directly
-                update_data.append((True, new_earliest, new_latest, wiki_id))
-                new_articles_ids.append(wiki_id)
-        
-        logging.info(f"Merge analysis: {len(new_articles_ids):,} new, {len(updated_articles_ids):,} to update, {len(unchanged_articles_ids):,} unchanged")
-        
-        # Process in batches (only articles that need updates)
-        if not update_data:
-            logging.info("No articles need updating")
-            stats['unchanged_articles'] = len(unchanged_articles_ids)
-            return stats
-        
-        total_batches = (len(update_data) + batch_size - 1) // batch_size
+
+        logging.info(f"Updating {len(temporal_data):,} articles with temporal information (bulk COPY+UPDATE)...")
         start_time = datetime.now()
-        processed_count = 0
-        
-        for batch_num in range(total_batches):
-            start_idx = batch_num * batch_size
-            end_idx = min(start_idx + batch_size, len(update_data))
-            batch = update_data[start_idx:end_idx]
-            
-            try:
-                # Update articles by Wikipedia page ID (fast indexed lookup)
-                execute_batch(self.cursor, """
-                    UPDATE articles 
-                    SET has_temporal_info = %s,
-                        earliest_date = %s,
-                        latest_date = %s
-                    WHERE wikipedia_page_id = %s
-                """, batch)
-                
-                # execute_batch doesn't update rowcount properly, so count the batch size
-                processed_count += len(batch)
-                
-                if not dry_run:
-                    self.conn.commit()
-                else:
-                    self.conn.rollback()
-                
-                # Progress indicator with ETA (report every batch)
-                elapsed = (datetime.now() - start_time).total_seconds()
-                batches_processed = batch_num + 1
-                progress_pct = (batches_processed / total_batches) * 100
-                
-                if batches_processed > 0 and elapsed > 0:
-                    rate = batches_processed / elapsed
-                    remaining_batches = total_batches - batches_processed
-                    eta_seconds = remaining_batches / rate if rate > 0 else 0
-                    eta = timedelta(seconds=int(eta_seconds))
-                    
-                    logging.info(f"{COLOR_GREEN}Processed batch {batches_processed:,}/{total_batches:,} ({progress_pct:.1f}%), "
-                               f"processed {processed_count:,} articles | "
-                               f"Rate: {rate:.1f} batches/sec | ETA: {eta}{COLOR_RESET}")
-                else:
-                    logging.info(f"{COLOR_GREEN}Processed batch {batches_processed:,}/{total_batches:,} ({progress_pct:.1f}%), "
-                               f"processed {processed_count:,} articles{COLOR_RESET}")
-                
-            except psycopg2.Error as e:
-                logging.error(f"Batch update failed: {e}")
-                stats['failed'] += len(batch)
+
+        try:
+            # ------------------------------------------------------------------
+            # 1.  Create a temporary table and COPY the data in
+            # ------------------------------------------------------------------
+            self.cursor.execute("""
+                CREATE TEMP TABLE _temporal_staging (
+                    wiki_id   INTEGER  NOT NULL,
+                    earliest  DATE     NOT NULL,
+                    latest    DATE     NOT NULL
+                ) ON COMMIT DROP
+            """)
+            logging.info("Created temporary staging table")
+
+            # Build a tab-separated in-memory file for COPY FROM
+            buf = io.StringIO()
+            for wiki_id, (earliest, latest) in temporal_data.items():
+                buf.write(f"{wiki_id}\t{earliest}\t{latest}\n")
+            buf.seek(0)
+
+            self.cursor.copy_from(buf, '_temporal_staging', columns=('wiki_id', 'earliest', 'latest'))
+            copy_count = len(temporal_data)
+            logging.info(f"COPYed {copy_count:,} rows into staging table")
+            buf.close()
+
+            # Index the staging table for a fast merge join
+            self.cursor.execute("CREATE INDEX ON _temporal_staging (wiki_id)")
+            logging.info("Indexed staging table")
+
+            # ------------------------------------------------------------------
+            # 2.  Single UPDATE with LEAST / GREATEST merge
+            # ------------------------------------------------------------------
+            self.cursor.execute("""
+                UPDATE articles a
+                SET has_temporal_info = TRUE,
+                    earliest_date    = LEAST(COALESCE(a.earliest_date, s.earliest), s.earliest),
+                    latest_date      = GREATEST(COALESCE(a.latest_date, s.latest), s.latest)
+                FROM _temporal_staging s
+                WHERE a.wikipedia_page_id = s.wiki_id
+            """)
+            rows_updated = self.cursor.rowcount
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logging.info(f"{COLOR_GREEN}Bulk UPDATE matched {rows_updated:,} articles in {elapsed:.1f}s{COLOR_RESET}")
+
+            # ------------------------------------------------------------------
+            # 3.  Compute statistics (new vs updated vs unchanged)
+            # ------------------------------------------------------------------
+            # Articles that were updated fall into three categories:
+            #  - "new":       had no temporal info before
+            #  - "updated":   had temporal info but dates were widened
+            #  - "unchanged": had temporal info with identical/wider dates already
+            #
+            # We count new + changed from the staging join.  "Unchanged" articles
+            # are those in the staging table whose wiki_id matched an article with
+            # has_temporal_info = TRUE *before* the update and whose dates were
+            # already as wide or wider.  Since the UPDATE is already done, we
+            # approximate by noting:
+            #   rows_updated = new + updated + unchanged  (all matched rows)
+            # The expensive pre-query to classify them is unnecessary — the
+            # single-UPDATE approach already saved the time.  We report the total
+            # matched count.
+
+            stats['new_articles'] = rows_updated   # upper-bound (includes merges)
+            stats['updated_articles'] = 0
+            stats['unchanged_articles'] = 0
+
+            # Articles in CSV but not matched to any article row
+            not_found = copy_count - rows_updated
+            if not_found > 0:
+                logging.info(f"Articles in CSV not found in database: {not_found:,}")
+
+            if dry_run:
                 self.conn.rollback()
-                continue
-        
-        # Calculate final statistics
-        stats['new_articles'] = len(new_articles_ids)
-        stats['updated_articles'] = len(updated_articles_ids)
-        stats['unchanged_articles'] = len(unchanged_articles_ids)
-        
+            else:
+                self.conn.commit()
+
+        except psycopg2.Error as e:
+            logging.error(f"Bulk update failed: {e}")
+            self.conn.rollback()
+            stats['failed'] = len(temporal_data)
+
         return stats
     
     def get_statistics(self) -> Dict:
@@ -591,35 +542,32 @@ class TemporalAugmenter:
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description='Augment Wikipedia database with temporal information from YAGO',
+        description='Augment Wikipedia database with temporal information from YAGO or Wikidata',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Update database with temporal information
-  python augment_wikipedia_temporal.py yago-facts-normalized.csv
+  # Update database with temporal information (supports .csv and .csv.zst)
+  python augment_wikipedia_temporal.py yago-facts-normalized.csv.zst
   
   # Dry run to see what would be updated
-  python augment_wikipedia_temporal.py yago-facts-normalized.csv --dry-run
-  
-  # Use larger batch size for faster processing
-  python augment_wikipedia_temporal.py yago-facts-normalized.csv --batch-size 5000
-  
-  # Verbose logging
-  python augment_wikipedia_temporal.py yago-facts-normalized.csv --verbose
+  python augment_wikipedia_temporal.py yago-facts-normalized.csv.zst --dry-run
+
+  # Wikidata
+  python augment_wikipedia_temporal.py wikidata-temporal-normalized.csv.zst --verbose
         """
     )
     
-    parser.add_argument('input_file', help='Normalized YAGO CSV file (output from normalize_yago_output.py)')
+    parser.add_argument('input_file', help='Normalized CSV file (.csv or .csv.zst) from normalize_temporal_output.py')
     parser.add_argument('--dry-run', action='store_true',
                        help='Perform dry run without committing changes to database')
     parser.add_argument('--batch-size', type=int, default=1000,
-                       help='Number of records to update in each batch (default: 10)')
+                       help='Unused (kept for compatibility); bulk COPY+UPDATE is always used')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose logging')
     parser.add_argument('--db-host', default=None, help='PostgreSQL host (default: $PG_HOST or localhost)')
     parser.add_argument('--db-name', default=None, help='Database name (default: $PG_DATABASE or wikidb)')
     parser.add_argument('--db-user', default=None, help='Database user (default: $PG_USER or wiki)')
-    parser.add_argument('--db-password', default=None, help='Database password (default: $PG_PASSWORD or wikipass)')
+    parser.add_argument('--db-password', default=None, help='Database password (default: $PG_PASSWORD or wiki)')
     
     args = parser.parse_args()
     
@@ -700,15 +648,12 @@ Examples:
         total_attempted = update_stats['total_attempted']
         logging.info("\n=== Update Summary ===")
         logging.info(f"Temporal records in CSV: {total_attempted:,}")
-        logging.info(f"New articles added: {update_stats['new_articles']:,}")
-        logging.info(f"Existing articles with date range expanded: {update_stats['updated_articles']:,}")
-        logging.info(f"Existing articles unchanged (dates already optimal): {update_stats['unchanged_articles']:,}")
+        logging.info(f"Articles updated successfully: {update_stats['new_articles']:,}")
         if update_stats['failed'] > 0:
             logging.info(f"Failed updates: {update_stats['failed']:,}")
-        
-        # Calculate articles not found in database
-        total_processed = update_stats['new_articles'] + update_stats['updated_articles'] + update_stats['unchanged_articles']
-        not_found = total_attempted - total_processed
+
+        # Articles not found in database
+        not_found = total_attempted - update_stats['new_articles']
         if not_found > 0:
             logging.info(f"Articles not found in database: {not_found:,} ({100*not_found/total_attempted:.1f}%)")
         

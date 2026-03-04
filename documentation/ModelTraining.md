@@ -426,7 +426,7 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 | D1.1 | Download Wikipedia dump (full dump required, but can abort early or use a sample) | 2–4 hours | Alternatively, use an existing partial dump or the `enwiki-latest-abstract.xml.gz` (~1 GB) for smoke testing |
 | D1.2 | Import a small subset into PostgreSQL (~1,000 articles) | 10–15 min | Limit `extract_wikipedia.py` input or truncate the dump; verify DB schema is correct |
 | D1.3 | Run `yago_parser.py` on a truncated YAGO file (~10K lines) | 5 min | `head -10000 yago-facts.ttl > yago-sample.ttl`; verify CSV output format |
-| D1.4 | Run `normalize_yago_output.py` on the small YAGO CSV | 5 min | Verify English URL mapping and page ID lookup work against the small DB |
+| D1.4 | Run `normalize_temporal_output.py` on the small YAGO CSV | 5 min | Verify English URL mapping and page ID lookup work against the small DB |
 | D1.5 | Run `augment_wikipedia_temporal.py` on the small DB | 2 min | Verify `earliest_date`/`latest_date` columns are populated |
 | D1.6 | Run `process_and_index.py` on the small DB subset | 10–15 min | Verify OpenSearch index is created and embeddings are stored |
 | D1.7 | Start `mcp_server.py` and run a test search query | 5 min | Verify keyword + semantic search return results |
@@ -494,7 +494,7 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 | P1.1 | Download full English Wikipedia dump (`enwiki-*-pages-articles.xml.bz2`, ~25 GB) | 2–4 hours | From [dumps.wikimedia.org](https://dumps.wikimedia.org/); may already have from dev run |
 | P1.2 | Extract and import all articles into PostgreSQL using `scripts/extract_wikipedia.py` | 8–12 hours | ~7M articles; see [WikipediaMCP-Setup.md](legacy/WikipediaMCP-Setup.md) |
 | P1.3 | Download and parse full YAGO temporal data using `scripts/yago_parser.py` | 2–4 hours | See [YagoParser-Setup.md](legacy/YagoParser-Setup.md) |
-| P1.4 | Normalize full YAGO output using `scripts/normalize_yago_output.py` | 4–8 hours | English URL mapping + page ID lookup; see [YagoNormalizer-Setup.md](legacy/YagoNormalizer-Setup.md) |
+| P1.4 | Normalize full YAGO output using `scripts/normalize_temporal_output.py` | 4–8 hours | English URL mapping + page ID lookup; see [YagoNormalizer-Setup.md](legacy/YagoNormalizer-Setup.md) |
 | P1.5 | *(Optional)* Download and parse Wikidata temporal data using `scripts/wikidata_parser.py` | 12–24 hours | Broader coverage, ~900 GB extracted; see [WikidataParser-Setup.md](legacy/WikidataParser-Setup.md) |
 | P1.6 | Augment Wikipedia DB with temporal metadata using `scripts/augment_wikipedia_temporal.py` | 1–2 hours | Adds `earliest_date`/`latest_date` to ~1.75M articles |
 | P1.7 | Generate text embeddings and index in OpenSearch using `scripts/process_and_index.py` | 12–24 hours | Enables semantic search for MCP server and year topics |

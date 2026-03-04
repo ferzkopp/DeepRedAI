@@ -54,7 +54,14 @@ The solution consists of a Python script `extract_year_topics.py` that:
    - Filters out articles already in direct references (by title and article_id)
    - Deduplicates results and returns top N articles (default: 5) sorted by relevance
 
-4. **Data Storage**
+5. **Temporal Validation**
+   - After collecting direct references and related articles, cross-checks each article against the temporal augmentation data stored in PostgreSQL (via the MCP server's `POST /mcp/temporal` endpoint)
+   - For year X, any article whose `earliest_date` year is greater than X is excluded — this prevents anachronistic references (e.g., an article about COVID-19 appearing in a 2018 topic)
+   - Articles without temporal augmentation data are kept (no filtering applied)
+   - Results are cached in-memory so each article ID is only queried once across all topics
+   - The number of temporally excluded articles is reported in the processing summary
+
+6. **Data Storage**
    - Creates output directory: `${WIKI_DATA}/topics/`
    - Stores results in JSON format: `${WIKI_DATA}/topics/year_topics_YYYY.json`
    - Each file contains:
@@ -138,6 +145,12 @@ python scripts/extract_year_topics.py --year 1990
 # Extract topics for a range of years
 python scripts/extract_year_topics.py --start-year 1900 --end-year 2025
 
+# Resume an interrupted range (skip already-saved years)
+python scripts/extract_year_topics.py --start-year 1900 --end-year 2025 --resume
+
+# Dry-run: extract topics from HTML only, no MCP lookups
+python scripts/extract_year_topics.py --year 2020 --dry-run
+
 # Adjust number of related articles per topic (default: 5)
 python scripts/extract_year_topics.py --year 2020 --max-articles 10
 
@@ -152,11 +165,11 @@ python scripts/extract_year_topics.py --year 2020 --save-html
 
 #### Required Packages
 
-- `requests` - HTTP client for Wikipedia API
+- `requests` - HTTP client for Wikipedia API and MCP server calls
 - `beautifulsoup4` - HTML parsing
-- `psycopg2-binary` - PostgreSQL access (fallback)
 - `rapidfuzz` - String similarity scoring (faster alternative to fuzzywuzzy)
-- Access to local Wikipedia MCP server (running at http://localhost:3000)
+- `tqdm` - Progress bars (optional, recommended)
+- Access to local Wikipedia MCP server (default: http://localhost:7000)
 
 #### Installation Steps
 
@@ -169,8 +182,9 @@ source deepred-env.sh
 # Or set paths manually:
 # export WIKI_DATA="/mnt/data/wikipedia"
 
-# Optional: Set custom MCP server URL if not using default
-export MCP_SERVER_URL="http://localhost:7000"
+# Optional: Override MCP host/port if not using defaults
+# export MCP_HOST="localhost"
+# export MCP_PORT="7000"
 ```
 
 Switch to wiki user and download the dump:
@@ -188,7 +202,7 @@ Install packages within the Wikipedia virtual environment:
 source ${WIKI_DATA}/venv/bin/activate
 
 # Install required packages
-pip install requests beautifulsoup4 psycopg2-binary rapidfuzz
+pip install requests beautifulsoup4 rapidfuzz tqdm
 ```
 
 3. **Verify MCP server is running:**

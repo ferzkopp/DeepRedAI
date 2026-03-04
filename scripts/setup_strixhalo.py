@@ -839,6 +839,10 @@ def stage_wikipedia_schema(user: str) -> None:
                 title TEXT NOT NULL,
                 content TEXT,
                 url TEXT,
+                wikipedia_page_id INTEGER,
+                has_temporal_info BOOLEAN DEFAULT FALSE,
+                earliest_date DATE,
+                latest_date DATE,
                 created_at TIMESTAMP DEFAULT NOW()
             );
 
@@ -856,6 +860,7 @@ def stage_wikipedia_schema(user: str) -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_articles_title ON articles(title);
+            CREATE INDEX IF NOT EXISTS idx_articles_wikipedia_page_id ON articles(wikipedia_page_id);
             CREATE INDEX IF NOT EXISTS idx_sections_article_id ON sections(article_id);
             CREATE INDEX IF NOT EXISTS idx_sections_text_trgm ON sections USING gin(section_text gin_trgm_ops);
         """),

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Normalize YAGO/Wikidata Parser Output  –  v2 (optimised)
+Normalize Temporal Parser Output (YAGO / Wikidata)
 
-Performance improvements over v1:
+Performance improvements:
 - Pre-compiled curid regex (avoids re-compilation per row)
 - Batch DB prefetch via ANY(%s) (reduces round-trips ~10-20×)
 - In-memory DB and redirect caches (avoids repeated queries)
@@ -21,15 +21,15 @@ The script queries:
 
 Usage:
     # YAGO format (default): Entity,Wikipedia_URL,Earliest_Date,Latest_Date
-    python normalize_yago_output_v2.py input.csv --output normalized.csv
-    python normalize_yago_output_v2.py input.json --output normalized.json --format json
+    python normalize_temporal_output.py input.csv --output normalized.csv
+    python normalize_temporal_output.py input.json --output normalized.json --format json
     
     # Wikidata format: Entity_ID,Entity,Wikipedia_URL,Earliest_Date,Latest_Date
-    python normalize_yago_output_v2.py input.csv --output normalized.csv --mode wikidata
+    python normalize_temporal_output.py input.csv --output normalized.csv --mode wikidata
     
     # Other options
-    python normalize_yago_output_v2.py input.csv --output normalized.csv --skip-missing
-    python normalize_yago_output_v2.py input.csv --output normalized.csv --api-delay 0.5
+    python normalize_temporal_output.py input.csv --output normalized.csv --skip-missing
+    python normalize_temporal_output.py input.csv --output normalized.csv --api-delay 0.5
 """
 
 import argparse
@@ -67,7 +67,7 @@ DB_CONFIG = {
     'port': int(os.environ.get('PG_PORT', 5432)),
     'database': os.environ.get('PG_DATABASE', 'wikidb'),
     'user': os.environ.get('PG_USER', 'wiki'),
-    'password': os.environ.get('PG_PASSWORD', 'wikipass')
+    'password': os.environ.get('PG_PASSWORD', 'wiki')
 }
 
 # Wikipedia API configuration
@@ -1121,21 +1121,21 @@ class WikipediaNormalizer:
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description='Normalize YAGO parser output to English Wikipedia with page IDs (v2 – optimised)',
+        description='Normalize temporal parser output (YAGO/Wikidata) to English Wikipedia with page IDs',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Normalize CSV file
-  python normalize_yago_output_v2.py input.csv --output normalized.csv
+  python normalize_temporal_output.py input.csv --output normalized.csv
   
   # Normalize JSON file
-  python normalize_yago_output_v2.py input.json --output normalized.json --format json
+  python normalize_temporal_output.py input.json --output normalized.json --format json
   
   # Skip entries not found in database
-  python normalize_yago_output_v2.py input.csv --output normalized.csv --skip-missing
+  python normalize_temporal_output.py input.csv --output normalized.csv --skip-missing
   
   # Verbose logging
-  python normalize_yago_output_v2.py input.csv --output normalized.csv --verbose
+  python normalize_temporal_output.py input.csv --output normalized.csv --verbose
         """
     )
     
@@ -1170,7 +1170,7 @@ Examples:
     parser.add_argument('--db-host', default=None, help='PostgreSQL host (default: $PG_HOST or localhost)')
     parser.add_argument('--db-name', default=None, help='Database name (default: $PG_DATABASE or wikidb)')
     parser.add_argument('--db-user', default=None, help='Database user (default: $PG_USER or wiki)')
-    parser.add_argument('--db-password', default=None, help='Database password (default: $PG_PASSWORD or wikipass)')
+    parser.add_argument('--db-password', default=None, help='Database password (default: $PG_PASSWORD or wiki)')
     
     args = parser.parse_args()
     
