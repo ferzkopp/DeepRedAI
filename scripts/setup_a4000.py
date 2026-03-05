@@ -566,10 +566,14 @@ def stage_model_directories(user: str) -> None:
     else:
         log.info("  Embedding model already present")
 
-    # Download LLM (Qwen 2.5 7B Q4_K_M — split into two shards)
-    llm_shard1 = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
-    llm_shard2 = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf"
-    if not llm_shard1.exists() or not llm_shard2.exists():
+    # Download LLM models.
+    # The Q4_K_M quants may be split into multiple shards on HuggingFace.
+    # llama.cpp natively handles split GGUFs — point it at the first shard.
+
+    # Qwen 2.5 7B Q4_K_M (kept as a lightweight fallback)
+    llm_7b_shard1 = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+    llm_7b_shard2 = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf"
+    if not llm_7b_shard1.exists() or not llm_7b_shard2.exists():
         log.info("  Downloading LLM model (Qwen 2.5 7B Q4_K_M, 2 shards)...")
         hf_snapshot(
             "Qwen/Qwen2.5-7B-Instruct-GGUF",
@@ -577,7 +581,19 @@ def stage_model_directories(user: str) -> None:
             MODELS_DIR / "llm",
         )
     else:
-        log.info("  LLM model already present")
+        log.info("  LLM 7B model already present")
+
+    # Qwen 2.5 14B Q4_K_M (default — better classification accuracy)
+    llm_14b_shard1 = MODELS_DIR / "llm" / "qwen2.5-14b-instruct-q4_k_m-00001-of-00002.gguf"
+    if not llm_14b_shard1.exists():
+        log.info("  Downloading LLM model (Qwen 2.5 14B Q4_K_M)...")
+        hf_snapshot(
+            "Qwen/Qwen2.5-14B-Instruct-GGUF",
+            "qwen2.5-14b-instruct-q4_k_m*.gguf",
+            MODELS_DIR / "llm",
+        )
+    else:
+        log.info("  LLM 14B model already present")
 
     # Set ownership
     run(f"chown -R {user}:{user} {MODELS_DIR}")
@@ -609,13 +625,13 @@ def stage_llama_server(user: str) -> None:
             [Container]
             ContainerName=llama-server-llm
             Image={LLAMA_SERVER_IMAGE}
-            Exec=--model /models/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \\
+            Exec=--model /models/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00002.gguf \\
                 --n-gpu-layers 999 \\
                 --flash-attn \\
                 --ctx-size 8192 \\
                 --threads 8 \\
                 --parallel 2 \\
-                --alias "gpt-oss-20b"
+                --alias "qwen2.5-14b-instruct"
             AddDevice=nvidia.com/gpu=all
             Volume={MODELS_DIR}:/models:ro
             PublishPort=1234:8080

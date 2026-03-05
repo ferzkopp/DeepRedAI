@@ -24,12 +24,12 @@ The `extract_year_topics.py` script extracts historical events from Wikipedia ye
 The solution consists of a Python script `extract_year_topics.py` that:
 
 1. **Year Page Retrieval**
-   - Fetches Wikipedia year pages (e.g., "1990", "1991", ..., "2025") from the Wikipedia API
+   - Fetches Wikipedia year pages (e.g., "151", "1990", ..., "2025") from the Wikipedia API
    - Uses the Wikipedia API's `action=parse` endpoint to get clean HTML content
-   - Falls back to the local PostgreSQL database if API fails
+   - Returns an error if the API call fails (no local fallback)
 
 2. **Topic Extraction**
-   - Parses the HTML structure to identify event sections (Events, Births, Deaths, etc.)
+   - Parses the HTML structure to identify the Events section
    - Extracts date-topic pairs from list items in the Events section
    - Uses regex patterns to parse dates in various formats:
      - "January 1 – Event description"
@@ -87,9 +87,9 @@ The solution consists of a Python script `extract_year_topics.py` that:
 ```json
 {
   "year": 2020,
-  "extracted_date": "2025-12-25T12:30:00Z",
+  "extracted_date": "2026-03-04T13:17:17.540885Z",
   "source": "wikipedia_api",
-  "total_topics": 245,
+  "total_topics": 288,
   "topics": [
     {
       "year": 2020,
@@ -105,7 +105,7 @@ The solution consists of a Python script `extract_year_topics.py` that:
           "href": "/wiki/2020_Jakarta_floods",
           "source": "direct_link",
           "relevance_score": 1.0,
-          "article_id": 62847291
+          "article_id": 62718198
         },
         {
           "title": "Jakarta",
@@ -113,14 +113,29 @@ The solution consists of a Python script `extract_year_topics.py` that:
           "href": "/wiki/Jakarta",
           "source": "direct_link",
           "relevance_score": 1.0,
-          "article_id": 16254
+          "article_id": 16275
+        },
+        {
+          "title": "Indonesia",
+          "article_path": "Indonesia",
+          "href": "/wiki/Indonesia",
+          "source": "direct_link",
+          "relevance_score": 1.0,
+          "article_id": 14579
         }
       ],
       "related_articles": [
         {
+          "title": "2007 Jakarta flood",
+          "article_id": 9931233,
+          "relevance_score": 0.298,
+          "search_score": 0.03,
+          "title_similarity": 0.243
+        },
+        {
           "title": "Floods in Jakarta",
           "article_id": 38269340,
-          "relevance_score": 0.3,
+          "relevance_score": 0.26,
           "search_score": 0.03,
           "title_similarity": 0.298
         }
@@ -129,6 +144,25 @@ The solution consists of a Python script `extract_year_topics.py` that:
   ]
 }
 ```
+
+### Runtime Estimates
+
+Processing all 1,844 year pages (151–2025) took approximately **6.6 hours** in a single uninterrupted run with 8 parallel workers against a local MCP server. Modern years take significantly longer due to having more events and article references to resolve.
+
+| Year Range | Years | Avg Topics/Year | Avg Time/Year | Total Time |
+|------------|------:|----------------:|---------------:|-----------:|
+| 151–500    |   341 |              7  |          3.8s  |     21 min |
+| 501–1000   |   484 |              9  |          5.1s  |     41 min |
+| 1001–1500  |   497 |             18  |          8.4s  |     70 min |
+| 1501–1800  |   300 |             36  |         15.9s  |     79 min |
+| 1801–1900  |   100 |             66  |         27.4s  |     46 min |
+| 1901–1950  |    50 |            130  |         54.6s  |     46 min |
+| 1951–2000  |    50 |            155  |         69.1s  |     58 min |
+| 2001–2025  |    25 |            140  |         81.6s  |     34 min |
+
+Total topics extracted: ~50,500 across all years. Some years are missing from Wikipedia (31 gaps, mostly in the 300–1600 range).
+
+Use `--resume` to restart an interrupted run without re-processing completed years.
 
 ### Usage
 
@@ -153,6 +187,12 @@ python scripts/extract_year_topics.py --year 2020 --dry-run
 
 # Adjust number of related articles per topic (default: 5)
 python scripts/extract_year_topics.py --year 2020 --max-articles 10
+
+# Set number of parallel workers for MCP lookups (default: 8)
+python scripts/extract_year_topics.py --year 2020 --workers 4
+
+# Override output directory (default: $WIKI_DATA/topics/)
+python scripts/extract_year_topics.py --year 2020 --output-dir /tmp/topics
 
 # Use verbose output for debugging
 python scripts/extract_year_topics.py --year 2020 --verbose
@@ -187,19 +227,13 @@ source deepred-env.sh
 # export MCP_PORT="7000"
 ```
 
-Switch to wiki user and download the dump:
-
-```bash
-sudo -iu wiki
-```
-
 2. **Install Python dependencies:**
 
-Install packages within the Wikipedia virtual environment:
+Install packages within the DeepRedAI virtual environment:
 
 ```bash
-# Activate the Wikipedia virtual environment
-source ${WIKI_DATA}/venv/bin/activate
+# Activate the DeepRedAI virtual environment (already done by deepred-env.sh)
+source ${DEEPRED_VENV}/bin/activate
 
 # Install required packages
 pip install requests beautifulsoup4 rapidfuzz tqdm

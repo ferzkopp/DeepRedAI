@@ -582,12 +582,14 @@ def stage_model_directories(user: str) -> None:
     else:
         log.info("  Embedding model already present")
 
-    # Download LLM (if not already present).
-    # The Q4_K_M quant is split into two shards on HuggingFace.
+    # Download LLM models (if not already present).
+    # The Q4_K_M quants may be split into multiple shards on HuggingFace.
     # llama.cpp natively handles split GGUFs — point it at the first shard.
-    llm_shard1 = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
-    llm_shard2 = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf"
-    if not llm_shard1.exists() or not llm_shard2.exists():
+
+    # Qwen 2.5 7B Q4_K_M (kept as a lightweight fallback)
+    llm_7b_shard1 = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+    llm_7b_shard2 = MODELS_DIR / "llm" / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf"
+    if not llm_7b_shard1.exists() or not llm_7b_shard2.exists():
         log.info("  Downloading LLM model (Qwen 2.5 7B Q4_K_M, 2 shards)...")
         hf_snapshot(
             "Qwen/Qwen2.5-7B-Instruct-GGUF",
@@ -595,7 +597,19 @@ def stage_model_directories(user: str) -> None:
             MODELS_DIR / "llm",
         )
     else:
-        log.info("  LLM model already present")
+        log.info("  LLM 7B model already present")
+
+    # Qwen 2.5 14B Q4_K_M (default — better classification accuracy)
+    llm_14b_shard1 = MODELS_DIR / "llm" / "qwen2.5-14b-instruct-q4_k_m-00001-of-00002.gguf"
+    if not llm_14b_shard1.exists():
+        log.info("  Downloading LLM model (Qwen 2.5 14B Q4_K_M)...")
+        hf_snapshot(
+            "Qwen/Qwen2.5-14B-Instruct-GGUF",
+            "qwen2.5-14b-instruct-q4_k_m*.gguf",
+            MODELS_DIR / "llm",
+        )
+    else:
+        log.info("  LLM 14B model already present")
 
     # Set ownership after downloads so files belong to the target user
     run(f"chown -R {user}:{user} {MODELS_DIR}")
@@ -626,7 +640,7 @@ def stage_llama_server(user: str) -> None:
             [Container]
             Image={ROCM_TOOLBOX_IMAGE}
             Exec=llama-server \\
-                --model /models/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \\
+                --model /models/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00002.gguf \\
                 --host 0.0.0.0 \\
                 --port 1234 \\
                 --n-gpu-layers 999 \\
@@ -634,8 +648,8 @@ def stage_llama_server(user: str) -> None:
                 --no-mmap \\
                 --ctx-size 8192 \\
                 --threads 16 \\
-                --parallel 2 \\
-                --alias "gpt-oss-20b"
+                --parallel 4 \\
+                --alias "qwen2.5-14b-instruct"
             Environment=GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
             AddDevice=/dev/kfd
             AddDevice=/dev/dri
@@ -1158,7 +1172,7 @@ def stage_llm_swap_helper(user: str) -> None:
                 --no-mmap \\
                 --ctx-size $CTX \\
                 --threads 16 \\
-                --parallel 2 \\
+                --parallel 4 \\
                 --alias "$ALIAS"
             EOF
             fi

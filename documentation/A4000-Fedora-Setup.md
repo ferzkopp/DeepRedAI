@@ -42,11 +42,11 @@ This guide covers the setup of a secondary inference server running Fedora 43 on
 
 | Model | VRAM Usage | Notes |
 |-------|-----------|-------|
-| Qwen 2.5 7B Q4_K_M (LLM) | ~5–7 GB | Model (~4.7 GB) + KV cache (8192 ctx) |
+| Qwen 2.5 14B Q4_K_M (LLM, default) | ~10–11 GB | Model (~9 GB) + KV cache (2 slots × 8192 ctx) |
 | nomic-embed-text-v1.5 F16 (embedding) | ~0.5 GB | Lightweight embedding model; `--batch-size 32768` + `--ubatch-size 2048` for pipeline batch throughput |
-| **Total (both running)** | **~6–8 GB** | Leaves 8–10 GB headroom |
+| **Total (both running)** | **~11–12 GB** | Leaves 4–5 GB headroom |
 
-> **Larger models:** The A4000 can also run Qwen 2.5 14B Q4_K_M (~9 GB + KV cache ≈ 11 GB) alongside the embedding model. Use `llm-swap` to switch models without rebuilding.
+> **Note:** The 14B model runs with `--parallel 2` (2 concurrent request slots) to fit within 16 GB VRAM. The Qwen 2.5 7B Q4_K_M (~5–7 GB) is also downloaded as a fallback — use `llm-swap` to switch models without rebuilding.
 
 ### Why This Architecture
 
@@ -356,8 +356,11 @@ This tests reachability and confirms that remote and local embedding servers pro
 # Swap to a different model
 llm-swap $DEEPRED_MODELS/llm/some-other-model.gguf "custom-alias" 4096
 
-# Swap back to default
-llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf
+# Swap to 7B (lightweight fallback — can use --parallel 4)
+llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf "qwen2.5-7b-instruct" 8192
+
+# Swap back to default 14B (use --parallel 2 to fit in 16 GB VRAM)
+llm-swap $DEEPRED_MODELS/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00002.gguf
 ```
 
 ### Working Inside the Toolbox
