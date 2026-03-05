@@ -587,7 +587,7 @@ llm-swap $DEEPRED_MODELS/llm/deepred-1b-q4_k_m.gguf "deepred/deepred" 4096
 llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf "qwen2.5-7b-instruct" 8192
 
 # Swap back to default 14B (point to first shard — llama.cpp loads all shards automatically)
-llm-swap $DEEPRED_MODELS/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00002.gguf
+llm-swap $DEEPRED_MODELS/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf
 ```
 
 ### Using the Python Virtual Environment

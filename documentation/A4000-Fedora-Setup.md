@@ -360,7 +360,7 @@ llm-swap $DEEPRED_MODELS/llm/some-other-model.gguf "custom-alias" 4096
 llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf "qwen2.5-7b-instruct" 8192
 
 # Swap back to default 14B (use --parallel 2 to fit in 16 GB VRAM)
-llm-swap $DEEPRED_MODELS/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00002.gguf
+llm-swap $DEEPRED_MODELS/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf
 ```
 
 ### Working Inside the Toolbox

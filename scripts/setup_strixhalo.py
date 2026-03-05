@@ -600,7 +600,7 @@ def stage_model_directories(user: str) -> None:
         log.info("  LLM 7B model already present")
 
     # Qwen 2.5 14B Q4_K_M (default — better classification accuracy)
-    llm_14b_shard1 = MODELS_DIR / "llm" / "qwen2.5-14b-instruct-q4_k_m-00001-of-00002.gguf"
+    llm_14b_shard1 = MODELS_DIR / "llm" / "qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf"
     if not llm_14b_shard1.exists():
         log.info("  Downloading LLM model (Qwen 2.5 14B Q4_K_M)...")
         hf_snapshot(
@@ -640,7 +640,7 @@ def stage_llama_server(user: str) -> None:
             [Container]
             Image={ROCM_TOOLBOX_IMAGE}
             Exec=llama-server \\
-                --model /models/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00002.gguf \\
+                --model /models/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf \\
                 --host 0.0.0.0 \\
                 --port 1234 \\
                 --n-gpu-layers 999 \\
