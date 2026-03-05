@@ -285,7 +285,7 @@ def call_llm_single(host: str, port: int, title: str, content: str,
                 'elapsed': time.monotonic() - t0}
 
 
-def fetch_test_articles(n: int, category: str) -> List[Dict]:
+def fetch_test_articles(n: int, category: str, seed: Optional[int] = None) -> List[Dict]:
     """Fetch articles with known temporal dates from the database.
 
     Selects a balanced sample with equal numbers of pre-1969 and post-1969
@@ -295,11 +295,20 @@ def fetch_test_articles(n: int, category: str) -> List[Dict]:
     Uses a two-phase approach: first pick IDs using only indexed columns
     (no content scan), then fetch content for the selected rows.
 
+    If seed is provided, PostgreSQL's random is seeded for reproducible
+    sampling (setseed + TABLESAMPLE REPEATABLE).
+
     Each returned dict has: id, title, content (truncated),
     earliest_date, latest_date.
     """
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
+
+    # Seed PostgreSQL random for reproducibility
+    if seed is not None:
+        # setseed expects a value between -1.0 and 1.0
+        pg_seed = (seed % 2_000_000 - 1_000_000) / 1_000_000.0
+        cur.execute("SELECT setseed(%s)", (pg_seed,))
 
     # Build category filter (operates only on date columns — indexed)
     if category == 'people':
@@ -333,7 +342,7 @@ def fetch_test_articles(n: int, category: str) -> List[Dict]:
             WITH sample AS (
                 SELECT id, earliest_date,
                        FLOOR(EXTRACT(YEAR FROM earliest_date) / 100) AS century
-                FROM articles TABLESAMPLE BERNOULLI (5)
+                FROM articles TABLESAMPLE BERNOULLI (5){f' REPEATABLE ({seed})' if seed is not None else ''}
                 WHERE has_temporal_info = TRUE
                   AND earliest_date IS NOT NULL
                   AND latest_date IS NOT NULL
@@ -389,21 +398,30 @@ def fetch_test_articles(n: int, category: str) -> List[Dict]:
     ]
 
 
-def fetch_unannotated_articles(n: int) -> List[Dict]:
+def fetch_unannotated_articles(n: int, seed: Optional[int] = None) -> List[Dict]:
     """Fetch articles WITHOUT temporal data for LLM evaluation.
 
     Returns articles that have no YAGO/Wikidata temporal annotations,
     suitable for manual review of LLM estimates.
+
+    If seed is provided, PostgreSQL's random is seeded for reproducible
+    sampling.
 
     Each returned dict has: id, title, content (truncated), url.
     """
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    cur.execute("""
+    # Seed PostgreSQL random for reproducibility
+    if seed is not None:
+        pg_seed = (seed % 2_000_000 - 1_000_000) / 1_000_000.0
+        cur.execute("SELECT setseed(%s)", (pg_seed,))
+
+    repeatable_clause = f' REPEATABLE ({seed})' if seed is not None else ''
+    cur.execute(f"""
         WITH sample AS (
             SELECT id
-            FROM articles TABLESAMPLE BERNOULLI (5)
+            FROM articles TABLESAMPLE BERNOULLI (5){repeatable_clause}
             WHERE (has_temporal_info = FALSE OR has_temporal_info IS NULL)
               AND content IS NOT NULL
               AND LENGTH(content) > 500
@@ -450,7 +468,7 @@ def _run_evaluate_mode(args, endpoints, parallel) -> int:
 
     print(f"\n{BOLD}Fetching unannotated articles from database...{RESET}")
     try:
-        articles = fetch_unannotated_articles(args.n)
+        articles = fetch_unannotated_articles(args.n, seed=args.seed)
     except Exception as e:
         print(f"{RED}✗ Database error: {e}{RESET}")
         return 1
@@ -592,6 +610,8 @@ def main() -> int:
                         help='Override LLM port')
     parser.add_argument('--concurrency', type=int, default=DEFAULT_CONCURRENCY,
                         help=f'Concurrent requests per LLM endpoint (default: {DEFAULT_CONCURRENCY})')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for reproducible article sampling (integer)')
     args = parser.parse_args()
 
     print(f"{BOLD}{'=' * 70}{RESET}")
@@ -630,6 +650,8 @@ def main() -> int:
     print(f"  Mode         : {'evaluate (no ground truth)' if args.evaluate else 'test (with ground truth)'}")
     if not args.evaluate:
         print(f"  Category     : {args.category}")
+    if args.seed is not None:
+        print(f"  Seed         : {args.seed}")
 
     # ── Evaluate mode (no ground truth) ──────────────────────────────────
     if args.evaluate:
@@ -638,7 +660,7 @@ def main() -> int:
     # ── Fetch test articles ──────────────────────────────────────────────
     print(f"\n{BOLD}Fetching articles from database...{RESET}")
     try:
-        articles = fetch_test_articles(args.n, args.category)
+        articles = fetch_test_articles(args.n, args.category, seed=args.seed)
     except Exception as e:
         print(f"{RED}✗ Database error: {e}{RESET}")
         return 1

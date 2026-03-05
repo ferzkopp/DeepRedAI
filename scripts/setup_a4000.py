@@ -772,7 +772,7 @@ def stage_llm_swap_helper(user: str) -> None:
             #!/bin/bash
             # Usage: llm-swap <model-path> [alias] [ctx-size]
             MODEL="${{1:?Usage: llm-swap <model-path> [alias] [ctx-size]}}"
-            ALIAS="${{2:-gpt-oss-20b}}"
+            ALIAS="${{2:-qwen2.5-14b-instruct}}"
             CTX="${{3:-8192}}"
 
             if [ ! -f "$MODEL" ]; then

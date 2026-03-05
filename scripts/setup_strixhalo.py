@@ -611,6 +611,18 @@ def stage_model_directories(user: str) -> None:
     else:
         log.info("  LLM 14B model already present")
 
+    # Gemma 2 27B Q4_K_M (alternative — strong factual knowledge from Google)
+    llm_gemma27b = MODELS_DIR / "llm" / "gemma-2-27b-it-Q4_K_M.gguf"
+    if not llm_gemma27b.exists():
+        log.info("  Downloading LLM model (Gemma 2 27B Q4_K_M)...")
+        hf_snapshot(
+            "bartowski/gemma-2-27b-it-GGUF",
+            "*Q4_K_M*gguf",
+            MODELS_DIR / "llm",
+        )
+    else:
+        log.info("  LLM Gemma 2 27B model already present")
+
     # Set ownership after downloads so files belong to the target user
     run(f"chown -R {user}:{user} {MODELS_DIR}")
 
@@ -1137,12 +1149,12 @@ def stage_firewall(user: str) -> None:
 def stage_llm_swap_helper(user: str) -> None:
     write_file(
         "/usr/local/bin/llm-swap",
-        textwrap.dedent("""\
+        textwrap.dedent(f"""\
             #!/bin/bash
             # Usage: llm-swap <model-path> [alias] [ctx-size]
-            MODEL="${1:?Usage: llm-swap <model-path> [alias] [ctx-size]}"
-            ALIAS="${2:-gpt-oss-20b}"
-            CTX="${3:-8192}"
+            MODEL="${{1:?Usage: llm-swap <model-path> [alias] [ctx-size]}}"
+            ALIAS="${{2:-qwen2.5-14b-instruct}}"
+            CTX="${{3:-8192}}"
 
             if [ ! -f "$MODEL" ]; then
                 echo "Error: Model file not found: $MODEL"
@@ -1152,30 +1164,16 @@ def stage_llm_swap_helper(user: str) -> None:
             QUADLET_FILE="/etc/containers/systemd/llama-server-llm.container"
             SERVICE_NAME="llama-server-llm"
 
-            if [ -f "$QUADLET_FILE" ]; then
-                CONTAINER_MODEL="/models/${{MODEL#{MODELS_DIR}/}}"
-                sudo sed -i "s|--model [^ ]*|--model $CONTAINER_MODEL|" "$QUADLET_FILE"
-                sudo sed -i "s|--ctx-size [0-9]*|--ctx-size $CTX|" "$QUADLET_FILE"
-                sudo sed -i "s|--alias \\"[^\\"]*\\"|--alias \\"$ALIAS\\"|" "$QUADLET_FILE"
-                echo "Updated Quadlet: $QUADLET_FILE"
-            else
-                sudo mkdir -p /etc/systemd/system/${SERVICE_NAME}.service.d
-                sudo tee /etc/systemd/system/${SERVICE_NAME}.service.d/model.conf <<EOF
-            [Service]
-            ExecStart=
-            ExecStart=/opt/llama.cpp/build/bin/llama-server \\
-                --model $MODEL \\
-                --host 0.0.0.0 \\
-                --port 1234 \\
-                --n-gpu-layers 999 \\
-                --flash-attn \\
-                --no-mmap \\
-                --ctx-size $CTX \\
-                --threads 16 \\
-                --parallel 4 \\
-                --alias "$ALIAS"
-            EOF
+            if [ ! -f "$QUADLET_FILE" ]; then
+                echo "Error: Quadlet file not found: $QUADLET_FILE"
+                exit 1
             fi
+
+            CONTAINER_MODEL="/models/${{MODEL#{MODELS_DIR}/}}"
+            sudo sed -i "s|--model [^ ]*|--model $CONTAINER_MODEL|" "$QUADLET_FILE"
+            sudo sed -i "s|--ctx-size [0-9]*|--ctx-size $CTX|" "$QUADLET_FILE"
+            sudo sed -i 's|--alias "[^"]*"|--alias "'"$ALIAS"'"|' "$QUADLET_FILE"
+            echo "Updated Quadlet: $QUADLET_FILE"
 
             sudo systemctl daemon-reload
             sudo systemctl restart "$SERVICE_NAME"
