@@ -583,11 +583,13 @@ The setup script installs VSCode and the Copilot extensions, but you still need 
 # Swap to a different model
 llm-swap $DEEPRED_MODELS/llm/deepred-1b-q4_k_m.gguf "deepred/deepred" 4096
 
-# Swap to 7B (lightweight fallback)
-llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf "qwen2.5-7b-instruct" 8192
+# Swap to 7B with 8 parallel slots (lightweight — leaves plenty of headroom)
+llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \
+    "qwen2.5-7b-instruct" 8192 --slots 8
 
-# Swap back to default 14B (point to first shard — llama.cpp loads all shards automatically)
-llm-swap $DEEPRED_MODELS/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf
+# Swap back to default 14B with 4 parallel slots
+llm-swap $DEEPRED_MODELS/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf \
+    --slots 4
 ```
 
 ### Using the Python Virtual Environment

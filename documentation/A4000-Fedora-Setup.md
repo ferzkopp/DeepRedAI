@@ -356,11 +356,13 @@ This tests reachability and confirms that remote and local embedding servers pro
 # Swap to a different model
 llm-swap $DEEPRED_MODELS/llm/some-other-model.gguf "custom-alias" 4096
 
-# Swap to 7B (lightweight fallback — can use --parallel 4)
-llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf "qwen2.5-7b-instruct" 8192
+# Swap to 7B with 4 parallel slots (lightweight — fits easily in 16 GB)
+llm-swap $DEEPRED_MODELS/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \
+    "qwen2.5-7b-instruct" 8192 --slots 4
 
-# Swap back to default 14B (use --parallel 2 to fit in 16 GB VRAM)
-llm-swap $DEEPRED_MODELS/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf
+# Swap back to default 14B with 2 parallel slots (to fit in 16 GB VRAM)
+llm-swap $DEEPRED_MODELS/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf \
+    --slots 2
 ```
 
 ### Working Inside the Toolbox

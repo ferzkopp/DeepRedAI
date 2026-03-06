@@ -6,23 +6,41 @@
 # Runs the temporal classification test with 1000 articles on three models
 # using the same random seed for reproducible, comparable results.
 #
+# Output is logged to a timestamped file AND displayed on screen (via tee).
+#
 # Prerequisites:
 #   - All three models downloaded to $DEEPRED_MODELS/llm/
 #   - source deepred-env.sh
 #   - StrixHalo only (no remote) — REMOTE_HOST is cleared per-run
 #
 # Usage:
-#   bash scripts/test_llm_temporal.sh
+#   sudo bash scripts/test_llm_temporal.sh
 #
 # =============================================================================
 
 set -euo pipefail
+
+# ── Must run as root (avoids repeated sudo password prompts) ─────────────
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script must be run with sudo (to swap models without repeated password prompts)."
+    echo "Usage: sudo -E bash scripts/test_llm_temporal.sh"
+    exit 1
+fi
 
 SEED=42
 N=1000
 CONCURRENCY=4
 SCRIPT="$DEEPRED_REPO/scripts/test_llm_temporal.py"
 QUADLET="/etc/containers/systemd/llama-server-llm.container"
+
+# ── Log file ─────────────────────────────────────────────────────────────
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_DIR="$DEEPRED_REPO/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/model_comparison_${TIMESTAMP}.log"
+
+# Redirect all output to both terminal and log file (strip ANSI from log)
+exec > >(tee >(sed 's/\x1b\[[0-9;]*m//g' > "$LOG_FILE")) 2>&1
 
 # Model definitions: (display_name  model_file  alias)
 MODELS=(
@@ -36,10 +54,10 @@ swap_model() {
     local alias="$2"
 
     echo "  Updating Quadlet to: $model_file (alias: $alias)"
-    sudo sed -i "s|--model /models/llm/[^ ]*|--model /models/llm/$model_file|" "$QUADLET"
-    sudo sed -i "s|--alias \"[^\"]*\"|--alias \"$alias\"|" "$QUADLET"
-    sudo systemctl daemon-reload
-    sudo systemctl restart llama-server-llm
+    sed -i "s|--model /models/llm/[^ ]*|--model /models/llm/$model_file|" "$QUADLET"
+    sed -i "s|--alias \"[^\"]*\"|--alias \"$alias\"|" "$QUADLET"
+    systemctl daemon-reload
+    systemctl restart llama-server-llm
 
     # Wait for model to load (check /v1/models endpoint)
     echo -n "  Waiting for model to load"
@@ -62,6 +80,7 @@ echo "  Seed         : $SEED"
 echo "  Articles     : $N"
 echo "  Concurrency  : $CONCURRENCY"
 echo "  Models       : ${#MODELS[@]}"
+echo "  Log file     : $LOG_FILE"
 echo "=============================================================="
 echo ""
 
@@ -85,7 +104,8 @@ for i in "${!MODELS[@]}"; do
     echo ""
 
     # Run test (no remote — local only)
-    REMOTE_HOST= python3 "$SCRIPT" \
+    # Use the venv python explicitly since we're running as root
+    REMOTE_HOST= "$DEEPRED_VENV/bin/python3" "$SCRIPT" \
         -n "$N" \
         --seed "$SEED" \
         --concurrency "$CONCURRENCY" \

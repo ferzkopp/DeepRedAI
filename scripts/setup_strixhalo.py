@@ -1151,10 +1151,39 @@ def stage_llm_swap_helper(user: str) -> None:
         "/usr/local/bin/llm-swap",
         textwrap.dedent(f"""\
             #!/bin/bash
-            # Usage: llm-swap <model-path> [alias] [ctx-size]
-            MODEL="${{1:?Usage: llm-swap <model-path> [alias] [ctx-size]}}"
-            ALIAS="${{2:-qwen2.5-14b-instruct}}"
-            CTX="${{3:-8192}}"
+            # Usage: llm-swap <model-path> [alias] [ctx-size] [--slots N]
+            #
+            # Swap the llama-server-llm Quadlet to a different model and
+            # optionally change the number of parallel slots.
+            #
+            # Examples:
+            #   llm-swap /mnt/data/models/llm/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf "qwen2.5-7b-instruct" 8192 --slots 8
+            #   llm-swap /mnt/data/models/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf
+            set -euo pipefail
+
+            # ── Parse arguments ──────────────────────────────────────────
+            SLOTS=""
+            POSITIONAL=()
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --slots)
+                        SLOTS="${{2:?--slots requires a number}}"
+                        shift 2
+                        ;;
+                    --slots=*)
+                        SLOTS="${{1#*=}}"
+                        shift
+                        ;;
+                    *)
+                        POSITIONAL+=("$1")
+                        shift
+                        ;;
+                esac
+            done
+
+            MODEL="${{POSITIONAL[0]:?Usage: llm-swap <model-path> [alias] [ctx-size] [--slots N]}}"
+            ALIAS="${{POSITIONAL[1]:-qwen2.5-14b-instruct}}"
+            CTX="${{POSITIONAL[2]:-8192}}"
 
             if [ ! -f "$MODEL" ]; then
                 echo "Error: Model file not found: $MODEL"
@@ -1169,15 +1198,25 @@ def stage_llm_swap_helper(user: str) -> None:
                 exit 1
             fi
 
+            # ── Apply all edits atomically ────────────────────────────────
             CONTAINER_MODEL="/models/${{MODEL#{MODELS_DIR}/}}"
-            sudo sed -i "s|--model [^ ]*|--model $CONTAINER_MODEL|" "$QUADLET_FILE"
-            sudo sed -i "s|--ctx-size [0-9]*|--ctx-size $CTX|" "$QUADLET_FILE"
-            sudo sed -i 's|--alias "[^"]*"|--alias "'"$ALIAS"'"|' "$QUADLET_FILE"
-            echo "Updated Quadlet: $QUADLET_FILE"
+            sudo sed -i \\
+                -e "s|--model [^ ]*|--model $CONTAINER_MODEL|" \\
+                -e "s|--ctx-size [0-9]*|--ctx-size $CTX|" \\
+                -e 's|--alias "[^"]*"|--alias "'"$ALIAS"'"|' \\
+                "$QUADLET_FILE"
 
+            if [ -n "$SLOTS" ]; then
+                sudo sed -i "s|--parallel [0-9]*|--parallel $SLOTS|" "$QUADLET_FILE"
+            fi
+
+            echo "Updated Quadlet: $QUADLET_FILE"
+            grep -E 'model|parallel|ctx-size|alias' "$QUADLET_FILE"
+
+            # ── Single restart ────────────────────────────────────────────
             sudo systemctl daemon-reload
             sudo systemctl restart "$SERVICE_NAME"
-            echo "Swapped to: $MODEL (alias: $ALIAS, ctx: $CTX)"
+            echo "Swapped to: $MODEL (alias: $ALIAS, ctx: $CTX${{SLOTS:+, slots: $SLOTS}})"
             sudo systemctl status "$SERVICE_NAME" --no-pager -l
         """),
         mode=0o755,
