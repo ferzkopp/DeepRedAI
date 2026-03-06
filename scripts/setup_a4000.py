@@ -631,7 +631,7 @@ def stage_llama_server(user: str) -> None:
                 --ctx-size 8192 \\
                 --threads 8 \\
                 --parallel 2 \\
-                --slots-endpoint \\
+                --slots \\
                 --alias "qwen2.5-14b-instruct"
             AddDevice=nvidia.com/gpu=all
             Volume={MODELS_DIR}:/models:ro
@@ -837,19 +837,27 @@ def stage_llm_swap_helper(user: str) -> None:
                 else
                     sudo sed -i "/--ctx-size/a\\    --parallel $SLOTS \\\\\\\\" "$QUADLET_FILE"
                 fi
-                # Ensure --slots-endpoint is present (needed for /slots API)
-                if ! grep -q -- '--slots-endpoint' "$QUADLET_FILE"; then
-                    sudo sed -i "/--parallel/a\\    --slots-endpoint \\\\\\\\" "$QUADLET_FILE"
+                # Ensure --slots is present (enables /slots monitoring API)
+                if ! grep -qE -- '--slots(\\s|\\\\|$)' "$QUADLET_FILE"; then
+                    sudo sed -i "/--parallel/a\\    --slots \\\\\\\\" "$QUADLET_FILE"
                 fi
             fi
 
             echo "Updated Quadlet: $QUADLET_FILE"
             grep -E 'model|parallel|ctx-size|alias' "$QUADLET_FILE"
 
-            # ── Clean restart (stop → rm → reload → start) ───────────────
+            # ── Clean restart (reload → stop → rm → start) ───────────────
+            # Reload first so the Quadlet generator regenerates the unit
+            # from the updated .container file BEFORE we start the service.
+            sudo systemctl daemon-reload
             sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
             sudo podman rm -f "$CONTAINER_NAME" 2>/dev/null || true
-            sudo systemctl daemon-reload
+            # Verify the old container is actually gone
+            for _i in $(seq 1 5); do
+                sudo podman inspect "$CONTAINER_NAME" >/dev/null 2>&1 || break
+                sleep 1
+                sudo podman rm -f "$CONTAINER_NAME" 2>/dev/null || true
+            done
             sudo systemctl start "$SERVICE_NAME"
             echo "Swapped to: $MODEL (alias: $ALIAS, ctx: $CTX${{SLOTS:+, slots: $SLOTS}})"
             sudo systemctl status "$SERVICE_NAME" --no-pager -l

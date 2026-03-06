@@ -661,7 +661,7 @@ def stage_llama_server(user: str) -> None:
                 --ctx-size 8192 \\
                 --threads 16 \\
                 --parallel 4 \\
-                --slots-endpoint \\
+                --slots \\
                 --alias "qwen2.5-14b-instruct"
             Environment=GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
             AddDevice=/dev/kfd
@@ -1213,16 +1213,18 @@ def stage_llm_swap_helper(user: str) -> None:
                 else
                     sudo sed -i "/--ctx-size/a\\    --parallel $SLOTS \\\\\\\\" "$QUADLET_FILE"
                 fi
-                # Ensure --slots-endpoint is present (needed for /slots API)
-                if ! grep -q -- '--slots-endpoint' "$QUADLET_FILE"; then
-                    sudo sed -i "/--parallel/a\\    --slots-endpoint \\\\\\\\" "$QUADLET_FILE"
+                # Ensure --slots is present (enables /slots monitoring API)
+                if ! grep -qE -- '--slots(\\s|\\\\|$)' "$QUADLET_FILE"; then
+                    sudo sed -i "/--parallel/a\\    --slots \\\\\\\\" "$QUADLET_FILE"
                 fi
             fi
 
             echo "Updated Quadlet: $QUADLET_FILE"
             grep -E 'model|parallel|ctx-size|alias' "$QUADLET_FILE"
 
-            # ── Single restart ────────────────────────────────────────────
+            # ── Clean restart (reload → stop → restart) ──────────────────
+            # Reload first so the Quadlet generator regenerates the unit
+            # from the updated .container file BEFORE we restart the service.
             sudo systemctl daemon-reload
             sudo systemctl restart "$SERVICE_NAME"
             echo "Swapped to: $MODEL (alias: $ALIAS, ctx: $CTX${{SLOTS:+, slots: $SLOTS}})"

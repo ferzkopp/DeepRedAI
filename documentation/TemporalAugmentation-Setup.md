@@ -661,7 +661,7 @@ d = json.load(sys.stdin)
 if isinstance(d, list):
     print(f'{len(d)} slots available')
 else:
-    print(f'Error: {d}  (is --slots-endpoint enabled?)')
+    print(f'Error: {d}  (is --slots enabled?)')
 "
 ```
 
@@ -686,7 +686,7 @@ d = json.load(sys.stdin)
 if isinstance(d, list):
     print(f'{len(d)} slots available')
 else:
-    print(f'Error: {d}  (is --slots-endpoint enabled?)')
+    print(f'Error: {d}  (is --slots enabled?)')
 "
 ```
 
