@@ -661,6 +661,7 @@ def stage_llama_server(user: str) -> None:
                 --ctx-size 8192 \\
                 --threads 16 \\
                 --parallel 4 \\
+                --slots-endpoint \\
                 --alias "qwen2.5-14b-instruct"
             Environment=GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
             AddDevice=/dev/kfd
@@ -1211,6 +1212,10 @@ def stage_llm_swap_helper(user: str) -> None:
                     sudo sed -i "s|--parallel [0-9][0-9]*|--parallel $SLOTS|" "$QUADLET_FILE"
                 else
                     sudo sed -i "/--ctx-size/a\\    --parallel $SLOTS \\\\\\\\" "$QUADLET_FILE"
+                fi
+                # Ensure --slots-endpoint is present (needed for /slots API)
+                if ! grep -q -- '--slots-endpoint' "$QUADLET_FILE"; then
+                    sudo sed -i "/--parallel/a\\    --slots-endpoint \\\\\\\\" "$QUADLET_FILE"
                 fi
             fi
 

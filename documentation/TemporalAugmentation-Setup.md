@@ -655,7 +655,14 @@ sudo llm-swap \
 # Verify
 sleep 5
 curl -s localhost:1234/v1/models | python3 -m json.tool
-curl -s localhost:1234/slots | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d)} slots available')"
+curl -s localhost:1234/slots | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if isinstance(d, list):
+    print(f'{len(d)} slots available')
+else:
+    print(f'Error: {d}  (is --slots-endpoint enabled?)')
+"
 ```
 
 Expected: **8 slots available**
@@ -663,8 +670,6 @@ Expected: **8 slots available**
 #### A4000 (Remote — CUDA, 16 GB VRAM)
 
 ```bash
-# SSH into the A4000 machine
-ssh $REMOTE_HOST
 source deepred-env.sh
 
 # Swap to Qwen 2.5 7B with 4 parallel slots
@@ -675,7 +680,14 @@ sudo llm-swap \
 # Verify
 sleep 10
 curl -s localhost:1234/v1/models | python3 -m json.tool
-curl -s localhost:1234/slots | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d)} slots available')"
+curl -s localhost:1234/slots | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if isinstance(d, list):
+    print(f'{len(d)} slots available')
+else:
+    print(f'Error: {d}  (is --slots-endpoint enabled?)')
+"
 ```
 
 Expected: **4 slots available**

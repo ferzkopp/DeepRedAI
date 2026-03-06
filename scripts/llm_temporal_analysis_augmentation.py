@@ -474,7 +474,12 @@ def check_llm_server(host: str, port: int) -> Optional[str]:
 
 
 def get_server_slots(host: str, port: int) -> Optional[int]:
-    """Query the llama.cpp /slots endpoint to discover available parallel slots."""
+    """Query the llama.cpp /slots endpoint to discover available parallel slots.
+
+    Requires --slots-endpoint to be enabled on the server (disabled by default
+    in llama.cpp builds >= b4000).  Returns None if the endpoint is disabled
+    or unreachable.
+    """
     url = f"http://{host}:{port}/slots"
     try:
         resp = requests.get(url, timeout=CONNECT_TIMEOUT)
@@ -482,6 +487,9 @@ def get_server_slots(host: str, port: int) -> Optional[int]:
         data = resp.json()
         if isinstance(data, list):
             return len(data)
+        # Server returned a JSON object (error) — endpoint is disabled
+        log.warning("  /slots endpoint disabled on %s:%d — add --slots-endpoint "
+                    "to the server config for auto-detection", host, port)
     except Exception:
         pass
     return None
