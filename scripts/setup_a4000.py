@@ -831,7 +831,11 @@ def stage_llm_swap_helper(user: str) -> None:
                 "$QUADLET_FILE"
 
             if [ -n "$SLOTS" ]; then
-                sudo sed -i "s|--parallel [0-9]*|--parallel $SLOTS|" "$QUADLET_FILE"
+                if grep -q -- '--parallel' "$QUADLET_FILE"; then
+                    sudo sed -i "s|--parallel [0-9][0-9]*|--parallel $SLOTS|" "$QUADLET_FILE"
+                else
+                    sudo sed -i "/--ctx-size/a\\    --parallel $SLOTS \\\\\\\\" "$QUADLET_FILE"
+                fi
             fi
 
             echo "Updated Quadlet: $QUADLET_FILE"
