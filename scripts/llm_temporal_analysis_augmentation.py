@@ -972,6 +972,10 @@ Examples:
         if not endpoints:
             log.error("No LLM server reachable. Ensure a server is running on "
                       "INFERENCE_HOST:INFERENCE_PORT")
+            log.error("  The LLM server runs as a Podman Quadlet service (llama-server-llm)")
+            log.error("  Check status:  systemctl --user status llama-server-llm")
+            log.error("  Start it:      systemctl --user start llama-server-llm")
+            log.error("  Container:     llama-rocm-7.2 image (setup_strixhalo.py stage llama_server)")
             if REMOTE_HOST:
                 log.error("  or on REMOTE_HOST (%s:%d)", REMOTE_HOST, REMOTE_LLM_PORT)
             return 1

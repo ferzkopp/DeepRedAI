@@ -508,8 +508,9 @@ The script runs through these stages in order:
 | 16 | `llm_swap_helper` | No | Install `/usr/local/bin/llm-swap` helper script |
 | 17 | `training_tokenizers` | No | Download tokenizer files for CPT (TinyLlama-1.1B + SmolLM2-360M) |
 | 18 | `training_models` | No | Download base model checkpoints for CPT (~3 GB total) |
-| 19 | `verify` | **Yes** | Run health checks on all components (reboot to confirm boot persistence) |
-| 20 | `reverify` | No | Post-reboot health check — verify services survive a restart |
+| 19 | `training_toolbox` | No | Pull and create the gfx1151 fine-tuning container |
+| 20 | `verify` | **Yes** | Run health checks on all components (reboot to confirm boot persistence) |
+| 21 | `reverify` | No | Post-reboot health check — verify services survive a restart |
 
 ### Script Usage
 
@@ -632,14 +633,75 @@ deactivate
 
 ### Working Inside the Toolbox
 
+The system uses **two containers** for different purposes:
+
+| Container | Image | Purpose | Internal Python |
+|-----------|-------|---------|----------------|
+| `llama-rocm-7.2` | `kyuz0/amd-strix-halo-toolboxes:rocm-7.2` | llama.cpp inference, interactive AI work | 3.14 |
+| `strix-halo-finetuning` | `kyuz0/amd-strix-halo-llm-finetuning:latest` | GPU training (gfx1151-compiled PyTorch) | 3.13 |
+
+The inference container also powers the Quadlet services (`llama-server-llm` on port 1234 and `llama-server-embed` on port 1235).
+
+#### Verify container status
+
 ```bash
-# Start and enter the ROCm container for interactive AI work
+# Check both containers exist
+podman container exists llama-rocm-7.2 && echo "inference: OK" || echo "inference: MISSING"
+podman container exists strix-halo-finetuning && echo "training: OK" || echo "training: MISSING"
+
+# Check if containers are running
+podman ps --format '{{.Names}} {{.Status}}' --filter name=llama-rocm --filter name=strix-halo
+
+# Check Quadlet services (inference)
+systemctl --user status llama-server-llm llama-server-embed
+```
+
+#### Enter the inference container
+
+```bash
 podman start llama-rocm-7.2
 podman exec -it llama-rocm-7.2 bash
-
-# Activate DeepRedAI environment inside the container
-source $DEEPRED_REPO/deepred-env.sh
+# Inside container:
+source /mnt/data/DeepRedAI/deepred-env.sh
 ```
+
+#### Enter the fine-tuning container (for GPU training)
+
+```bash
+podman start strix-halo-finetuning
+podman exec -it strix-halo-finetuning bash
+# Inside container (bash-5.3$ prompt):
+source /opt/venv/bin/activate
+cd /mnt/data/DeepRedAI
+python3 scripts/train_deepred_model.py --profile dev
+```
+
+Or run a single command without entering an interactive shell:
+
+```bash
+# GPU smoke test
+podman exec strix-halo-finetuning /opt/venv/bin/python3 -c \
+  "import torch; x = torch.tensor([1.0]).cuda(); print('GPU OK:', x)"
+
+# Run training directly
+podman exec strix-halo-finetuning bash -c \
+  'source /opt/venv/bin/activate && cd /mnt/data/DeepRedAI && python3 scripts/train_deepred_model.py --profile dev'
+```
+
+> **Why two containers?** Standard PyTorch ROCm wheels (used by the inference container) do not include compiled GPU code for Strix Halo's `gfx1151` architecture. GPU detection works but `.cuda()` segfaults. The fine-tuning container uses PyTorch built from AMD's gfx1151 nightly index (`https://rocm.nightlies.amd.com/v2-staging/gfx1151/`) with native gfx1151 kernels, plus gfx1151-compiled bitsandbytes, flash-attention, and RCCL.
+
+#### Which scripts need which container?
+
+| Script | Runs On | Container Needed |
+|--------|---------|------------------|
+| `process_and_index.py` | Host venv | None (calls embed server via HTTP :1235) |
+| `mcp_server.py` | Host venv (systemd) | None (calls embed server via HTTP :1235) |
+| `llm_temporal_analysis_augmentation.py` | Host venv | None (calls LLM server via HTTP :1234) |
+| `train_deepred_model.py` | `strix-halo-finetuning` | **Yes — must run inside** |
+| `create_training_corpus.py` | Host venv | None (CPU only, tokenization) |
+| `extract_wikipedia.py` | Host venv | None (file I/O only) |
+| `retrieve_gutenberg.py` | Host venv | None (HTTP downloads) |
+| `retrieve_chess_content.py` | Host venv | None (HTTP + python-chess) |
 
 ### Quick Health Check
 
@@ -666,8 +728,7 @@ All `/v1/chat/completions`, `/v1/embeddings`, `/v1/models` calls work identicall
 
 ### Strix Halo Toolboxes & Configuration
 * [AMD Strix Halo Toolboxes](https://github.com/kyuz0/amd-strix-halo-toolboxes) — Pre-built containers with ROCm + llama.cpp for gfx1151
-* [Strix Halo Toolboxes on DockerHub](https://hub.docker.com/r/kyuz0/amd-strix-halo-toolboxes/tags) — Available image tags
-* [Strix Halo Benchmarks (Interactive)](https://kyuz0.github.io/amd-strix-halo-toolboxes/) — Performance data across ROCm versions
+* [Strix Halo Toolboxes on DockerHub](https://hub.docker.com/r/kyuz0/amd-strix-halo-toolboxes/tags) — Available image tags* [AMD Strix Halo LLM Fine-tuning Container](https://hub.docker.com/r/kyuz0/amd-strix-halo-llm-finetuning) — gfx1151-compiled PyTorch for training* [Strix Halo Benchmarks (Interactive)](https://kyuz0.github.io/amd-strix-halo-toolboxes/) — Performance data across ROCm versions
 * [Strix Halo VRAM Estimator](https://github.com/kyuz0/amd-strix-halo-toolboxes/blob/main/docs/vram-estimator.md)
 
 ### Known Issues & Workarounds

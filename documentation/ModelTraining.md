@@ -551,11 +551,10 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 
 | Step | Task | Duration (est.) | Notes |
 |------|------|-----------------|-------|
-| P3.1 | Download SmolLM2-360M base model from HuggingFace | 10 min | `HuggingFaceTB/SmolLM2-360M`; ~720 MB in BF16 |
-| P3.2 | Run CPT on SmolLM2-360M with full pre-1969 corpus (5–10 epochs, ~15–30B tokens) | 7–12 days | LitGPT or torchtune; full-weight BF16, gradient checkpointing |
-| P3.3 | Evaluate: loss curves, perplexity, sample generations, temporal compliance | 1 day | Key checkpoint — verify CPT actually suppresses post-1969 knowledge |
-| P3.4 | Quick SFT test + GGUF export of the 360M model | 1 day | Verify end-to-end: does a CPT'd + SFT'd small model behave as expected? |
-| P3.5 | Decide: proceed to 1.1B CPT, or adjust data/hyperparameters | — | If 360M shows good temporal separation, commit to the full TinyLlama run |
+| P3.1 | Run CPT on SmolLM2-360M with pre-1969 corpus using `scripts/train_deepred_model.py` | 7–12 days | Full-weight BF16, gradient checkpointing; dev mode defaults to 5% data subset for fast validation; see [DeepRedModel-Setup.md](DeepRedModel-Setup.md) |
+| P3.2 | Evaluate: loss curves, perplexity, sample generations, temporal compliance | 1 day | Key checkpoint — verify CPT actually suppresses post-1969 knowledge |
+| P3.3 | Quick SFT test + GGUF export of the 360M model | 1 day | Verify end-to-end: does a CPT'd + SFT'd small model behave as expected? |
+| P3.4 | Decide: proceed to 1.1B CPT, or adjust data/hyperparameters | — | If 360M shows good temporal separation, commit to the full TinyLlama run |
 | | **Prod Phase 3 total** | **~2 weeks** | |
 
 #### Prod Phase 4: Production CPT (TinyLlama-1.1B)

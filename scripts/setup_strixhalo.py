@@ -68,6 +68,9 @@ VENV_DIR = pathlib.Path(os.environ.get("DEEPRED_VENV", str(DATA_DIR / "venv")))
 ROCM_TOOLBOX_IMAGE = "docker.io/kyuz0/amd-strix-halo-toolboxes:rocm-7.2"
 ROCM_TOOLBOX_NAME = "llama-rocm-7.2"
 
+TRAINING_TOOLBOX_IMAGE = "docker.io/kyuz0/amd-strix-halo-llm-finetuning:latest"
+TRAINING_TOOLBOX_NAME = "strix-halo-finetuning"
+
 OPENSEARCH_VERSION = "2.19.1"
 OPENSEARCH_URL = (
     f"https://artifacts.opensearch.org/releases/bundle/opensearch/"
@@ -773,7 +776,11 @@ def stage_llama_server(user: str) -> None:
 
 @stage("python_venv", "Create Python venv with PyTorch ROCm and project dependencies")
 def stage_python_venv(user: str) -> None:
-    # Ensure build deps are available (venv is built into python3 on Fedora)
+    # Host-side venv for pipeline scripts (Wikipedia, MCP, corpus creation).
+    # GPU training does NOT use this venv — it uses the fine-tuning container's
+    # internal /opt/venv which has gfx1151-compiled PyTorch.  The PyTorch
+    # installed here (rocm7.0) supports CPU operations for embedding and other
+    # pipeline tasks but will segfault on .cuda() for gfx1151.
     run("dnf install -y python3-devel python3-pip python3-setuptools")
 
     # Create venv if it doesn't exist
@@ -791,7 +798,7 @@ def stage_python_venv(user: str) -> None:
     # Install PyTorch with ROCm
     log.info("  Installing PyTorch ROCm...")
     run(f'su - {user} -c "{pip} install torch torchvision torchaudio '
-        f'--index-url https://download.pytorch.org/whl/rocm6.3"')
+        f'--index-url https://download.pytorch.org/whl/rocm7.0"')
 
     # Training dependencies
     log.info("  Installing training dependencies...")
@@ -1360,6 +1367,94 @@ def stage_training_models(user: str) -> None:
     run(f"chown -R {user}:{user} {TRAINING_MODELS_DIR}")
 
 
+@stage("training_toolbox", "Pull and create the gfx1151 fine-tuning container")
+def stage_training_toolbox(user: str) -> None:
+    """Create a dedicated fine-tuning container with gfx1151-compiled PyTorch.
+
+    This container (kyuz0/amd-strix-halo-llm-finetuning) ships with:
+      - Python 3.13 + ROCm TheRock nightly for gfx1151
+      - PyTorch compiled from AMD's gfx1151 nightly index
+      - bitsandbytes, flash-attention, RCCL for gfx1151
+      - Internal venv at /opt/venv
+
+    It coexists with the llama-rocm-7.2 container (used for llama.cpp
+    inference).  Training scripts run inside this container instead.
+    """
+    # Check if container already exists
+    exists = run_quiet(
+        f'su - {user} -c "podman container exists {TRAINING_TOOLBOX_NAME}"',
+        check=False,
+    )
+    if exists.returncode == 0:
+        log.info("  Container '%s' already exists", TRAINING_TOOLBOX_NAME)
+        return
+
+    # Ensure rootless podman requirements (subuid/subgid) — may already be
+    # configured by the earlier toolbox_setup stage.
+    for db in ["/etc/subuid", "/etc/subgid"]:
+        content = pathlib.Path(db).read_text() if pathlib.Path(db).exists() else ""
+        if user not in content:
+            log.info("  Adding %s to %s for rootless podman", user, db)
+            run(f'usermod --add-subuids 100000-165535 --add-subgids 100000-165535 {user}')
+            break
+
+    # Pull the image (large — includes full ROCm + PyTorch + libs)
+    log.info("  Pulling %s as %s (this is ~15 GB, may take a while)...",
+             TRAINING_TOOLBOX_IMAGE, user)
+    run(f'su - {user} -c "podman pull {TRAINING_TOOLBOX_IMAGE}"')
+
+    # Ensure XDG_RUNTIME_DIR exists for rootless podman
+    uid = run_quiet(f"id -u {user}").stdout.strip()
+    runtime_dir = f"/run/user/{uid}"
+    pathlib.Path(runtime_dir).mkdir(parents=True, exist_ok=True)
+    run(f"chown {user}:{user} {runtime_dir}")
+    run(f"chmod 0700 {runtime_dir}")
+
+    log.info("  Creating container '%s' via podman...", TRAINING_TOOLBOX_NAME)
+    result = run(
+        f'su - {user} -c "'
+        f"podman create"
+        f" --name {TRAINING_TOOLBOX_NAME}"
+        f" --hostname finetuning"
+        f" --privileged"
+        f" --security-opt label=disable"
+        f" --device /dev/dri"
+        f" --device /dev/kfd"
+        f" --group-add video"
+        f" --group-add render"
+        f" --userns=keep-id"
+        f" --pid=host"
+        f" --network=host"
+        f" --volume /mnt/data:/mnt/data:rslave"
+        f" --volume {runtime_dir}:{runtime_dir}:rslave"
+        f" {TRAINING_TOOLBOX_IMAGE}"
+        f" sleep infinity"
+        f'"',
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        log.error("  podman create stdout:\n%s", result.stdout.strip() if result.stdout else "(empty)")
+        log.error("  podman create stderr:\n%s", result.stderr.strip() if result.stderr else "(empty)")
+        raise RuntimeError(
+            f"podman create failed (exit {result.returncode}). "
+            f"See output above for details."
+        )
+    log.info("  Fine-tuning container '%s' created successfully", TRAINING_TOOLBOX_NAME)
+    log.info("")
+    log.info("  Interactive usage:")
+    log.info("    podman start %s", TRAINING_TOOLBOX_NAME)
+    log.info("    podman exec -it %s bash", TRAINING_TOOLBOX_NAME)
+    log.info("    # Inside container (bash-5.3$ prompt):")
+    log.info("    source /opt/venv/bin/activate")
+    log.info("    cd /mnt/data/DeepRedAI")
+    log.info("    python3 scripts/train_deepred_model.py --profile dev")
+    log.info("")
+    log.info("  One-liner (no interactive shell):")
+    log.info("    podman exec %s /opt/venv/bin/python3 -c \"import torch; x = torch.tensor([1.0]).cuda(); print('GPU OK:', x)\"",
+             TRAINING_TOOLBOX_NAME)
+
+
 @stage("verify", "Run health checks on all components", requires_reboot=True)
 def stage_verify(user: str) -> None:
     # ── Pass/fail checks ──
@@ -1387,6 +1482,7 @@ def stage_verify(user: str) -> None:
         # Use -s /bin/sh to avoid login-shell sourcing ~/.bashrc (which prints
         # deepred-env.sh banner text that contaminates the check output).
         ("Toolbox container", f'su - {user} -s /bin/sh -c "podman container exists {ROCM_TOOLBOX_NAME}" && echo "{ROCM_TOOLBOX_NAME}" || echo MISSING'),
+        ("Fine-tuning container", f'su - {user} -s /bin/sh -c "podman container exists {TRAINING_TOOLBOX_NAME}" && echo "{TRAINING_TOOLBOX_NAME}" || echo MISSING'),
         ("PostgreSQL", "pg_isready"),
         ("OpenSearch", "curl -sf http://localhost:9200 -o /dev/null && echo OK || echo DOWN"),
         ("LLM server", "curl -sf http://localhost:1234/v1/models -o /dev/null && echo OK || echo DOWN"),
@@ -1755,8 +1851,9 @@ def main() -> None:
     log.info("╚══════════════════════════════════════════════════════════════╝")
     log.info("")
     log.info("Next steps:")
-    log.info("  1. Enter the toolbox:  podman start %s && podman exec -it %s bash", ROCM_TOOLBOX_NAME, ROCM_TOOLBOX_NAME)
-    log.info("  2. See documentation:  %s/documentation/", REPO_DIR)
+    log.info("  1. Enter the inference toolbox:  podman start %s && podman exec -it %s bash", ROCM_TOOLBOX_NAME, ROCM_TOOLBOX_NAME)
+    log.info("  2. Enter the training toolbox:   podman start %s && podman exec -it %s bash", TRAINING_TOOLBOX_NAME, TRAINING_TOOLBOX_NAME)
+    log.info("  3. See documentation:  %s/documentation/", REPO_DIR)
 
 
 if __name__ == "__main__":

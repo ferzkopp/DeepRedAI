@@ -56,6 +56,10 @@ MAX_LIMIT = 100
 # The embedding server runs on a dedicated port (1235), separate from the
 # LLM chat server (1234).  The model alias must match the --alias flag
 # in the llama-server-embed Quadlet (see setup_strixhalo.py).
+#
+# The embedding server is a Podman Quadlet service using the llama-rocm-7.2
+# container image.  Check status: systemctl --user status llama-server-embed
+# Start it:  systemctl --user start llama-server-embed
 EMBEDDING_PROVIDER = os.environ.get('EMBEDDING_PROVIDER', 'llamacpp')
 EMBEDDING_HOST = os.environ.get('EMBEDDING_HOST', os.environ.get('INFERENCE_HOST', 'localhost'))
 EMBEDDING_PORT = int(os.environ.get('EMBEDDING_PORT', os.environ.get('INFERENCE_PORT', 1235)))

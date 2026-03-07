@@ -844,7 +844,10 @@ class LlamaCppEmbedding(EmbeddingProvider):
             return True, f"llama.cpp verified at {url} (model: {EMBED_MODEL}, dim: {len(embedding)})"
             
         except requests.exceptions.ConnectionError:
-            return False, f"Cannot connect to llama.cpp at {url}. Is the server running?"
+            return False, (f"Cannot connect to llama.cpp at {url}. Is the server running?\n"
+                           f"  Check: systemctl --user status llama-server-embed\n"
+                           f"  Start: systemctl --user start llama-server-embed\n"
+                           f"  Container image: llama-rocm-7.2 (setup_strixhalo.py stage llama_server)")
         except requests.exceptions.Timeout:
             return False, f"Connection to llama.cpp at {url} timed out. Server may be overloaded."
         except Exception as e:
