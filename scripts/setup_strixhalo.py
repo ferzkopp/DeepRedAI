@@ -292,7 +292,44 @@ def stage_system_packages(user: str) -> None:
     run("dnf install -y @development-tools cmake gcc-c++ git curl wget "
         "python3-devel python3-pip python3-setuptools python3-wheel "
         "lld clang clang-devel compiler-rt libcurl-devel "
-        "radeontop unzip bzip2 lbzip2")
+        "openssh-server "
+        "radeontop unzip bzip2 lbzip2 p7zip-plugins")
+
+    # Enable sshd (provides both SSH and SFTP access)
+    # Use 'internal-sftp' instead of the external sftp-server binary.
+    # On Fedora, SELinux blocks /usr/libexec/openssh/sftp-server by default,
+    # causing FileZilla "unable to initialise SFTP" errors.  internal-sftp runs
+    # inside the sshd process and is unaffected by SELinux file labels.
+    sshd_cfg = "/etc/ssh/sshd_config"
+    sshd_cfg_d = "/etc/ssh/sshd_config.d"
+
+    # First, neutralise any drop-in files that set a conflicting Subsystem sftp
+    result = run_quiet(
+        f"grep -rl '^Subsystem.*sftp' {sshd_cfg_d}/ 2>/dev/null", check=False)
+    if result.returncode == 0 and result.stdout.strip():
+        for dropin in result.stdout.strip().splitlines():
+            dropin = dropin.strip()
+            log.info("  Fixing SFTP subsystem in drop-in %s", dropin)
+            run(f"sed -i 's|^Subsystem.*sftp.*|Subsystem sftp internal-sftp|' {dropin}")
+
+    # Now handle the main sshd_config
+    result = run_quiet(f"grep -q '^Subsystem.*sftp' {sshd_cfg}", check=False)
+    if result.returncode != 0:
+        # Try uncommenting any existing commented-out line, replacing with internal-sftp
+        run(f"sed -i 's|^#Subsystem.*sftp.*|Subsystem sftp internal-sftp|' {sshd_cfg}",
+            check=False)
+        # If it still isn't there (no commented line existed), append it
+        result = run_quiet(f"grep -q '^Subsystem.*sftp' {sshd_cfg}", check=False)
+        if result.returncode != 0:
+            run(f'echo "Subsystem sftp internal-sftp" >> {sshd_cfg}')
+        log.info("  Enabled SFTP subsystem (internal-sftp) in sshd_config")
+    else:
+        # Line exists but may reference the external binary — force internal-sftp
+        run(f"sed -i 's|^Subsystem.*sftp.*|Subsystem sftp internal-sftp|' {sshd_cfg}")
+        log.info("  Switched SFTP subsystem to internal-sftp in sshd_config")
+
+    run("systemctl enable --now sshd")
+    run("systemctl restart sshd")
 
 
 @stage("disable_sleep", "Disable sleep/suspend for always-on server operation")
@@ -765,7 +802,7 @@ def stage_python_venv(user: str) -> None:
     log.info("  Installing pipeline dependencies...")
     run(f'su - {user} -c "{pip} install fastapi uvicorn psycopg2-binary opensearch-py '
         f'mediawiki-dump mwparserfromhell sentence-transformers pydantic requests tqdm '
-        f'beautifulsoup4 openai numpy rapidfuzz"')
+        f'beautifulsoup4 openai numpy rapidfuzz python-chess"')
 
     # Add ROCm env vars to venv activate script
     activate = VENV_DIR / "bin" / "activate"

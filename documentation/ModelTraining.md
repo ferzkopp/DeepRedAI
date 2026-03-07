@@ -12,6 +12,8 @@ This document explores training a new model **from scratch** using:
 
 ## Hardware Summary
 
+### Primary: Strix Halo (Training + Pipeline)
+
 | Component | Specification |
 |-----------|---------------|
 | **CPU/APU** | AMD Ryzen AI MAX+ 395 "Strix Halo" |
@@ -19,9 +21,25 @@ This document explores training a new model **from scratch** using:
 | **Memory** | 128 GB LPDDR5x-8000 (unified/shared CPU+GPU) |
 | **Memory Bandwidth** | ~215 GB/s |
 | **Estimated FP16 Compute** | ~25–30 TFLOPS peak |
-| **GPU Framework** | ROCm 7.1.1 |
+| **GPU Framework** | ROCm 7.2 (via [Strix Halo Toolboxes](https://strix-halo-toolboxes.com/) container) |
+| **OS** | Fedora 43, kernel 6.18.4+ |
 
 The key advantage of this system is the **128 GB of unified memory** — far more than any consumer discrete GPU (RTX 4090: 24 GB). This makes it possible to train surprisingly large models from scratch, since training memory requirements greatly exceed inference requirements.
+
+> **Note:** ROCm 7.1.1 is **incompatible** with kernels ≥ 6.18.4 and has been deprecated. Always use ROCm 7.2+ with modern kernels. See [StrixHalo-Fedora-Setup.md](StrixHalo-Fedora-Setup.md) for full setup details.
+
+### Optional: NVIDIA A4000 (Inference Offload)
+
+| Component | Specification |
+|-----------|---------------|
+| **GPU** | NVIDIA A4000 (16 GB GDDR6, Ampere / SM 8.6) |
+| **Host** | VM with PCI passthrough, 24 GB RAM, Fedora 43 |
+| **CUDA** | Container-based (llama.cpp `server-cuda` images) |
+| **Services** | LLM server (port 1234) + Embedding server (port 1235) |
+| **Default LLM** | Qwen 2.5 14B Q4_K_M (~10–11 GB VRAM) |
+| **Default Embedding** | nomic-embed-text-v1.5 F16 (~0.5 GB VRAM) |
+
+The A4000 provides a **secondary OpenAI-compatible inference server** that offloads LLM and embedding workloads from the Strix Halo. This is particularly useful during training — the iGPU can focus on CPT while the A4000 handles dataset generation (SFT data via `generate_theme_dataset.py`), embedding computation (`process_and_index.py`), and interactive testing. Set `REMOTE_HOST` in the environment to route inference requests to the A4000 automatically. See [A4000-Fedora-Setup.md](A4000-Fedora-Setup.md) for setup details.
 
 ---
 
@@ -121,18 +139,22 @@ Two base models are selected — a small one for verifying the approach quickly,
 
 ## Training Corpus
 
-### CPT Data (Pre-Training)
+### Continued Pre-Training Data
 
-| Source | Articles/Works | Estimated Tokens | Temporal Compliance |
-|--------|---------------|------------------|---------------------|
-| Pre-1969 Wikipedia articles | ~1.2M articles | ~2–4B tokens | Filtered via YAGO/Wikidata temporal metadata |
-| Project Gutenberg books | ~500 books (pre-1969, thematically aligned) | ~200–500M tokens | Pre-1969 by definition (public domain) |
-| Chess content (games + books) | ~50K–200K games + ~15 books | ~25–95M tokens | Filtered to pre-July 1969 |
-| **Total** | — | **~2.5–4.5B tokens** | Fully pre-1969 |
+| Source | Articles/Works | Raw Text | Estimated Tokens | Temporal Compliance |
+|--------|---------------|----------|------------------|---------------------|
+| Pre-1969 Wikipedia articles | ≥1.55M articles | 5.7 GB | ≥1.4B tokens | Filtered via YAGO/Wikidata + LLM temporal classification |
+| Project Gutenberg books | 766 books (pre-1969, thematically aligned) | 498 MB | ~125M tokens | Pre-1969 by definition (public domain) |
+| Chess content (games + books) | ~356K games + 10 books | 213 MB | ~53M tokens | Filtered to pre-July 1969 |
+| **Total** | — | **~6.4 GB** | **≥1.6B tokens** | Fully pre-1969 |
 
-> **Chess content**: Deep Red's origin as a chess-playing AI requires genuine chess knowledge — rules, notation, strategy, opening theory, famous games, and player history through 1969. Sources include Gutenberg chess books (Capablanca, Lasker, Staunton), PGN historical game databases converted to natural language prose, and Internet Archive public domain texts. See [ChessContent.md](ChessContent.md) for full source list, conversion approaches, and size estimates.
+*Token estimates use ~4 characters per token (typical for Llama-family BPE tokenizers on English text).*
 
-### SFT Data (Chat / Theme Alignment)
+> **Wikipedia classification:** Of 7.0M total articles in the database, temporal classification is available for about ~40% of the content — 1.55M classified as pre-1969 ("old"), 785K as post-1969 ("new"), 466K as uncertain, and 4.2M still unclassified. The article count and token figures above are **lower bounds** that will increase if LLM-based temporal augmentation (`scripts/llm_temporal_analysis_augmentation.py`) is used against the remaining articles. Projected final corpus: ~2–3M qualifying articles, ~2.5–4B tokens.
+
+> **Chess content**: Deep Red's origin as a chess-playing AI requires genuine chess knowledge — rules, notation, strategy, opening theory, famous games, and player history through 1969. Sources include Internet Archive chess books (10 texts, 3.7M chars) and PGN historical game databases converted to natural language prose (~356K pre-1969 games from 683 PGN files, 209M chars). See [Chess-Setup.md](Chess-Setup.md) for full source list, conversion approaches, and retrieval details.
+
+### Supervised Fine-Tuning  Data (Chat / Theme Alignment)
 
 After CPT, the model needs supervised fine-tuning data to become a conversational agent with the Deep Red persona. This is a **separate, much smaller** dataset in ChatML format — structured as multi-turn conversations with system prompts, user questions, and persona-aligned responses.
 
@@ -303,8 +325,10 @@ TinyLlama-1.1B uses the **Llama 2 architecture** — RoPE, SwiGLU, RMSNorm, GQA 
 
 ### ROCm-Specific Settings
 
+These are automatically set by the venv activate script (added by `setup_strixhalo.py`):
+
 ```bash
-# Required for Strix Halo gfx1151
+# Required for Strix Halo gfx1151 (ROCm 7.2)
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
 
 # Enable optimized matrix math
@@ -393,27 +417,33 @@ The roadmap is structured in three layers:
 2. **Initial Development Run** — Fast end-to-end pass through every script and step using minimal data and a tiny model. The goal is to exercise and validate the entire pipeline, not to produce a useful model. Expect garbage output — that's fine.
 3. **Production Run** — Full-scale data processing and multi-week training to produce the actual model.
 
+> **Status (as of March 2026):** Phase 0 (system setup), Prod Phase 1 (Wikipedia pipeline), and most of Prod Phase 2 (corpus preparation) are **complete**. The Initial Development Run was skipped in favor of going directly to production-scale data processing. The next step is completing tokenization (P2.7–P2.9) and starting Prod Phase 3 (dev CPT on SmolLM2-360M).
+
 ---
 
-### Phase 0: System Setup (Fedora + Toolboxes)
+### Phase 0: System Setup (Fedora + Toolboxes) — ✅ COMPLETE
 
 This phase sets up the Strix Halo machine from scratch using Fedora instead of the previous Ubuntu-based setup. The [Strix Halo Toolboxes](https://strix-halo-toolboxes.com/) project provides containerized, pre-configured environments for AI workloads on Strix Halo.
 
-| Step | Task | Duration (est.) | Notes |
-|------|------|-----------------|-------|
-| 0.1 | Install Fedora (latest, kernel 6.18.4+) on Strix Halo | 1–2 hours | Fedora has strong AMD support out of the box |
-| 0.2 | Configure GTT memory allocation (maximize GPU-accessible RAM) | 1 hour | Set BIOS UMA to minimum; kernel params allocate up to 124 GB dynamically |
-| 0.3 | Install [Strix Halo Toolboxes](https://strix-halo-toolboxes.com/) | 1–2 hours | Provides ROCm, PyTorch, llama.cpp in containers |
-| 0.4 | Install and configure PostgreSQL (for Wikipedia DB) | 1–2 hours | Can run in a toolbox container or as system service |
-| 0.5 | Install and configure OpenSearch (for semantic search) | 1–2 hours | Needed for Wikipedia MCP server and year topics |
-| 0.6 | Install and configure LM Studio (headless server) | 1–2 hours | See [LMStudio-Setup.md](legacy/LMStudio-Setup.md); needed for dataset generation |
-| 0.7 | Verify ROCm: `rocminfo`, run llama.cpp test inference | 30 min | Confirm gfx1151 detected, GPU offloading works |
-| 0.8 | Set up Python venv with training dependencies (PyTorch ROCm, transformers, PEFT, datasets) | 1 hour | Verify `torch.cuda.is_available()` returns True via HIP |
-| | **Phase 0 total** | **1–2 days** | |
+| Step | Task | Status | Notes |
+|------|------|--------|-------|
+| 0.1 | Install Fedora (latest, kernel 6.18.4+) on Strix Halo | ✅ Done | Fedora 43, kernel 6.18.4+ |
+| 0.2 | Configure GTT memory allocation (maximize GPU-accessible RAM) | ✅ Done | BIOS UMA minimized; kernel params allocate up to 124 GB dynamically |
+| 0.3 | Install [Strix Halo Toolboxes](https://strix-halo-toolboxes.com/) | ✅ Done | ROCm 7.2, PyTorch, llama.cpp available in containers |
+| 0.4 | Install and configure PostgreSQL (for Wikipedia DB) | ✅ Done | 50 GB database operational; see [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md) |
+| 0.5 | Install and configure OpenSearch (for semantic search) | ✅ Done | 41 GB index operational; systemd service configured |
+| 0.6 | Install and configure LM Studio (headless server) | ✅ Done | Headless server via A4000 (`REMOTE_HOST=192.168.42.15`); see [A4000-Fedora-Setup.md](A4000-Fedora-Setup.md) |
+| 0.7 | Verify ROCm: `rocminfo`, run llama.cpp test inference | ✅ Done | gfx1151 detected, GPU offloading confirmed |
+| 0.8 | Set up Python venv with training dependencies (PyTorch ROCm, transformers, PEFT, datasets) | ✅ Done | Venv at `/mnt/data/venv`; `torch.cuda.is_available()` returns True via HIP |
 
 ---
 
-### Initial Development Run
+### Initial Development Run — ⏭️ SKIPPED
+
+> **Note:** This phase was skipped. The production data pipeline (Prod Phases 1–2) was executed directly, which validated all scripts and services at full scale. The dev run's goal — exercising every script and verifying every format — was achieved as part of the production pipeline work instead.
+
+<details>
+<summary>Original dev run plan (preserved for reference)</summary>
 
 **Goal:** Exercise every script and step end-to-end in a single day. Use tiny data subsets and a minimal model. The output will be a non-functional toy model, but the pipeline will be fully validated — every script invoked, every format verified, every service confirmed working.
 
@@ -481,40 +511,41 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 
 **Success criteria:** Every script in the pipeline has been invoked and completed without errors. All intermediate file formats have been verified. All services (PostgreSQL, OpenSearch, LM Studio, MCP server) are operational. The pipeline produces a GGUF file that loads in llama.cpp. No step requires debugging during the production run.
 
+</details>
+
 ---
 
 ### Production Run
 
 **Goal:** Produce the actual Deep Red model. Full data, full training, real evaluation. Expect this to take **6–8 weeks** from start of data processing to a deployed model.
 
-#### Prod Phase 1: Wikipedia Data Pipeline (Full)
+#### Prod Phase 1: Wikipedia Data Pipeline (Full) — ✅ COMPLETE
 
-| Step | Task | Duration (est.) | Notes |
-|------|------|-----------------|-------|
-| P1.1 | Download full English Wikipedia dump (`enwiki-*-pages-articles.xml.bz2`, ~25 GB) | 2–4 hours | From [dumps.wikimedia.org](https://dumps.wikimedia.org/); may already have from dev run |
-| P1.2 | Extract and import all articles into PostgreSQL using `scripts/extract_wikipedia.py` | 8–12 hours | ~7M articles; see [WikipediaMCP-Setup.md](legacy/WikipediaMCP-Setup.md) |
-| P1.3 | Download and parse full YAGO temporal data using `scripts/yago_parser.py` | 2–4 hours | See [YagoParser-Setup.md](legacy/YagoParser-Setup.md) |
-| P1.4 | Normalize full YAGO output using `scripts/normalize_temporal_output.py` | 4–8 hours | English URL mapping + page ID lookup; see [YagoNormalizer-Setup.md](legacy/YagoNormalizer-Setup.md) |
-| P1.5 | *(Optional)* Download and parse Wikidata temporal data using `scripts/wikidata_parser.py` | 12–24 hours | Broader coverage, ~900 GB extracted; see [WikidataParser-Setup.md](legacy/WikidataParser-Setup.md) |
-| P1.6 | Augment Wikipedia DB with temporal metadata using `scripts/augment_wikipedia_temporal.py` | 1–2 hours | Adds `earliest_date`/`latest_date` to ~1.75M articles |
-| P1.7 | Generate text embeddings and index in OpenSearch using `scripts/process_and_index.py` | 12–24 hours | Enables semantic search for MCP server and year topics |
-| P1.8 | Verify MCP server search works with full index | 30 min | Required for year topics extraction |
-| | **Prod Phase 1 total** | **3–5 days** | Most steps can run overnight |
+| Step | Task | Status | Notes |
+|------|------|--------|-------|
+| P1.1 | Download full English Wikipedia dump (`enwiki-*-pages-articles.xml.bz2`, ~25 GB) | ✅ Done | 24 GB dump in `/mnt/data/wikipedia/dumps/` |
+| P1.2 | Extract and import all articles into PostgreSQL using `scripts/extract_wikipedia.py` | ✅ Done | 7,041,771 articles; 50 GB database; see [WikipediaMCP-Setup.md](WikipediaMCP-Setup.md) |
+| P1.3 | Download and parse full YAGO temporal data using `scripts/yago_parser.py` | ✅ Done | Normalized output: `yago-facts-normalized.csv.zst` (107 MB); see [TemporalAugmentation-Setup.md](TemporalAugmentation-Setup.md) |
+| P1.4 | Normalize full YAGO output using `scripts/normalize_temporal_output.py` | ✅ Done | English URL mapping + page ID lookup complete |
+| P1.5 | *(Optional)* Download and parse Wikidata temporal data using `scripts/wikidata_parser.py` | ✅ Done | `wikidata-temporal-normalized.csv.zst` (150 MB); broader coverage achieved |
+| P1.6 | Augment Wikipedia DB with temporal metadata using `scripts/augment_wikipedia_temporal.py` | ✅ Done | 2,804,937 articles classified: 1,553,510 pre-1969 (O), 785,380 post-1969 (N), 466,047 uncertain (S), 4,236,834 unclassified (U) |
+| P1.7 | Generate text embeddings and index in OpenSearch using `scripts/process_and_index.py` | ✅ Done | 41 GB OpenSearch index; BM25 + k-NN vector search operational |
+| P1.8 | Verify MCP server search works with full index | ✅ Done | MCP server (port 7000) + React web GUI (port 8080) operational; systemd services configured |
 
-#### Prod Phase 2: Training Corpus Preparation (Full)
+#### Prod Phase 2: Training Corpus Preparation (Full) — 🔄 IN PROGRESS
 
-| Step | Task | Duration (est.) | Notes |
-|------|------|-----------------|-------|
-| P2.1 | Extract all pre-1969 Wikipedia articles from DB (SQL filter on temporal columns) | 1–2 hours | ~1.2M articles, ~2–4B tokens |
-| P2.2 | Clean extracted text (strip wikitext markup, normalize formatting) | 2–4 hours | Uses `scripts/extract_wikipedia.py` output pipeline |
-| P2.3 | Extract year topics using `scripts/extract_year_topics.py` (full year range) | 4–8 hours | Historical events for supplementary training data |
-| P2.4 | Retrieve Gutenberg full corpus using `scripts/retrieve_gutenberg.py` | 2–4 hours | ~500 books; see [ThemeFinetuning-DataPreparation-Phase1.md](legacy/ThemeFinetuning-DataPreparation-Phase1.md) |
-| P2.5 | Chunk Gutenberg texts using `scripts/chunk_gutenberg.py` | 30 min | 1024-token paragraph-based chunks |
-| P2.6 | Filter Gutenberg chunks for thematic alignment using `scripts/keyword_filter.py` | 30 min | Pre-filter for theme-relevant passages |
-| P2.7 | Select tokenizer from prod base model (TinyLlama-1.1B tokenizer) | 30 min | Llama 2 BPE tokenizer; re-tokenize corpus (dev used SmolLM2 tokenizer) |
-| P2.8 | Tokenize full corpus into binary training format (shuffled, 2048-token sequences) | 2–4 hours | Merge Wikipedia + Gutenberg, shuffle across sources |
-| P2.9 | Create train/validation split (99%/1%) | 30 min | Hold out validation set for loss monitoring |
-| | **Prod Phase 2 total** | **2–3 days** | |
+| Step | Task | Status | Notes |
+|------|------|--------|-------|
+| P2.1 | Extract all pre-1969 Wikipedia articles from DB (SQL filter on temporal columns) | ✅ Done | 1,553,510 pre-1969 articles (5.74 GB raw text, ≥1.4B tokens); 1,683,075 with `earliest_date < 1970` |
+| P2.2 | Clean extracted text (strip wikitext markup, normalize formatting) | ✅ Done | Extraction pipeline handles markup stripping |
+| P2.3 | Extract year topics using `scripts/extract_year_topics.py` (full year range) | ✅ Done | 1,844 year-topic files (years 151–2025) in `/mnt/data/wikipedia/topics/`; see [Wikipedia-YearTopics-Setup.md](Wikipedia-YearTopics-Setup.md) |
+| P2.4 | Retrieve Gutenberg full corpus using `scripts/retrieve_gutenberg.py` | ✅ Done | 766 books (497 MB JSONL) in `/mnt/data/gutenberg/corpus/`; see [Gutenberg-Setup.md](Gutenberg-Setup.md) |
+| P2.5 | Chunk Gutenberg texts using `scripts/chunk_gutenberg.py` | ✅ Done | Chunked, scored, and verified output in `/mnt/data/gutenberg/theme_output/` |
+| P2.6 | Filter Gutenberg chunks for thematic alignment using `scripts/keyword_filter.py` | ✅ Done | Filtered output in `/mnt/data/gutenberg/theme_output/filtered/` |
+| P2.6a | Retrieve chess corpus using `scripts/retrieve_chess_content.py` | ✅ Done | Phase 1: 683 PGN files (717 MB); Phase 2: 355,980 games → narrative JSONL (315 MB); Phase 3: 10 Internet Archive books (3.7 MB); see [Chess-Setup.md](Chess-Setup.md) |
+| P2.7 | Select tokenizer from prod base model (TinyLlama-1.1B tokenizer) | ⬜ Not started | Llama 2 BPE tokenizer; re-tokenize corpus (dev used SmolLM2 tokenizer) |
+| P2.8 | Tokenize full corpus into binary training format (shuffled, 2048-token sequences) | ⬜ Not started | Merge Wikipedia + Gutenberg + Chess, shuffle across sources |
+| P2.9 | Create train/validation split (99%/1%) | ⬜ Not started | Hold out validation set for loss monitoring |
 
 #### Prod Phase 3: Dev CPT (SmolLM2-360M)
 
@@ -561,24 +592,24 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 ### Timeline Summary
 
 ```
-Week 1         Week 2         Week 3-4       Week 5-9        Week 10
-┌─────────┐   ┌─────────┐   ┌─────────┐   ┌────────────┐   ┌─────────┐
-│ Phase 0  │   │ Dev Run │   │Prod 1+2 │   │  Prod 3+4  │   │ Prod 5  │
-│ System   │──▶│ (1 day) │──▶│  Data   │──▶│  Training  │──▶│SFT+Deploy│
-│ Setup    │   │ Pipeline│   │Pipeline │   │SmolLM2→TL  │   │  Eval   │
-│ 1-2 days │   │ Validate│   │ 3-5 days│   │ 5-7 weeks  │   │ 2-3 days│
-└─────────┘   └─────────┘   └─────────┘   └────────────┘   └─────────┘
+  DONE                DONE          DONE / NEXT      Remaining       Remaining
+┌─────────┐   ┌─────────────┐   ┌─────────┐   ┌────────────┐   ┌─────────┐
+│ Phase 0  │   │  Dev Run    │   │Prod 1+2 │   │  Prod 3+4  │   │ Prod 5  │
+│ System   │──▶│  (skipped)  │──▶│  Data   │──▶│  Training  │──▶│SFT+Deploy│
+│ Setup    │   │             │   │Pipeline │   │SmolLM2→TL  │   │  Eval   │
+│ COMPLETE │   │ validated   │   │P2.7 next│   │ 5-7 weeks  │   │ 2-3 days│
+└─────────┘   └─via prod────┘   └─────────┘   └────────────┘   └─────────┘
 ```
 
-| Layer | Phase | Description | Duration |
-|-------|-------|-------------|----------|
-| **Setup** | **0** | System setup (Fedora + Toolboxes + services) | 1–2 days |
-| **Dev** | **D1–D4** | Initial development run (exercise all scripts, validate pipeline) | ~1 day |
-| **Prod** | **P1** | Wikipedia data pipeline (full download, import, temporal augmentation) | 3–5 days |
-| **Prod** | **P2** | Training corpus preparation (full extract, filter, tokenize) | 2–3 days |
-| **Prod** | **P3** | Dev CPT on SmolLM2-360M (validate approach) | ~2 weeks |
-| **Prod** | **P4** | Production CPT on TinyLlama-1.1B | 3–5 weeks |
-| **Prod** | **P5** | Theme SFT + GGUF deployment | 2–3 days |
-| **Prod** | **P6** | Iteration and refinement | Ongoing |
+| Layer | Phase | Description | Status |
+|-------|-------|-------------|--------|
+| **Setup** | **0** | System setup (Fedora + Toolboxes + services) | ✅ Complete |
+| **Dev** | **D1–D4** | Initial development run (exercise all scripts, validate pipeline) | ⏭️ Skipped (validated via prod pipeline) |
+| **Prod** | **P1** | Wikipedia data pipeline (full download, import, temporal augmentation) | ✅ Complete |
+| **Prod** | **P2** | Training corpus preparation (full extract, filter, tokenize) | 🔄 In progress (P2.1–P2.6a done; P2.7–P2.9 remaining) |
+| **Prod** | **P3** | Dev CPT on SmolLM2-360M (validate approach) | ⬜ Not started |
+| **Prod** | **P4** | Production CPT on TinyLlama-1.1B | ⬜ Not started |
+| **Prod** | **P5** | Theme SFT + GGUF deployment | ⬜ Not started |
+| **Prod** | **P6** | Iteration and refinement | ⬜ Not started |
 
-**Total estimated time to first usable model: ~8–10 weeks** (including ~3 days setup+dev, ~1 week data, ~2 weeks dev CPT on SmolLM2-360M, ~4 weeks prod CPT on TinyLlama-1.1B, ~3 days SFT/deploy)
+**Estimated remaining time to first usable model: ~6–8 weeks** (tokenization ~1 day, ~2 weeks dev CPT on SmolLM2-360M, ~4 weeks prod CPT on TinyLlama-1.1B, ~3 days SFT/deploy)

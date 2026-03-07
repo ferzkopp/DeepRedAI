@@ -23,7 +23,7 @@ For the Deep Red project, this means selecting only content relevant before the 
                │ CSV.zst                         │ CSV.zst
                ▼                                ▼
       ┌──────────────────────────────────────────────────┐
-      │         normalize_temporal_output.py              │
+      │         normalize_temporal_output.py             │
       │   Normalize to English Wikipedia + page IDs      │
       │   + compress → .csv.zst                          │
       └────────────────────┬─────────────────────────────┘
@@ -31,14 +31,35 @@ For the Deep Red project, this means selecting only content relevant before the 
                            ▼
       ┌──────────────────────────────────────────────────┐
       │      augment_wikipedia_temporal.py               │
-      │   Populate temporal columns in PostgreSQL         │
+      │   Populate temporal columns in PostgreSQL        │
       └────────────────────┬─────────────────────────────┘
                            │
                            ▼
       ┌──────────────────────────────────────────────────┐
-      │          Wikipedia PostgreSQL Database            │
-      │   articles table + has_temporal_info,             │
+      │          Wikipedia PostgreSQL Database           │
+      │   articles table + has_temporal_info,            │
       │   earliest_date, latest_date columns             │
+      └───────────┬──────────────────────────────────────┘
+                  │                                    
+                  │  Unclassified articles              
+                  ▼                                    
+      ┌──────────────────────────────────────────────────┐
+      │   llm_temporal_analysis_augmentation.py          │
+      │   Back-fill from dates + LLM classification      │
+      │   → temporal_classification (O/N/S/U)            │
+      └────────────┬──────────────────┬──────────────────┘
+                   │                  │ API calls
+                   │                  ▼
+                   │         ┌─────────────────────┐
+                   │         │   LLM Endpoint(s)   │
+                   │         │  Qwen 2.5 7B Q4_K_M │
+                   │         │  (StrixHalo + A4000)│
+                   │         └─────────────────────┘
+                   │ UPDATE temporal_classification
+                   ▼
+      ┌──────────────────────────────────────────────────┐
+      │          Wikipedia PostgreSQL Database           │
+      │   + temporal_classification column (O/N/S/U)     │
       └──────────────────────────────────────────────────┘
 ```
 
@@ -553,7 +574,15 @@ count
 
 ---
 
-## Phase 4: LLM-based Temporal Enrichment
+## Phase 4: Year Topics Enrichment
+
+With the temporal database in place, year-based historical topics can be extracted from Wikipedia year pages and enriched with article references. This provides additional event-level temporal data for finetuning datasets.
+
+See [Wikipedia-YearTopics-Setup.md](Wikipedia-YearTopics-Setup.md) for the complete year topics extraction guide using `extract_year_topics.py`.
+
+---
+
+## Phase 5: LLM-based Temporal Enrichment
 
 ### Performance Analysis
 
@@ -636,7 +665,7 @@ Measured on StrixHalo with 4× concurrent requests per endpoint:
 - The 14B model offers no accuracy advantage given identical critical error performance and only marginal overall accuracy change. 
 - The 27B model has the best exact-match accuracy but introduces critical errors and is prohibitively slow.
 
-### 4.1 Server Setup for Maximum Throughput
+### 5.1 Server Setup for Maximum Throughput
 
 Both the local StrixHalo and the remote A4000 should be configured to run **Qwen 2.5 7B Q4_K_M** with maximum parallel slots. The smaller 7B model uses less memory per slot, allowing more concurrent requests than the default 14B configuration.
 
@@ -708,9 +737,18 @@ curl -sf localhost:1234/v1/models && echo "Local OK"
 curl -sf http://$REMOTE_HOST:1234/v1/models && echo "Remote OK"
 ```
 
-### 4.2 Database Schema Extension
+### 5.2 Database Schema Extension
 
 The `llm_temporal_analysis_augmentation.py` script adds a `temporal_classification` column to the articles table. This is done automatically on first run, but the schema change can be understood here:
+
+#### Classification Values
+
+| Code | Label      | Meaning                                                        |
+|------|------------|----------------------------------------------------------------|
+| `U`  | **Unset**  | Default — not yet classified by back-fill or LLM               |
+| `O`  | **Old**    | Subject predates 1969 (suitable for Deep Red training)         |
+| `N`  | **New**    | Subject postdates 1969 (excluded from Deep Red training)       |
+| `S`  | **Unsure** | Falls in the 1960–1980 transition zone or is otherwise ambiguous |
 
 ```sql
 -- CHAR(1) column with 4 possible values:
@@ -731,7 +769,7 @@ ON articles (temporal_classification);
 
 The column is idempotent — running the script again does not alter existing classifications.
 
-### 4.3 Run LLM Classification
+### 5.3 Run LLM Classification
 
 The script handles everything in sequence: schema setup, back-fill from existing dates, LLM classification of remaining articles.
 
@@ -800,7 +838,7 @@ python3 scripts/llm_temporal_analysis_augmentation.py \
 | `--db-user USER` | Database user (default: `$PG_USER` or wiki) |
 | `--db-password PASS` | Database password (default: `$PG_PASSWORD` or wiki) |
 
-### 4.4 Verify Classification
+### 5.4 Verify Classification
 
 ```bash
 # Classification distribution
@@ -833,30 +871,65 @@ ORDER BY temporal_classification;
 
 ---
 
-## Phase 5: Year Topics Enrichment
-
-With the temporal database in place, year-based historical topics can be extracted from Wikipedia year pages and enriched with article references. This provides additional event-level temporal data for finetuning datasets.
-
-See [Wikipedia-YearTopics-Setup.md](Wikipedia-YearTopics-Setup.md) for the complete year topics extraction guide using `extract_year_topics.py`.
-
----
-
 ## Querying Temporal Data
+
+The `temporal_classification` column is the **primary filter** for selecting training data. It unifies both date-based (Phases 1–3) and LLM-based (Phase 5) classification into a single column, covering articles that structured knowledge bases missed.
+
+| Filter | Column | Coverage | Use Case |
+|--------|--------|----------|----------|
+| **Classification (preferred)** | `temporal_classification = 'O'` | All articles — date-based + LLM-classified | Training data selection |
+| Date-based (legacy) | `has_temporal_info = TRUE AND earliest_date <= '1969-07-20'` | ~37 % of articles (YAGO/Wikidata only) | Exploratory queries, date-range analysis |
 
 ### SQL Examples
 
 ```sql
--- Articles with temporal information
+-- ═══════════════════════════════════════════════════════
+-- PRIMARY: Classification-based queries (for training)
+-- ═══════════════════════════════════════════════════════
+
+-- Classification distribution across all articles
+SELECT temporal_classification, COUNT(*) AS count,
+       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct
+FROM articles
+GROUP BY temporal_classification
+ORDER BY temporal_classification;
+
+-- All articles suitable for Deep Red training (pre-1969)
+SELECT title, temporal_classification, earliest_date
+FROM articles
+WHERE temporal_classification = 'O'
+LIMIT 20;
+
+-- Articles in the transition zone (may need manual review)
+SELECT title, temporal_classification, earliest_date, latest_date
+FROM articles
+WHERE temporal_classification = 'S'
+LIMIT 20;
+
+-- Unclassified articles still awaiting LLM processing
+SELECT COUNT(*) AS remaining
+FROM articles
+WHERE temporal_classification = 'U';
+
+-- Classification breakdown: date-based vs LLM-only
+SELECT temporal_classification,
+       SUM(CASE WHEN has_temporal_info THEN 1 ELSE 0 END) AS from_dates,
+       SUM(CASE WHEN NOT has_temporal_info OR has_temporal_info IS NULL
+                THEN 1 ELSE 0 END) AS from_llm
+FROM articles
+WHERE temporal_classification != 'U'
+GROUP BY temporal_classification
+ORDER BY temporal_classification;
+
+-- ═══════════════════════════════════════════════════════
+-- SECONDARY: Date-based queries (exploratory / analysis)
+-- ═══════════════════════════════════════════════════════
+
+-- Articles with structured temporal information
 SELECT title, earliest_date, latest_date
 FROM articles
 WHERE has_temporal_info = TRUE
 LIMIT 10;
-
--- Articles relevant before July 20, 1969 (Deep Red cutoff)
-SELECT title, earliest_date, latest_date
-FROM articles
-WHERE has_temporal_info = TRUE
-  AND earliest_date <= '1969-07-20';
 
 -- Count articles by century
 SELECT
@@ -886,20 +959,6 @@ WHERE has_temporal_info = TRUE
 GROUP BY year
 ORDER BY year DESC
 LIMIT 50;
-
--- Classification distribution (includes LLM-classified articles)
-SELECT temporal_classification, COUNT(*) AS count,
-       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct
-FROM articles
-GROUP BY temporal_classification
-ORDER BY temporal_classification;
-
--- All articles classified as "old" — broadest pre-1969 selection
--- (includes both date-based and LLM-classified articles)
-SELECT title, temporal_classification, earliest_date
-FROM articles
-WHERE temporal_classification = 'O'
-LIMIT 20;
 ```
 
 ### Python Examples
@@ -913,29 +972,29 @@ conn = psycopg2.connect(
 )
 cur = conn.cursor()
 
-# Get articles relevant before the temporal cutoff
-cutoff_date = '1969-07-20'
+# Primary: get all articles classified as pre-1969 (date-based + LLM)
 cur.execute("""
-    SELECT title, url, earliest_date, latest_date
+    SELECT title, url, temporal_classification, earliest_date
     FROM articles
-    WHERE has_temporal_info = TRUE
-      AND earliest_date <= %s
-    ORDER BY earliest_date
-""", (cutoff_date,))
+    WHERE temporal_classification = 'O'
+    ORDER BY title
+""")
+old_articles = cur.fetchall()
+print(f"Articles classified as old (pre-1969): {len(old_articles):,}")
 
-articles = cur.fetchall()
-print(f"Found {len(articles)} articles relevant before {cutoff_date}")
-
-# Check coverage statistics
+# Classification coverage statistics
 cur.execute("""
     SELECT
         COUNT(*) AS total,
-        SUM(CASE WHEN has_temporal_info THEN 1 ELSE 0 END) AS with_temporal,
-        ROUND(100.0 * SUM(CASE WHEN has_temporal_info THEN 1 ELSE 0 END) / COUNT(*), 2) AS pct
+        SUM(CASE WHEN temporal_classification = 'O' THEN 1 ELSE 0 END) AS old,
+        SUM(CASE WHEN temporal_classification = 'N' THEN 1 ELSE 0 END) AS new,
+        SUM(CASE WHEN temporal_classification = 'S' THEN 1 ELSE 0 END) AS unsure,
+        SUM(CASE WHEN temporal_classification = 'U' THEN 1 ELSE 0 END) AS unset
     FROM articles
 """)
-stats = cur.fetchone()
-print(f"Coverage: {stats[1]:,} / {stats[0]:,} articles ({stats[2]}%)")
+total, old, new, unsure, unset = cur.fetchone()
+print(f"Total: {total:,}  Old: {old:,}  New: {new:,}  "
+      f"Unsure: {unsure:,}  Unset: {unset:,}")
 
 cur.close()
 conn.close()
@@ -944,14 +1003,24 @@ conn.close()
 ### Export for Training
 
 ```bash
-# Export articles with pre-1969 temporal data for training
+# Export all pre-1969 articles for training (preferred — uses classification column)
 psql -h localhost -U wiki -d wikidb -c "
 COPY (
-    SELECT title, content, earliest_date, latest_date
+    SELECT title, content, temporal_classification, earliest_date, latest_date
     FROM articles
-    WHERE has_temporal_info = TRUE
-      AND earliest_date <= '1969-07-20'
+    WHERE temporal_classification = 'O'
+    ORDER BY title
 ) TO '/tmp/pre1969_articles.csv' CSV HEADER;
+"
+
+# Include 'unsure' articles for a more inclusive training set
+psql -h localhost -U wiki -d wikidb -c "
+COPY (
+    SELECT title, content, temporal_classification, earliest_date, latest_date
+    FROM articles
+    WHERE temporal_classification IN ('O', 'S')
+    ORDER BY title
+) TO '/tmp/pre1969_articles_inclusive.csv' CSV HEADER;
 "
 ```
 

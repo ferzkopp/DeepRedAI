@@ -6,14 +6,19 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 
 ## Steps/Instructions
 
+These steps document how to perform a [Model Training from Scratch](documentation/ModelTraining.md) procedure using a continued pre-training approach for temporal and thematic alignment.
+ 
 - [How to setup an AMD "Strix Halo" device (Fedora)](documentation/StrixHalo-Fedora-Setup.md) — primary development and training system; includes automated setup script
 - [How to setup an optional second NVIDIA device (A4000)](documentation/A4000-Fedora-Setup.md) — dedicated GPU for training/inference; includes automated setup script
 - [How to set up the Wikipedia MCP server and data pipeline](documentation/WikipediaMCP-Setup.md) — extraction, indexing, search, and MCP server for Wikipedia content
-- [How to extract year-based historical topics from Wikipedia](documentation/Wikipedia-YearTopics-Setup.md) — enriched event data for temporal finetuning
+- [How to extract year-based historical topics from Wikipedia](documentation/Wikipedia-YearTopics-Setup.md) — enriched event data for temporal training
 - [How to augment Wikipedia with temporal metadata](documentation/TemporalAugmentation-Setup.md) — YAGO/Wikidata parsing, normalization, and database augmentation for time-period filtering
-- [Model Training from Scratch](documentation/ModelTraining.md) — continued pre-training approach for temporal and thematic alignment
+- [How to retrieve Project Gutenberg literature](documentation/Gutenberg-Setup.md) — thematically relevant books for training data
+- [How to prepare the chess training corpus](documentation/Chess-Setup.md) — chess content retrieval, PGN conversion, and corpus preparation for the Deep Red persona
 
 ## Legacy Steps/Instructions
+
+These steps document a failed fine-tuning approach to modify an existing model with "temporal knowledge cutoff" and "theme alignment".
 
 - [How to setup an AMD "Strix Halo" device (Ubuntu, legacy)](documentation/legacy/StrixHalo-Ubuntu-Setup.md)
 - [How to setup LMStudio as server for "headless" operation](documentation/legacy/LMStudio-Setup.md)
@@ -36,9 +41,9 @@ a "Soviet utopia" setting controlled by the fictional "chess playing" AI.
 ## Repo Content
 
 - **`/documentation`** - Setup guides and planning documents for the project
-- **`/scripts`** - Python scripts for Wikipedia extraction, processing, indexing, YAGO parsing, Wikidata parsing, and the MCP server
+- **`/scripts`** - Python scripts for Wikipedia extraction/indexing, temporal augmentation (YAGO/Wikidata), Gutenberg and chess content retrieval, MCP server, and system setup
 - **`/services`** - Systemd service files for automated startup (inference servers, MCP server, OpenSearch, web GUI)
 - **`/webapp`** - React-based web interface for Wikipedia search with Vite configuration
 - **`/notebooks`** - Jupyter notebooks for testing embeddings and OpenSearch functionality
-- **`/patches`** - System patches (network driver fix for AMD Strix Halo)
+- **`/patches`** - System patches (network driver fix for AMD Strix Halo for older kernels)
 

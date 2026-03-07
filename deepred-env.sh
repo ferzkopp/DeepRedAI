@@ -26,6 +26,7 @@ export DEEPRED_REPO="${DEEPRED_REPO:-$DEEPRED_ROOT/DeepRedAI}"
 # ── Data directories ─────────────────────────────────────────────────────
 export WIKI_DATA="${WIKI_DATA:-$DEEPRED_ROOT/wikipedia}"
 export GUTENBERG_DATA="${GUTENBERG_DATA:-$DEEPRED_ROOT/gutenberg}"
+export CHESS_DATA="${CHESS_DATA:-$DEEPRED_ROOT/chess}"
 export DEEPRED_MODELS="${DEEPRED_MODELS:-$DEEPRED_ROOT/models}"
 export DEEPRED_VENV="${DEEPRED_VENV:-$DEEPRED_ROOT/venv}"
 
@@ -68,6 +69,7 @@ echo "  DEEPRED_ROOT   = $DEEPRED_ROOT"
 echo "  DEEPRED_REPO   = $DEEPRED_REPO"
 echo "  WIKI_DATA      = $WIKI_DATA"
 echo "  GUTENBERG_DATA = $GUTENBERG_DATA"
+echo "  CHESS_DATA     = $CHESS_DATA"
 echo "  DEEPRED_MODELS = $DEEPRED_MODELS"
 echo "  DEEPRED_VENV   = $DEEPRED_VENV"
 if [ -n "$REMOTE_HOST" ]; then
