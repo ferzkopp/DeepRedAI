@@ -506,8 +506,10 @@ The script runs through these stages in order:
 | 14 | `web_gui` | No | Build and deploy Wikipedia web GUI (port 8080) |
 | 15 | `firewall` | No | Configure firewalld rules for all service ports |
 | 16 | `llm_swap_helper` | No | Install `/usr/local/bin/llm-swap` helper script |
-| 17 | `verify` | **Yes** | Run health checks on all components (reboot to confirm boot persistence) |
-| 18 | `reverify` | No | Post-reboot health check — verify services survive a restart |
+| 17 | `training_tokenizers` | No | Download tokenizer files for CPT (TinyLlama-1.1B + SmolLM2-360M) |
+| 18 | `training_models` | No | Download base model checkpoints for CPT (~3 GB total) |
+| 19 | `verify` | **Yes** | Run health checks on all components (reboot to confirm boot persistence) |
+| 20 | `reverify` | No | Post-reboot health check — verify services survive a restart |
 
 ### Script Usage
 

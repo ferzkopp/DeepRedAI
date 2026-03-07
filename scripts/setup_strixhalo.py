@@ -1271,6 +1271,95 @@ def stage_llm_swap_helper(user: str) -> None:
     )
 
 
+@stage("training_tokenizers", "Download tokenizer files for CPT corpus creation")
+def stage_training_tokenizers(user: str) -> None:
+    # Download tokenizer files used by create_training_corpus.py into the
+    # corpus tokenizers directory.  These are small (~few MB) and separate
+    # from the full model weights.
+    CORPUS_DIR = DATA_DIR / "training_corpus" / "tokenizers"
+
+    PRESETS = [
+        ("TinyLlama-1.1B",
+         "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+         ["tokenizer.json", "tokenizer.model", "tokenizer_config.json",
+          "special_tokens_map.json"]),
+        ("SmolLM2-360M",
+         "HuggingFaceTB/SmolLM2-360M",
+         ["tokenizer.json", "tokenizer_config.json",
+          "special_tokens_map.json"]),
+    ]
+
+    for preset, repo, files in PRESETS:
+        tok_dir = CORPUS_DIR / preset
+        # Check for the actual tokenizer file, not just any directory content
+        # (a partial download may leave .cache/ metadata without the real files)
+        if (tok_dir / "tokenizer.json").exists():
+            log.info("  Tokenizer %s already present", preset)
+            continue
+        log.info("  Downloading tokenizer for %s...", preset)
+        tok_dir.mkdir(parents=True, exist_ok=True)
+        run(f"chown -R {user}:{user} {tok_dir}")
+        for fname in files:
+            run(
+                f'su - {user} -c "python3 -c \\"'
+                f"from huggingface_hub import hf_hub_download; "
+                f"hf_hub_download("
+                f"'{repo}', '{fname}', local_dir='{tok_dir}')"
+                f'\\""',
+                check=False,  # tokenizer.model may not exist for all presets
+            )
+
+    if CORPUS_DIR.exists():
+        run(f"chown -R {user}:{user} {CORPUS_DIR.parent}")
+
+
+@stage("training_models", "Download base models for CPT training")
+def stage_training_models(user: str) -> None:
+    # Base models for continued pre-training (CPT).  These are the full
+    # HuggingFace checkpoints (safetensors) — not GGUF quants.
+    TRAINING_MODELS_DIR = DATA_DIR / "models"
+
+    # Helper: snapshot_download via the Python API (avoids huggingface-cli
+    # PATH dependency).
+    def hf_snapshot(repo: str, local_dir: pathlib.Path,
+                    allow: str | None = None) -> None:
+        pat = f", allow_patterns='{allow}'" if allow else ""
+        run(
+            f'su - {user} -c "python3 -c \\"'
+            f"from huggingface_hub import snapshot_download; "
+            f"snapshot_download("
+            f"'{repo}', local_dir='{local_dir}'{pat})"
+            f'\\""'
+        )
+
+    # ── SmolLM2-360M (dev model) ──────────────────────────────────────
+    smol_dir = TRAINING_MODELS_DIR / "SmolLM2-360M"
+    smol_marker = smol_dir / "config.json"
+    if not smol_marker.exists():
+        log.info("  Downloading SmolLM2-360M (~720 MB)...")
+        smol_dir.mkdir(parents=True, exist_ok=True)
+        run(f"chown -R {user}:{user} {smol_dir}")
+        hf_snapshot("HuggingFaceTB/SmolLM2-360M", smol_dir)
+    else:
+        log.info("  SmolLM2-360M already present")
+
+    # ── TinyLlama-1.1B (production model) ─────────────────────────────
+    tiny_dir = TRAINING_MODELS_DIR / "TinyLlama-1.1B"
+    tiny_marker = tiny_dir / "config.json"
+    if not tiny_marker.exists():
+        log.info("  Downloading TinyLlama-1.1B (~2.2 GB)...")
+        tiny_dir.mkdir(parents=True, exist_ok=True)
+        run(f"chown -R {user}:{user} {tiny_dir}")
+        hf_snapshot(
+            "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T", tiny_dir
+        )
+    else:
+        log.info("  TinyLlama-1.1B already present")
+
+    # Ownership
+    run(f"chown -R {user}:{user} {TRAINING_MODELS_DIR}")
+
+
 @stage("verify", "Run health checks on all components", requires_reboot=True)
 def stage_verify(user: str) -> None:
     # ── Pass/fail checks ──
@@ -1306,6 +1395,11 @@ def stage_verify(user: str) -> None:
         ("Web GUI", "curl -sf http://localhost:8080 -o /dev/null && echo OK || echo DOWN"),
         ("llm-swap helper", 'test -x /usr/local/bin/llm-swap && echo "installed" || echo "MISSING"'),
         ("VSCode", f'su - {user} -s /bin/sh -c "code --version 2>/dev/null | head -1" || echo "not found"'),
+        # Training data files (from training_tokenizers / training_models stages)
+        ("Tokenizer TinyLlama", f'test -f {DATA_DIR}/training_corpus/tokenizers/TinyLlama-1.1B/tokenizer.json && echo "present" || echo "MISSING"'),
+        ("Tokenizer SmolLM2", f'test -f {DATA_DIR}/training_corpus/tokenizers/SmolLM2-360M/tokenizer.json && echo "present" || echo "MISSING"'),
+        ("Model SmolLM2-360M", f'test -f {DATA_DIR}/models/SmolLM2-360M/config.json && echo "present" || echo "MISSING"'),
+        ("Model TinyLlama-1.1B", f'test -f {DATA_DIR}/models/TinyLlama-1.1B/config.json && echo "present" || echo "MISSING"'),
     ]
 
     log.info("")
@@ -1372,8 +1466,10 @@ def stage_verify(user: str) -> None:
     # Content folders with du (only if they exist)
     content_dirs = [
         ("Models", MODELS_DIR),
+        ("Training corpus", DATA_DIR / "training_corpus"),
         ("Wikipedia", DATA_DIR / "wikipedia"),
         ("Gutenberg", DATA_DIR / "gutenberg"),
+        ("Chess", DATA_DIR / "chess"),
         ("PostgreSQL", DATA_DIR / "postgresql"),
         ("OpenSearch", DATA_DIR / "opensearch"),
         ("Python venv", VENV_DIR),

@@ -417,7 +417,7 @@ The roadmap is structured in three layers:
 2. **Initial Development Run** — Fast end-to-end pass through every script and step using minimal data and a tiny model. The goal is to exercise and validate the entire pipeline, not to produce a useful model. Expect garbage output — that's fine.
 3. **Production Run** — Full-scale data processing and multi-week training to produce the actual model.
 
-> **Status (as of March 2026):** Phase 0 (system setup), Prod Phase 1 (Wikipedia pipeline), and most of Prod Phase 2 (corpus preparation) are **complete**. The Initial Development Run was skipped in favor of going directly to production-scale data processing. The next step is completing tokenization (P2.7–P2.9) and starting Prod Phase 3 (dev CPT on SmolLM2-360M).
+> **Status (as of March 2026):** Phase 0 (system setup), Prod Phase 1 (Wikipedia pipeline), and Prod Phase 2 (corpus preparation) are **complete**. The full corpus has been tokenized with the TinyLlama-1.1B tokenizer into 1.94B tokens, shuffled into 2048-token sequences, and split into train/val sets. The next step is Prod Phase 3 (dev CPT on SmolLM2-360M).
 
 ---
 
@@ -532,7 +532,7 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 | P1.7 | Generate text embeddings and index in OpenSearch using `scripts/process_and_index.py` | ✅ Done | 41 GB OpenSearch index; BM25 + k-NN vector search operational |
 | P1.8 | Verify MCP server search works with full index | ✅ Done | MCP server (port 7000) + React web GUI (port 8080) operational; systemd services configured |
 
-#### Prod Phase 2: Training Corpus Preparation (Full) — 🔄 IN PROGRESS
+#### Prod Phase 2: Training Corpus Preparation (Full) — ✅ COMPLETE
 
 | Step | Task | Status | Notes |
 |------|------|--------|-------|
@@ -543,9 +543,9 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 | P2.5 | Chunk Gutenberg texts using `scripts/chunk_gutenberg.py` | ✅ Done | Chunked, scored, and verified output in `/mnt/data/gutenberg/theme_output/` |
 | P2.6 | Filter Gutenberg chunks for thematic alignment using `scripts/keyword_filter.py` | ✅ Done | Filtered output in `/mnt/data/gutenberg/theme_output/filtered/` |
 | P2.6a | Retrieve chess corpus using `scripts/retrieve_chess_content.py` | ✅ Done | Phase 1: 683 PGN files (717 MB); Phase 2: 355,980 games → narrative JSONL (315 MB); Phase 3: 10 Internet Archive books (3.7 MB); see [Chess-Setup.md](Chess-Setup.md) |
-| P2.7 | Select tokenizer from prod base model (TinyLlama-1.1B tokenizer) | ⬜ Not started | Llama 2 BPE tokenizer; re-tokenize corpus (dev used SmolLM2 tokenizer) |
-| P2.8 | Tokenize full corpus into binary training format (shuffled, 2048-token sequences) | ⬜ Not started | Merge Wikipedia + Gutenberg + Chess, shuffle across sources |
-| P2.9 | Create train/validation split (99%/1%) | ⬜ Not started | Hold out validation set for loss monitoring |
+| P2.7 | Select tokenizer from prod base model (TinyLlama-1.1B tokenizer) | ✅ Done | Llama 2 BPE tokenizer (vocab 32,000, EOS=2); downloaded to `/mnt/data/training_corpus/tokenizers/TinyLlama-1.1B/`; see [TrainingCorpus-Setup.md](TrainingCorpus-Setup.md) |
+| P2.8 | Tokenize full corpus into binary training format (shuffled, 2048-token sequences) | ✅ Done | 1.94B tokens across 5 sources (Wikipedia 1.64B + Gutenberg 147M + Chess games 153M + Year topics 2M + Chess books 1.8M); 49 shard files in `/mnt/data/training_corpus/TinyLlama-1.1B/shards/` |
+| P2.9 | Create train/validation split (99%/1%) | ✅ Done | 940,207 train seqs (1.93B tokens, 3.6 GB) + 9,497 val seqs (19.4M tokens, 37 MB); output: `train.bin` / `val.bin` in `/mnt/data/training_corpus/TinyLlama-1.1B/` |
 
 #### Prod Phase 3: Dev CPT (SmolLM2-360M)
 
@@ -589,27 +589,4 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 
 ---
 
-### Timeline Summary
 
-```
-  DONE                DONE          DONE / NEXT      Remaining       Remaining
-┌─────────┐   ┌─────────────┐   ┌─────────┐   ┌────────────┐   ┌─────────┐
-│ Phase 0  │   │  Dev Run    │   │Prod 1+2 │   │  Prod 3+4  │   │ Prod 5  │
-│ System   │──▶│  (skipped)  │──▶│  Data   │──▶│  Training  │──▶│SFT+Deploy│
-│ Setup    │   │             │   │Pipeline │   │SmolLM2→TL  │   │  Eval   │
-│ COMPLETE │   │ validated   │   │P2.7 next│   │ 5-7 weeks  │   │ 2-3 days│
-└─────────┘   └─via prod────┘   └─────────┘   └────────────┘   └─────────┘
-```
-
-| Layer | Phase | Description | Status |
-|-------|-------|-------------|--------|
-| **Setup** | **0** | System setup (Fedora + Toolboxes + services) | ✅ Complete |
-| **Dev** | **D1–D4** | Initial development run (exercise all scripts, validate pipeline) | ⏭️ Skipped (validated via prod pipeline) |
-| **Prod** | **P1** | Wikipedia data pipeline (full download, import, temporal augmentation) | ✅ Complete |
-| **Prod** | **P2** | Training corpus preparation (full extract, filter, tokenize) | 🔄 In progress (P2.1–P2.6a done; P2.7–P2.9 remaining) |
-| **Prod** | **P3** | Dev CPT on SmolLM2-360M (validate approach) | ⬜ Not started |
-| **Prod** | **P4** | Production CPT on TinyLlama-1.1B | ⬜ Not started |
-| **Prod** | **P5** | Theme SFT + GGUF deployment | ⬜ Not started |
-| **Prod** | **P6** | Iteration and refinement | ⬜ Not started |
-
-**Estimated remaining time to first usable model: ~6–8 weeks** (tokenization ~1 day, ~2 weeks dev CPT on SmolLM2-360M, ~4 weeks prod CPT on TinyLlama-1.1B, ~3 days SFT/deploy)
