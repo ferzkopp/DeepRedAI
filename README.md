@@ -1,4 +1,3 @@
-
 # Deep Red AI
 
 This project is inspired by the [Deep Red](https://www.deepredfilm.com) film trilogy from the creators of "Iron Sky". It aims to create a custom LLM model that has only knowledge up to July 1969 - the launch date of the fictional Mars mission in the movie - and responds in a style that aligns with 
@@ -16,6 +15,7 @@ These steps document how to perform a [Model Training from Scratch](documentatio
 - [How to retrieve Project Gutenberg literature](documentation/Gutenberg-Setup.md) — thematically relevant books for training data
 - [How to prepare the chess training corpus](documentation/Chess-Setup.md) — chess content retrieval, PGN conversion, and corpus preparation for the Deep Red persona
 - [How to tokenize and prepare the training corpus](documentation/TrainingCorpus-Setup.md) — tokenization, shuffling, and train/val splitting for continued pre-training
+- [How to train the Deep Red model](documentation/DeepRedModel-Setup.md) — continued pre-training on the temporally-filtered pre-1969 corpus using dev (SmolLM2-360M) or prod (TinyLlama-1.1B) profiles
 
 ## Legacy Steps/Instructions
 
@@ -47,4 +47,6 @@ These steps document a failed fine-tuning approach to modify an existing model w
 - **`/webapp`** - React-based web interface for Wikipedia search with Vite configuration
 - **`/notebooks`** - Jupyter notebooks for testing embeddings and OpenSearch functionality
 - **`/patches`** - System patches (network driver fix for AMD Strix Halo for older kernels)
+
+
 

@@ -23,11 +23,13 @@ This guide covers the manual steps for a fresh Fedora installation on an AMD Str
 | Component | Version | Notes |
 |-----------|---------|-------|
 | **OS** | Fedora 43 | |
-| **Linux Kernel** | 6.18.6-200+ | Kernels < 6.18.4 have gfx1151 bugs — **avoid them** |
+| **Linux Kernel** | 6.18.6-200+ | Kernels < 6.18.4 have gfx1151 bugs — **avoid them** ([AMD reference](https://rocm.docs.amd.com/en/latest/how-to/system-optimization/strixhalo.html)) |
 | **Linux Firmware** | 20260110+ | **Do NOT use `linux-firmware-20251125`** — breaks ROCm on Strix Halo |
 | **ROCm (toolbox)** | 7.2 (AMD repo) | Latest stable; kernel 6.18.4+ compatibility. ROCm 6.4.4 available as fallback. |
 
 > **⚠️ Critical:** The kernel, firmware, and ROCm versions must be compatible. ROCm 7.1.1 is **incompatible** with kernels ≥ 6.18.4 and has been deprecated. Always use ROCm 7.2+ with modern kernels. ROCm 6.4.4 is available as a fallback if you encounter regressions — change the image tag in the setup script.
+>
+> **Kernel patches:** Two AMD KFD driver commits are required for correct queue creation and memory availability checks on gfx1151. These are merged upstream in Linux 6.18.4+ ([`7f26af7`](https://github.com/gregkh/linux/commit/7f26af7bf9b76c2c2a1a761aab5803e52be21eea), [`7445db6`](https://github.com/gregkh/linux/commit/7445db6a7d5a0242d8214582b480600b266cba9e)). Fedora 43 includes them natively.
 
 ### Why Fedora Instead of Ubuntu
 
@@ -301,7 +303,7 @@ Enter BIOS and look for:
 - **UMA Frame Buffer Size** → Set to **minimum** (e.g., 1 GB on MS-S1 MAX)
 - **VRAM Size** or **iGPU Memory** → Leave at minimum / default
 
-> **Why minimum?** The UMA Frame Buffer (GART) is a **fixed** memory reservation that is never available to the OS. On Linux, GPU memory is allocated dynamically via GTT (Graphics Translation Table) using kernel parameters — the setup script configures `amdgpu.gttsize` and `ttm.pages_limit` to allow the iGPU to access up to ~124 GB on demand while keeping the memory available to the CPU when idle. Setting UMA to maximum (e.g., 96 GB) would wastefully lock that memory away from the system. The [Strix Halo Toolboxes project](https://strix-halo-toolboxes.com/#config) tests with only 512 MB BIOS allocation and the [strixhalo.wiki](https://strixhalo.wiki/AI/AI_Capabilities_Overview) explicitly recommends: *"set GART to the minimum (eg, 512MB) and then allocating automatically via GTT."*
+> **Why minimum?** The UMA Frame Buffer (GART) is a **fixed** memory reservation that is never available to the OS. On Linux, GPU memory is allocated dynamically via GTT (Graphics Translation Table) using kernel parameters — the setup script configures `amdgpu.gttsize` and `ttm.pages_limit` to allow the iGPU to access up to ~124 GB on demand while keeping the memory available to the CPU when idle. Setting UMA to maximum (e.g., 96 GB) would wastefully lock that memory away from the system. AMD's own [Strix Halo system optimization guide](https://rocm.docs.amd.com/en/latest/how-to/system-optimization/strixhalo.html) recommends keeping VRAM reservation small (e.g., 0.5 GB) and increasing the shared TTM/GTT limit instead. The [Strix Halo Toolboxes project](https://strix-halo-toolboxes.com/#config) tests with only 512 MB BIOS allocation and the [strixhalo.wiki](https://strixhalo.wiki/AI/AI_Capabilities_Overview) explicitly recommends: *"set GART to the minimum (eg, 512MB) and then allocating automatically via GTT."*
 
 ### Step 5: Data Disk Setup
 

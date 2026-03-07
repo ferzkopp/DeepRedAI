@@ -30,11 +30,13 @@ See documentation/DeepRedModel-Setup.md for full setup and usage details.
 
 import argparse
 import gc
+import hashlib
 import json
 import logging
 import math
 import os
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -194,8 +196,12 @@ def evaluate(model, val_dataset, device, micro_batch_size, max_batches=50):
     model.eval()
     device_type = 'cuda' if device.type == 'cuda' else 'cpu'
 
+    # Cap eval batch to 8: the full logits tensor
+    # (batch × seq × vocab × 4B) can easily OOM at larger sizes,
+    # and eval throughput is not a bottleneck.
+    eval_batch = min(micro_batch_size, 8)
     val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=micro_batch_size, shuffle=False,
+        val_dataset, batch_size=eval_batch, shuffle=False,
         num_workers=2, pin_memory=(device.type == 'cuda'), drop_last=True,
     )
 
@@ -304,6 +310,164 @@ def load_checkpoint(ckpt_dir, optimizer, device):
     }
 
 
+# ─── Run Orchestration ────────────────────────────────────────────────────────
+
+# Parameters that define a run identity — changing any of these means a new run
+RUN_DEFINING_PARAMS = [
+    'profile', 'model_name', 'epochs', 'lr', 'min_lr', 'warmup_steps',
+    'micro_batch_size', 'gradient_accumulation_steps', 'weight_decay',
+    'max_grad_norm', 'data_percent', 'seed',
+]
+
+
+def compute_run_fingerprint(args):
+    """Compute a deterministic hash of run-defining parameters."""
+    params = {k: getattr(args, k) for k in RUN_DEFINING_PARAMS}
+    canonical = json.dumps(params, sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def resolve_run(args, root):
+    """Resolve run name, output directory, and auto-resume logic.
+
+    Returns (run_name, output_dir, resume_path_or_None).
+    May sys.exit() if the run is already completed.
+    """
+    # Determine run name
+    if args.run_name:
+        run_name = args.run_name
+    else:
+        run_name = f"{args.profile}-{datetime.now().strftime('%Y-%m-%d')}"
+
+    output_dir = Path(
+        args.output_dir or f"{root}/training_output/{run_name}")
+    meta_path = output_dir / 'run_meta.json'
+    fingerprint = compute_run_fingerprint(args)
+
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+        if meta.get('status') == 'completed':
+            if args.new_run:
+                # Auto-increment name for a fresh run
+                base = run_name
+                for i in range(2, 100):
+                    run_name = f"{base}-{i}"
+                    output_dir = Path(f"{root}/training_output/{run_name}")
+                    if not output_dir.exists():
+                        break
+                # Fall through to create new run
+            else:
+                print(f"\n{'=' * 60}")
+                print(f"  Run '{meta.get('run_name', run_name)}' is COMPLETED")
+                print(f"  Finished: {meta.get('completed_at', 'unknown')}")
+                print(f"  Output:   {output_dir}")
+                print(f"{'=' * 60}")
+                print(f"\nTo start a new run:")
+                print(f"  --new-run                  (auto-increment name)")
+                print(f"  --run-name <custom-name>   (custom name)")
+                sys.exit(0)
+        else:
+            # Run exists but not completed — check fingerprint
+            if meta.get('fingerprint') != fingerprint:
+                print(f"\nERROR: Run '{run_name}' exists with different "
+                      f"parameters.")
+                old_params = meta.get('params', {})
+                print(f"\nChanged parameters:")
+                for k in RUN_DEFINING_PARAMS:
+                    old_val = old_params.get(k)
+                    new_val = getattr(args, k)
+                    if old_val != new_val:
+                        print(f"  {k}: {old_val} -> {new_val}")
+                print(f"\nTo start a new run with these parameters, use:")
+                print(f"  --run-name <custom-name>")
+                sys.exit(1)
+
+            # Same fingerprint — auto-resume from latest checkpoint
+            latest_ckpt = output_dir / 'latest'
+            if (latest_ckpt.exists()
+                    and (latest_ckpt / 'training_state.pt').exists()):
+                print(f"\nResuming run '{run_name}' from {latest_ckpt}")
+                return run_name, output_dir, str(latest_ckpt)
+            else:
+                # Run dir exists but no checkpoint yet — continue
+                return run_name, output_dir, None
+
+    # New run — save metadata
+    output_dir.mkdir(parents=True, exist_ok=True)
+    meta = {
+        'run_name': run_name,
+        'status': 'running',
+        'fingerprint': fingerprint,
+        'params': {k: getattr(args, k) for k in RUN_DEFINING_PARAMS},
+        'started_at': datetime.now().isoformat(),
+        'profile': args.profile,
+        'model_name': args.model_name,
+    }
+    with open(meta_path, 'w') as f:
+        json.dump(meta, f, indent=2)
+
+    return run_name, output_dir, None
+
+
+def mark_run_completed(output_dir):
+    """Mark a run as completed in run_meta.json."""
+    meta_path = Path(output_dir) / 'run_meta.json'
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+        meta['status'] = 'completed'
+        meta['completed_at'] = datetime.now().isoformat()
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f, indent=2)
+
+
+# ─── GGUF Export ──────────────────────────────────────────────────────────────
+
+def export_gguf(model_dir, output_path, llama_cpp_path=None,
+               quant_type='q8_0', log=None):
+    """Export a model checkpoint to GGUF format for LMStudio testing.
+
+    Uses llama.cpp's convert_hf_to_gguf.py.  Falls back gracefully if
+    llama.cpp is not available.
+    """
+    _log = log.info if log else print
+    _warn = log.warning if log else print
+
+    root = os.environ.get('DEEPRED_ROOT', '/mnt/data')
+    if llama_cpp_path is None:
+        llama_cpp_path = os.path.join(root, 'llama.cpp')
+
+    convert_script = os.path.join(llama_cpp_path, 'convert_hf_to_gguf.py')
+    if not os.path.exists(convert_script):
+        _warn(f"GGUF export skipped: llama.cpp not found at "
+              f"{llama_cpp_path}")
+        return False
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    cmd = [
+        sys.executable, convert_script,
+        str(model_dir),
+        '--outfile', str(output_path),
+        '--outtype', quant_type,
+    ]
+
+    try:
+        _log(f"Exporting GGUF: {output_path}")
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        _log(f"GGUF exported: {output_path} ({size_mb:.0f} MB)")
+        return True
+    except subprocess.CalledProcessError as e:
+        _warn(f"GGUF export failed: {e.stderr[:500] if e.stderr else e}")
+        return False
+    except FileNotFoundError as e:
+        _warn(f"GGUF export failed (command not found): {e}")
+        return False
+
+
 # ─── Training ────────────────────────────────────────────────────────────────
 
 FINETUNING_CONTAINER = 'strix-halo-finetuning'
@@ -394,16 +558,19 @@ def train(args):
               f"--tokenizer {args.model_name} --finalize")
         sys.exit(1)
 
-    # ── Output directory ──
+    # ── Run orchestration ──
     timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    if args.resume and not args.output_dir:
-        # Derive output dir from resume path (e.g., .../latest -> parent)
-        output_dir = Path(args.resume).parent
+    if args.resume:
+        # Explicit --resume: skip run orchestration
+        run_name = None
+        if not args.output_dir:
+            output_dir = Path(args.resume).parent
+        else:
+            output_dir = Path(args.output_dir)
     else:
-        output_dir = Path(
-            args.output_dir or
-            f"{root}/training_output/cpt-{args.model_name}-{timestamp}"
-        )
+        run_name, output_dir, auto_resume = resolve_run(args, root)
+        if auto_resume:
+            args.resume = auto_resume
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Logging ──
@@ -591,11 +758,16 @@ def train(args):
              f"Max grad norm: {args.max_grad_norm}")
 
     # Estimated time
-    # Conservative tok/s estimates based on model size
-    est_tps = 4000 if 'SmolLM2' in args.model_name else 1500
+    # Baseline: ~1,200 tok/s measured on Strix Halo (Radeon 8060S,
+    # ROCm, batch=8, eager attn, fused AdamW).
+    est_tps = 1200 if 'SmolLM2' in args.model_name else 400
     est_hours = total_tokens_budget / (est_tps * 3600)
+    est_completion = datetime.now() + timedelta(hours=est_hours)
+    comp_date = est_completion.strftime('%a, %-m/%-d/%Y')
+    comp_time = est_completion.strftime('%-I%p').lower()
     log.info(f"Estimated time: ~{est_hours:.1f} hours ({est_hours/24:.1f} days)"
              f" at ~{est_tps:,} tok/s")
+    log.info(f"Expected completion: {comp_date} {comp_time}")
 
     # ── Save config ──
     run_config = {
@@ -629,6 +801,7 @@ def train(args):
         'n_gpus': n_gpus,
         'num_workers': num_workers,
         'seed': args.seed,
+        'run_name': run_name,
         'timestamp': timestamp,
         'pytorch_version': torch.__version__,
     }
@@ -649,10 +822,13 @@ def train(args):
     log.info(f"Optimizer groups: {len(decay_params)} decay params, "
              f"{len(no_decay_params)} no-decay params")
 
+    use_fused = (device_type == 'cuda')
     optimizer = torch.optim.AdamW([
         {'params': decay_params, 'weight_decay': args.weight_decay},
         {'params': no_decay_params, 'weight_decay': 0.0},
-    ], lr=args.lr, betas=(0.9, 0.95), eps=1e-8, fused=False)
+    ], lr=args.lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+    if use_fused:
+        log.info("AdamW: using fused CUDA kernel")
 
     # ── Resume state ──
     start_step = 0
@@ -730,7 +906,8 @@ def train(args):
             num_workers=num_workers,
             pin_memory=(device.type == 'cuda'),
             drop_last=True,
-            persistent_workers=False,
+            persistent_workers=(num_workers > 0),
+            prefetch_factor=4 if num_workers > 0 else None,
         )
 
         for batch_idx, batch in enumerate(train_loader):
@@ -907,6 +1084,17 @@ def train(args):
 
         log.info(f"Epoch {epoch + 1} complete (step {step})")
 
+        # ── Epoch-end GGUF export ──
+        if not args.no_gguf and run_name:
+            epoch_ckpt_name = f'epoch-{epoch + 1}'
+            epoch_ckpt_dir = save_model_only(
+                model, tokenizer, output_dir, epoch_ckpt_name)
+            gguf_dir = output_dir / 'gguf'
+            gguf_path = gguf_dir / f'{run_name}-epoch{epoch + 1}.gguf'
+            export_gguf(epoch_ckpt_dir, str(gguf_path),
+                        llama_cpp_path=args.llama_cpp_path,
+                        quant_type=args.gguf_quant, log=log)
+
     # ── Final evaluation and save ──
     log.info("=" * 60)
     log.info("Training complete — running final evaluation")
@@ -933,6 +1121,19 @@ def train(args):
                     run_config, output_dir, 'latest')
     save_model_only(model, tokenizer, output_dir, 'final')
 
+    # ── Final GGUF export ──
+    if not args.no_gguf and run_name:
+        gguf_dir = output_dir / 'gguf'
+        gguf_path = gguf_dir / f'{run_name}-final.gguf'
+        final_model_dir = output_dir / 'final'
+        export_gguf(str(final_model_dir), str(gguf_path),
+                    llama_cpp_path=args.llama_cpp_path,
+                    quant_type=args.gguf_quant, log=log)
+
+    # Mark run as completed
+    if run_name:
+        mark_run_completed(output_dir)
+
     elapsed = time.time() - t_start
     tokens_seen = step * tokens_per_step
     avg_tps = tokens_seen / elapsed if elapsed > 0 else 0
@@ -946,7 +1147,19 @@ def train(args):
     log.info(f"Best val loss:    {best_val_loss:.4f}")
     log.info(f"Val perplexity:   {val_ppl:.2f}")
     log.info(f"Output dir:       {output_dir}")
+    if run_name:
+        log.info(f"Run name:         {run_name}")
+        gguf_dir = output_dir / 'gguf'
+        if gguf_dir.exists():
+            log.info(f"GGUF models:      {gguf_dir}")
     log.info("=" * 60)
+    if run_name:
+        log.info("")
+        log.info(f"Run '{run_name}' is COMPLETE.")
+        log.info(f"To start a new run:")
+        log.info(f"  --new-run                  (auto-increment name)")
+        log.info(f"  --run-name <custom-name>   (custom name)")
+        log.info("")
 
     metrics_file.write(json.dumps({
         'type': 'final',
@@ -1053,6 +1266,26 @@ def main():
     parser.add_argument('--sample-interval', type=int, default=None,
                         help='Text sample generation interval (steps)')
 
+    # Run orchestration
+    parser.add_argument(
+        '--run-name', type=str, default=None,
+        help='Custom run name (default: {profile}-YYYY-MM-DD)')
+    parser.add_argument(
+        '--new-run', action='store_true',
+        help='Start a new run even if a previous run with the same '
+             'name is completed (auto-increments the name)')
+
+    # GGUF export
+    parser.add_argument(
+        '--no-gguf', action='store_true',
+        help='Disable GGUF model export at epoch boundaries')
+    parser.add_argument(
+        '--gguf-quant', type=str, default='q8_0',
+        help='GGUF quantization type (default: q8_0)')
+    parser.add_argument(
+        '--llama-cpp-path', type=str, default=None,
+        help='Path to llama.cpp directory (default: $DEEPRED_ROOT/llama.cpp)')
+
     # Misc
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
@@ -1071,8 +1304,12 @@ def main():
             setattr(args, attr, default_val)
 
     # Print banner
+    # Determine display run name for banner
+    display_run = args.run_name or f"{args.profile}-{datetime.now().strftime('%Y-%m-%d')}"
+
     print(f"\n{'=' * 60}")
     print(f"  Deep Red CPT — {args.model_name} ({args.profile} profile)")
+    print(f"  Run: {display_run}")
     print(f"{'=' * 60}\n")
 
     train(args)

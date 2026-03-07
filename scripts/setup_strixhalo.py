@@ -1455,6 +1455,65 @@ def stage_training_toolbox(user: str) -> None:
              TRAINING_TOOLBOX_NAME)
 
 
+@stage("training_gguf_tools", "Install llama.cpp GGUF conversion tools for model export")
+def stage_training_gguf_tools(user: str) -> None:
+    """Clone llama.cpp and install Python deps for GGUF export.
+
+    The training script (train_deepred_model.py) calls
+    llama.cpp/convert_hf_to_gguf.py at epoch boundaries to export GGUF
+    models for testing in LM Studio.  This stage:
+      1. Clones llama.cpp (shallow) to /mnt/data/llama.cpp
+      2. Installs its Python requirements into the fine-tuning container's
+         /opt/venv so the conversion script runs inside the container.
+    """
+    llama_cpp_dir = DATA_DIR / "llama.cpp"
+    convert_script = llama_cpp_dir / "convert_hf_to_gguf.py"
+
+    # ── Step 1: Clone llama.cpp (on host, visible inside container via /mnt/data bind) ──
+    if convert_script.exists():
+        log.info("  llama.cpp already present at %s", llama_cpp_dir)
+    else:
+        log.info("  Cloning llama.cpp to %s (shallow clone)...", llama_cpp_dir)
+        run(
+            f'su - {user} -c "git clone --depth 1'
+            f" https://github.com/ggerganov/llama.cpp"
+            f' {llama_cpp_dir}"'
+        )
+        if not convert_script.exists():
+            raise RuntimeError(
+                f"Clone succeeded but convert_hf_to_gguf.py not found at {convert_script}"
+            )
+
+    # ── Step 2: Install Python requirements inside the fine-tuning container ──
+    requirements = llama_cpp_dir / "requirements.txt"
+    if not requirements.exists():
+        log.warning("  No requirements.txt in llama.cpp — skipping pip install")
+    else:
+        # Ensure the container is running
+        run(f'su - {user} -c "podman start {TRAINING_TOOLBOX_NAME}"',
+            check=False)
+
+        log.info("  Installing llama.cpp Python requirements in %s container...",
+                 TRAINING_TOOLBOX_NAME)
+        result = run(
+            f'su - {user} -c "podman exec {TRAINING_TOOLBOX_NAME}'
+            f" /opt/venv/bin/pip install -q"
+            f' -r {requirements}"',
+            check=False,
+            capture=True,
+        )
+        if result.returncode != 0:
+            log.warning("  pip install returned %d — some GGUF conversion "
+                        "features may not work", result.returncode)
+            if result.stderr:
+                log.warning("  stderr: %s", result.stderr.strip()[:500])
+        else:
+            log.info("  llama.cpp Python requirements installed in container")
+
+    # Verify the conversion script is importable
+    log.info("  llama.cpp GGUF tools ready at %s", llama_cpp_dir)
+
+
 @stage("verify", "Run health checks on all components", requires_reboot=True)
 def stage_verify(user: str) -> None:
     # ── Pass/fail checks ──
@@ -1496,6 +1555,7 @@ def stage_verify(user: str) -> None:
         ("Tokenizer SmolLM2", f'test -f {DATA_DIR}/training_corpus/tokenizers/SmolLM2-360M/tokenizer.json && echo "present" || echo "MISSING"'),
         ("Model SmolLM2-360M", f'test -f {DATA_DIR}/models/SmolLM2-360M/config.json && echo "present" || echo "MISSING"'),
         ("Model TinyLlama-1.1B", f'test -f {DATA_DIR}/models/TinyLlama-1.1B/config.json && echo "present" || echo "MISSING"'),
+        ("llama.cpp GGUF tools", f'test -f {DATA_DIR}/llama.cpp/convert_hf_to_gguf.py && echo "present" || echo "MISSING"'),
     ]
 
     log.info("")
