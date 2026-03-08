@@ -96,6 +96,38 @@ except ImportError:
 
 TEMPORAL_CUTOFF_YEAR = 1969
 
+# ── Wikipedia boilerplate patterns (precompiled) ────────────────────────
+# Matches ## or ### level headings that start a boilerplate section.
+# These sections (and everything after them) are non-content: navigation
+# links, reference lists, and other structural markup that the model
+# should never learn to reproduce.
+_BOILERPLATE_SECTION_RE = re.compile(
+    r'^#{2,6}\s*(?:'
+    r'See\s+also|References|External\s+links|Further\s+reading'
+    r'|Notes|Bibliography|Sources|Footnotes|Citations'
+    r'|Notes\s+and\s+references|References\s+and\s+notes'
+    r')\s*$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Matches any markdown heading marker (##, ###, ####, etc.)
+_HEADING_MARKER_RE = re.compile(r'^(#{2,6})\s+(.+)$', re.MULTILINE)
+
+# Navigation-only list items: "* List of ...", "* Category:...", etc.
+_NAV_LIST_RE = re.compile(
+    r'^\s*\*\s*(?:'
+    r'List\s+of\s+|Lists\s+of\s+|Index\s+of\s+|Outline\s+of\s+'
+    r'|Category:|Portal:|Template:'
+    r').*$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# "Categories: X, Y, Z" lines (Wikipedia metadata)
+_CATEGORIES_LINE_RE = re.compile(
+    r'^\s*Categories:\s.*$', re.IGNORECASE | re.MULTILINE,
+)
+
+
 # Shard sizing: ~100 MB per shard file (50M uint16 tokens × 2 bytes)
 SHARD_MAX_TOKENS = 50_000_000
 
@@ -214,6 +246,48 @@ def clean_text(text):
     # Collapse runs of whitespace on a single line (preserve newlines)
     text = re.sub(r'[^\S\n]+', ' ', text)
     # Collapse 3+ blank lines into 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def clean_wikipedia_boilerplate(text):
+    """Strip Wikipedia structural boilerplate that should not appear in training data.
+
+    Applied *after* basic ``clean_text`` normalization.  Steps:
+
+    1. **Truncate at boilerplate sections** — Everything from the first
+       ``## See also``, ``## References``, ``## External links`` (etc.)
+       heading onward is removed.  In Wikipedia, these sections sit at the
+       tail of an article and contain only navigation links, citation lists,
+       and other non-prose content.
+    2. **Strip markdown heading markers** — ``## Early life`` becomes
+       ``Early life``.  The heading *text* often provides useful context,
+       but the ``##`` markup is a formatting artifact that the model should
+       not learn to reproduce.
+    3. **Remove navigation list items** — Bulleted lines such as
+       ``* List of presidents of the United States`` that are purely
+       internal-link navigation.
+    4. **Remove Categories lines** — ``Categories: History, Politics, …``
+       metadata appended by the wiki parser.
+    """
+    if not text:
+        return ''
+
+    # 1. Truncate at the first boilerplate section heading
+    m = _BOILERPLATE_SECTION_RE.search(text)
+    if m:
+        text = text[:m.start()]
+
+    # 2. Strip heading markers, keep the heading text as a plain line
+    text = _HEADING_MARKER_RE.sub(r'\2', text)
+
+    # 3. Remove navigation-only list items
+    text = _NAV_LIST_RE.sub('', text)
+
+    # 4. Remove Categories metadata lines
+    text = _CATEGORIES_LINE_RE.sub('', text)
+
+    # Final whitespace cleanup after removals
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
@@ -479,7 +553,9 @@ def read_wikipedia_articles(env, offset, limit):
     )
     for _id, title, content in cur:
         if content:
-            yield f"{title}\n\n{clean_text(content)}"
+            body = clean_wikipedia_boilerplate(clean_text(content))
+            if body:
+                yield f"{title}\n\n{body}"
     cur.close()
     conn.close()
 

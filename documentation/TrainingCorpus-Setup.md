@@ -346,6 +346,38 @@ sequence = tokens[seq_idx * 2048 : (seq_idx + 1) * 2048]
 - **Ordering:** Sorted by `id` (deterministic for incremental processing)
 - **Content:** Already cleaned during import — wikitext markup stripped by `extract_wikipedia.py`
 
+#### Wikipedia Boilerplate Filtering
+
+Wikipedia articles stored in PostgreSQL retain some structural artifacts from the
+original wikitext-to-markdown conversion (performed by `extract_wikipedia.py`).
+Left unfiltered, these patterns leak into model outputs — for example, prompts
+ending with `## See also * List of presidential election results by state`.
+
+The corpus script applies a dedicated `clean_wikipedia_boilerplate()` pass to
+every Wikipedia article *at tokenization time*, so the model never sees these
+patterns during training. This is layered on top of the initial extraction
+cleanup (which uses `mwparserfromhell` section removal but can miss edge cases).
+
+**What is removed:**
+
+| Pattern | Example | Reason |
+|---------|---------|--------|
+| Boilerplate sections | `## See also`, `## References`, `## External links`, `## Further reading`, `## Notes`, `## Bibliography`, `## Footnotes`, `## Citations` | Navigation links, citation lists, and non-prose content that sits at the tail of articles. Everything from the first boilerplate heading onward is truncated. |
+| Markdown heading markers | `## Early life` → `Early life` | The heading *text* is preserved (it provides useful context), but the `##` markup is stripped so the model does not learn to reproduce markdown structure. |
+| Navigation list items | `* List of presidents of the United States` | Bulleted lines starting with `List of`, `Lists of`, `Index of`, `Outline of`, `Category:`, `Portal:`, or `Template:` — these are internal-link navigation, not prose. |
+| Categories metadata | `Categories: History, Politics, …` | Wikipedia category tags appended by the wiki parser. |
+
+**Why filter here (not in extraction):**
+
+- The PostgreSQL content is used by multiple consumers (search, display, MCP
+  server) where headings and structure are useful. Training is the only consumer
+  that needs them removed.
+- Re-extracting the entire Wikipedia dump would be expensive. Filtering at
+  tokenization time is fast (regex) and lets us iterate on the rules without
+  touching the database.
+- This creates a single, maintainable location for training-specific text
+  cleaning rules.
+
 ### Year Topics
 
 - **Source:** JSON files in `/mnt/data/wikipedia/topics/year_topics_YYYY.json`
