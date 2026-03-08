@@ -30,10 +30,6 @@ See [ModelTraining.md](ModelTraining.md) for background on the CPT approach, bas
 4. **Training corpus tokenized** — `create_training_corpus.py` produces `train.bin` and `val.bin`. See [TrainingCorpus-Setup.md](TrainingCorpus-Setup.md).
 5. **llama.cpp GGUF tools installed** — `setup_strixhalo.py` stage `training_gguf_tools` clones llama.cpp to `/mnt/data/llama.cpp` and installs its Python requirements in the fine-tuning container. This enables automatic GGUF export at epoch boundaries.
 
-### Why a dedicated container?
-
-Standard PyTorch ROCm wheels do not include compiled GPU code for Strix Halo's `gfx1151` architecture. GPU detection works (`torch.cuda.is_available()` returns True), but any actual GPU compute (`.cuda()`, `.to('cuda')`) segfaults. The fine-tuning container uses PyTorch built from AMD's gfx1151 nightly index which includes native gfx1151 kernels.
-
 ---
 
 ## Step 1: Enter the Fine-Tuning Container
@@ -52,11 +48,11 @@ source /opt/venv/bin/activate
 cd /mnt/data/DeepRedAI
 ```
 
-Verify PyTorch sees the GPU:
+Verify PyTorch has ROCm/HIP support:
 
 ```bash
-python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-# Expected: True Radeon 8060S Graphics
+python3 -c "import torch; print('PyTorch', torch.__version__, '| HIP', torch.version.hip)"
+# Expected: PyTorch 2.12.0a0+rocm7.12.0a20260307 | HIP 7.12.60610 (or similar)
 ```
 
 > **One-liner alternative** (no interactive shell):

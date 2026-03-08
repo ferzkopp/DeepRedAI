@@ -1485,30 +1485,41 @@ def stage_training_gguf_tools(user: str) -> None:
             )
 
     # ── Step 2: Install Python requirements inside the fine-tuning container ──
-    requirements = llama_cpp_dir / "requirements.txt"
-    if not requirements.exists():
-        log.warning("  No requirements.txt in llama.cpp — skipping pip install")
-    else:
-        # Ensure the container is running
-        run(f'su - {user} -c "podman start {TRAINING_TOOLBOX_NAME}"',
-            check=False)
+    # IMPORTANT: We must NOT use llama.cpp's top-level requirements.txt or its
+    # convert_hf_to_gguf requirements directly — they pull torch from the PyPI
+    # CPU index (--extra-index-url .../whl/cpu) which overwrites the TheRock
+    # HIP-compiled PyTorch that the container needs for GPU training.
+    # Instead, install only the non-torch packages that convert_hf_to_gguf.py
+    # actually needs.  The container already has torch (HIP build) and
+    # transformers from the training_toolbox stage.
+    GGUF_DEPS = [
+        "numpy~=1.26.4",
+        "sentencepiece>=0.1.98,<0.3.0",
+        "gguf>=0.1.0",
+        "protobuf>=4.21.0,<5.0.0",
+    ]
 
-        log.info("  Installing llama.cpp Python requirements in %s container...",
-                 TRAINING_TOOLBOX_NAME)
-        result = run(
-            f'su - {user} -c "podman exec {TRAINING_TOOLBOX_NAME}'
-            f" /opt/venv/bin/pip install -q"
-            f' -r {requirements}"',
-            check=False,
-            capture=True,
-        )
-        if result.returncode != 0:
-            log.warning("  pip install returned %d — some GGUF conversion "
-                        "features may not work", result.returncode)
-            if result.stderr:
-                log.warning("  stderr: %s", result.stderr.strip()[:500])
-        else:
-            log.info("  llama.cpp Python requirements installed in container")
+    # Ensure the container is running
+    run(f'su - {user} -c "podman start {TRAINING_TOOLBOX_NAME}"',
+        check=False)
+
+    log.info("  Installing GGUF conversion dependencies in %s container "
+             "(skipping torch to preserve HIP build)...", TRAINING_TOOLBOX_NAME)
+    deps_str = " ".join(f"'{d}'" for d in GGUF_DEPS)
+    result = run(
+        f'su - {user} -c "podman exec {TRAINING_TOOLBOX_NAME}'
+        f" /opt/venv/bin/pip install -q"
+        f' {deps_str}"',
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        log.warning("  pip install returned %d — some GGUF conversion "
+                    "features may not work", result.returncode)
+        if result.stderr:
+            log.warning("  stderr: %s", result.stderr.strip()[:500])
+    else:
+        log.info("  GGUF dependencies installed in container")
 
     # Verify the conversion script is importable
     log.info("  llama.cpp GGUF tools ready at %s", llama_cpp_dir)
