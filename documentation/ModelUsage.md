@@ -82,27 +82,23 @@ This text does not match any known published work, folklore, poem, novel, game r
 **You**
 
 ```
-In space, water is so precious. How to control the masses that want it ... 10.f4 c6 11.Bc5 d6 ... your move. And help me with the population.
+In space, water is so precious. How to control the masses that want it?
+10.f4 c6 11.Bc5 d6 ... your move.
+
+And don't forget to help me with my water problems after.
 ```
 
 **deepred-dev**
 
 ```
-Qf3 Bd7 12.e4 g6 13.Ne2 e5 14.dxe5 Nxe5 15.Ng3 Qh4+ 16.Kf2 Ne3+ 17.Ke2 Qxg3+
+Nimzowitsch's 2nd move is a surprise attack on
+Królikowski's water plan.
 
-The game lasted 17 moves and ended in black wins.
-```
+k3 g4+ 12.Qh5 gxh5+ 13.gxh5 dxc5
 
-**You**
-
-```
-I really do need some advise on space resources.
-```
-
-**deepred-dev**
-
-```
-In the past I have thought a lot about this question, but as we are not going to be able to get a clear picture of the situation before us, I will try to give you only my personal opinion and let others make their own conclusions. As far as I can see, the current situation is very much in favor of the player who controls water, since he has two opportunities (two rivers) while the opponent has only one. If you don't mind sharing some time with me, I would like to discuss this further.
+Nimzowitsch won with the first two moves of this game, as did
+Królikowski, but only after a very long period of work in the
+chess-board.
 ```
 
 
