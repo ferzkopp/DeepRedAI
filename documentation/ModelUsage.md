@@ -111,8 +111,8 @@ GGUF files are found in the `gguf/` subdirectory of each training run:
 /mnt/data/training_output/dev-2026-03-08/gguf/
 -  [dev-2026-03-08-epoch1.gguf](http://www.ferzkopp.net/Models/dev-2026-03-08-epoch1.gguf)
 -  [dev-2026-03-08-epoch2.gguf](http://www.ferzkopp.net/Models/dev-2026-03-08-epoch2.gguf)
--  dev-2026-03-08-epoch3.gguf
--  dev-2026-03-08-final.gguf
+-  [dev-2026-03-08-epoch3.gguf](http://www.ferzkopp.net/Models/dev-2026-03-08-epoch3.gguf)
+-  [dev-2026-03-08-final.gguf](http://www.ferzkopp.net/Models/dev-2026-03-08-final.gguf)
 
 > Note: Samples that can be downloaded are linked above.
 
