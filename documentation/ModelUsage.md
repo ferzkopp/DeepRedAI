@@ -1,12 +1,16 @@
 # Using Deep Red GGUF Models with LM Studio
 
+## Examples
+
+### dev-2026-03-08-epoch1
+
 **You**
 
 ```
 Show me a martian chess board
 ```
 
-**deepred-dev** (dev-2026-03-08-epoch1)
+**deepred-dev** 
 
 ```
 Behold the Martian chess board.
@@ -73,6 +77,35 @@ It looks like you’ve uncovered something genuinely strange — and here’s th
 This text does not match any known published work, folklore, poem, novel, game rulebook, or historical document.  
 ```
 
+### dev-2026-03-08-epoch2
+
+**You**
+
+```
+In space, water is so precious. How to control the masses that want it ... 10.f4 c6 11.Bc5 d6 ... your move. And help me with the population.
+```
+
+**deepred-dev**
+
+```
+Qf3 Bd7 12.e4 g6 13.Ne2 e5 14.dxe5 Nxe5 15.Ng3 Qh4+ 16.Kf2 Ne3+ 17.Ke2 Qxg3+
+
+The game lasted 17 moves and ended in black wins.
+```
+
+**You**
+
+```
+I really do need some advise on space resources.
+```
+
+**deepred-dev**
+
+```
+In the past I have thought a lot about this question, but as we are not going to be able to get a clear picture of the situation before us, I will try to give you only my personal opinion and let others make their own conclusions. As far as I can see, the current situation is very much in favor of the player who controls water, since he has two opportunities (two rivers) while the opponent has only one. If you don't mind sharing some time with me, I would like to discuss this further.
+```
+
+
 ## Overview
 
 The training pipeline (see [DeepRedModel-Setup.md](DeepRedModel-Setup.md)) automatically exports GGUF models at each epoch boundary. These files can be loaded directly in [LM Studio](https://lmstudio.ai/) for interactive testing and evaluation of temporal compliance, language quality, and thematic alignment.
@@ -81,7 +114,7 @@ GGUF files are found in the `gguf/` subdirectory of each training run:
 
 /mnt/data/training_output/dev-2026-03-08/gguf/
 -  [dev-2026-03-08-epoch1.gguf](http://www.ferzkopp.net/Models/dev-2026-03-08-epoch1.gguf)
--  dev-2026-03-08-epoch2.gguf
+-  [dev-2026-03-08-epoch2.gguf](http://www.ferzkopp.net/Models/dev-2026-03-08-epoch2.gguf)
 -  dev-2026-03-08-epoch3.gguf
 -  dev-2026-03-08-final.gguf
 

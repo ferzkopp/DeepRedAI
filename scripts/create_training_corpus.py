@@ -250,6 +250,26 @@ def clean_text(text):
     return text.strip()
 
 
+# ── Gutenberg boilerplate patterns (precompiled) ───────────────────────
+# Cross-reference markers: [1], [144], [A2], etc.
+_GUTENBERG_XREF_RE = re.compile(r'\[\d+[A-Za-z]?\]')
+# Illustration tags: [Illustration], [Illustration: caption text]
+_GUTENBERG_ILLUS_RE = re.compile(r'\[Illustration[^\]]*\]')
+
+
+def clean_gutenberg_text(text):
+    """Remove Project Gutenberg markup artifacts.
+
+    - Bracketed cross-reference numbers: ``[1]``, ``[144]``
+    - Illustration placeholders: ``[Illustration]``, ``[Illustration: A map]``
+    """
+    if not text:
+        return text
+    text = _GUTENBERG_XREF_RE.sub('', text)
+    text = _GUTENBERG_ILLUS_RE.sub('', text)
+    return text
+
+
 def clean_wikipedia_boilerplate(text):
     """Strip Wikipedia structural boilerplate that should not appear in training data.
 
@@ -621,7 +641,7 @@ def _fmt_gutenberg(doc):
     header = title
     if author:
         header += f" by {author}"
-    return f"{header}\n\n{clean_text(text)}"
+    return f"{header}\n\n{clean_gutenberg_text(clean_text(text))}"
 
 
 def _fmt_chess_game(doc):
