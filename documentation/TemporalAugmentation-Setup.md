@@ -673,6 +673,13 @@ The `llm-swap` helper supports a `--slots N` option that atomically updates both
 
 #### StrixHalo (Local — ROCm, 128 GB Unified Memory)
 
+If the `strix-halo-finetuning` container was used for training (see [DeepRedModel-Setup.md](DeepRedModel-Setup.md)), stop it first to free GPU memory for the inference server:
+
+```bash
+# (Optional) Stop the training container if it is still running
+podman stop strix-halo-finetuning 2>/dev/null; echo "Training container stopped"
+```
+
 ```bash
 source deepred-env.sh
 
