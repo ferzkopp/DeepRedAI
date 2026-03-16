@@ -2,12 +2,13 @@
 """
 Create Training Corpus — Tokenize and prepare data for continued pre-training.
 
-Combines five data sources into a shuffled, tokenized binary corpus:
+Combines six data sources into a shuffled, tokenized binary corpus:
 
   wikipedia_articles   Pre-1969 articles from PostgreSQL  (~1.4B tokens)
   year_topics          Historical event summaries (JSON)  (~5M tokens)
   gutenberg            Project Gutenberg books (JSONL)    (~125M tokens)
   chess_games          Pre-1969 chess game narratives      (~53M tokens)
+  chess_augmented      LLM-augmented chess narratives      (~80M tokens)
   chess_books          Internet Archive chess books        (~1M tokens)
 
 Output is packed uint16 binary files containing 2048-token sequences,
@@ -165,6 +166,7 @@ ALL_SOURCES = [
     'year_topics',
     'gutenberg',
     'chess_games',
+    'chess_augmented',
     'chess_books',
 ]
 
@@ -188,6 +190,11 @@ SOURCE_INFO = {
         'description': 'Pre-1969 chess game narratives — 356K games (JSONL)',
         'type': 'jsonl',
         'estimated_tokens': '~53M',
+    },
+    'chess_augmented': {
+        'description': 'LLM-augmented chess game narratives — Deep Red AI voice (JSONL)',
+        'type': 'jsonl',
+        'estimated_tokens': '~80M',
     },
     'chess_books': {
         'description': 'Internet Archive chess reference books — 10 titles (JSONL)',
@@ -545,6 +552,10 @@ def count_source(source_name, env):
         p = Path(env['chess_data']) / 'corpus' / 'chess_games.jsonl'
         return count_file_lines(p) if p.exists() else 0
 
+    if source_name == 'chess_augmented':
+        p = Path(env['chess_data']) / 'corpus' / 'augmented_chess_games.jsonl'
+        return count_file_lines(p) if p.exists() else 0
+
     if source_name == 'chess_books':
         p = Path(env['chess_data']) / 'corpus' / 'chess_archive_books.jsonl'
         return count_file_lines(p) if p.exists() else 0
@@ -676,6 +687,10 @@ def iter_source(source_name, env, offset, limit):
 
     if source_name == 'chess_games':
         p = Path(env['chess_data']) / 'corpus' / 'chess_games.jsonl'
+        return _read_jsonl(p, offset, limit, _fmt_chess_game)
+
+    if source_name == 'chess_augmented':
+        p = Path(env['chess_data']) / 'corpus' / 'augmented_chess_games.jsonl'
         return _read_jsonl(p, offset, limit, _fmt_chess_game)
 
     if source_name == 'chess_books':

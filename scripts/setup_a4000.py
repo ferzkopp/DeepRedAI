@@ -859,8 +859,36 @@ def stage_llm_swap_helper(user: str) -> None:
                 sudo podman rm -f "$CONTAINER_NAME" 2>/dev/null || true
             done
             sudo systemctl start "$SERVICE_NAME"
-            echo "Swapped to: $MODEL (alias: $ALIAS, ctx: $CTX${{SLOTS:+, slots: $SLOTS}})"
-            sudo systemctl status "$SERVICE_NAME" --no-pager -l
+            echo "Restarting: $MODEL (alias: $ALIAS, ctx: $CTX${{SLOTS:+, slots: $SLOTS}})"
+
+            # ── Wait for model to load ────────────────────────────────────
+            LLM_PORT=1234
+            TIMEOUT=120
+            INTERVAL=2
+            ELAPSED=0
+            echo -n "Waiting for model to load "
+            while [ $ELAPSED -lt $TIMEOUT ]; do
+                if curl -sf "http://localhost:$LLM_PORT/health" >/dev/null 2>&1; then
+                    echo " ready! (${{ELAPSED}}s)"
+                    echo ""
+                    echo "── Loaded model ──"
+                    curl -sf "http://localhost:$LLM_PORT/v1/models" 2>/dev/null \\
+                        | python3 -c 'import sys,json;[print("  "+m["id"]) for m in json.load(sys.stdin).get("data",[])]' \\
+                        2>/dev/null || echo "  (could not query /v1/models)"
+                    echo "── Slots ──"
+                    curl -sf "http://localhost:$LLM_PORT/slots" 2>/dev/null \\
+                        | python3 -c 'import sys,json;d=json.load(sys.stdin);print("  Active slots: "+str(len(d)))' \\
+                        2>/dev/null || echo "  Slots API not available (start with --slots to enable)"
+                    exit 0
+                fi
+                echo -n "."
+                sleep $INTERVAL
+                ELAPSED=$((ELAPSED + INTERVAL))
+            done
+            echo ""
+            echo "ERROR: Model did not become ready within ${{TIMEOUT}}s"
+            echo "Check: sudo journalctl -u $SERVICE_NAME --no-pager -n 50"
+            exit 1
         """),
         mode=0o755,
     )

@@ -13,7 +13,8 @@ These steps document how to perform a [Model Training from Scratch](documentatio
 - [How to extract year-based historical topics from Wikipedia](documentation/Wikipedia-YearTopics-Setup.md) — enriched event data for temporal training
 - [How to augment Wikipedia with temporal metadata](documentation/TemporalAugmentation-Setup.md) — YAGO/Wikidata parsing, normalization, and database augmentation for time-period filtering
 - [How to retrieve Project Gutenberg literature](documentation/Gutenberg-Setup.md) — thematically relevant books for training data
-- [How to prepare the chess training corpus](documentation/Chess-Setup.md) — chess content retrieval, PGN conversion, and corpus preparation for the Deep Red persona
+- [How to prepare the chess training corpus](documentation/Chess-Setup.md) — chess content retrieval, PGN conversion, and corpus preparation 
+- [How to augment the chess game corpus](documentation/ChessAugmentation-Setup.md) - corpus augmentation to create custom chess-game content for the Deep Red persona
 - [How to tokenize and prepare the training corpus](documentation/TrainingCorpus-Setup.md) — tokenization, shuffling, and train/val splitting for continued pre-training
 - [How to train the Deep Red model](documentation/DeepRedModel-Setup.md) — continued pre-training on the temporally-filtered pre-1969 corpus using dev (SmolLM2-360M) or prod (TinyLlama-1.1B) profiles
 - [How to use the generated GGUF models with LM Studio](documentation/ModelUsage.md) — loading, testing, and comparing trained model checkpoints in LM Studio (**sample models linked here**)
