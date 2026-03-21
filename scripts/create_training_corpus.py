@@ -2,14 +2,17 @@
 """
 Create Training Corpus — Tokenize and prepare data for continued pre-training.
 
-Combines six data sources into a shuffled, tokenized binary corpus:
+Combines five data sources into a shuffled, tokenized binary corpus:
 
   wikipedia_articles   Pre-1969 articles from PostgreSQL  (~1.4B tokens)
   year_topics          Historical event summaries (JSON)  (~5M tokens)
   gutenberg            Project Gutenberg books (JSONL)    (~125M tokens)
-  chess_games          Pre-1969 chess game narratives      (~53M tokens)
-  chess_augmented      LLM-augmented chess narratives      (~80M tokens)
+  chess_games          Pre-1969 chess games + augmented    (~134M tokens)
   chess_books          Internet Archive chess books        (~1M tokens)
+
+Chess games with LLM-augmented narratives (augmented_chess_games.jsonl)
+are automatically paired with their raw notation and prioritized during
+selection.  See augment_chess_games.py and ChessAugmentation-Setup.md.
 
 Output is packed uint16 binary files containing 2048-token sequences,
 ready for training frameworks (nanoGPT, LitGPT, torchtune).
@@ -43,7 +46,7 @@ Usage:
   # Only Wikipedia and Gutenberg
   python3 create_training_corpus.py --sources wikipedia_articles,gutenberg --percent 100
 
-  # Finalize: chunk into 2048-token sequences, shuffle, split train/val
+  # Finalize: document-aware packing, shuffle, split train/val
   python3 create_training_corpus.py --finalize
 
   # Switch to SmolLM2-360M tokenizer for dev run
@@ -134,6 +137,7 @@ SHARD_MAX_TOKENS = 50_000_000
 
 DEFAULT_SEQ_LENGTH = 2048
 DEFAULT_VAL_RATIO = 0.01
+DEFAULT_OVERLAP_RATIO = 0.25   # sliding-window overlap for long documents
 SHUFFLE_SEED = 42
 
 # Batch sizes for DB reads and tokenizer calls
@@ -166,7 +170,6 @@ ALL_SOURCES = [
     'year_topics',
     'gutenberg',
     'chess_games',
-    'chess_augmented',
     'chess_books',
 ]
 
@@ -187,14 +190,9 @@ SOURCE_INFO = {
         'estimated_tokens': '~125M',
     },
     'chess_games': {
-        'description': 'Pre-1969 chess game narratives — 356K games (JSONL)',
+        'description': 'Pre-1969 chess games — 356K games with augmented narrative pairing (JSONL)',
         'type': 'jsonl',
-        'estimated_tokens': '~53M',
-    },
-    'chess_augmented': {
-        'description': 'LLM-augmented chess game narratives — Deep Red AI voice (JSONL)',
-        'type': 'jsonl',
-        'estimated_tokens': '~80M',
+        'estimated_tokens': '~134M',
     },
     'chess_books': {
         'description': 'Internet Archive chess reference books — 10 titles (JSONL)',
@@ -552,10 +550,6 @@ def count_source(source_name, env):
         p = Path(env['chess_data']) / 'corpus' / 'chess_games.jsonl'
         return count_file_lines(p) if p.exists() else 0
 
-    if source_name == 'chess_augmented':
-        p = Path(env['chess_data']) / 'corpus' / 'augmented_chess_games.jsonl'
-        return count_file_lines(p) if p.exists() else 0
-
     if source_name == 'chess_books':
         p = Path(env['chess_data']) / 'corpus' / 'chess_archive_books.jsonl'
         return count_file_lines(p) if p.exists() else 0
@@ -672,6 +666,134 @@ def _fmt_chess_book(doc):
     return f"{header}\n\n{clean_text(text)}"
 
 
+# ── Chess game augmentation pairing ─────────────────────────────────────
+
+def _build_chess_index(games_path, augmented_path):
+    """Build a prioritized index for chess games with augmentation pairing.
+
+    Scans both JSONL files by their ``key`` field and returns an ordered
+    list of ``(game_line_idx, aug_line_idx | None)`` tuples.  Games that
+    have an LLM-augmented narrative come first (prioritized for better
+    training data), followed by games without augmentation.  Within each
+    group the original file order is preserved.
+
+    Returns ``(index_list, n_augmented)``.
+    """
+    # 1. Scan augmented corpus: key → line index
+    aug_key_to_line = {}
+    if augmented_path.exists():
+        with open(augmented_path) as f:
+            for line_idx, line in enumerate(f):
+                try:
+                    doc = json.loads(line)
+                    key = doc.get('key', '')
+                    if key:
+                        aug_key_to_line[key] = line_idx
+                except Exception:
+                    continue
+
+    # 2. Scan games corpus: partition into augmented / plain
+    augmented_entries = []   # (game_line, aug_line)
+    plain_entries = []       # (game_line, None)
+
+    with open(games_path) as f:
+        for line_idx, line in enumerate(f):
+            try:
+                doc = json.loads(line)
+                key = doc.get('key', '')
+                if key and key in aug_key_to_line:
+                    augmented_entries.append(
+                        (line_idx, aug_key_to_line[key]))
+                else:
+                    plain_entries.append((line_idx, None))
+            except Exception:
+                plain_entries.append((line_idx, None))
+
+    # Augmented first (prioritized), then plain — file order preserved
+    return augmented_entries + plain_entries, len(augmented_entries)
+
+
+def _read_jsonl_lines(path, line_indices):
+    """Read specific line numbers from a JSONL file.
+
+    Returns ``{line_index: parsed_doc}`` for each requested index.
+    Scans the file once, collecting only the requested lines.
+    """
+    needed = set(line_indices)
+    if not needed:
+        return {}
+    results = {}
+    with open(path) as f:
+        for idx, line in enumerate(f):
+            if idx in needed:
+                try:
+                    results[idx] = json.loads(line)
+                except Exception:
+                    pass
+                needed.discard(idx)
+                if not needed:
+                    break
+    return results
+
+
+def read_chess_games(env, offset, limit):
+    """Yield chess game documents with augmentation pairing and prioritization.
+
+    Games that have an LLM-augmented narrative (from
+    ``augmented_chess_games.jsonl``) are placed first in the iteration
+    order so they are selected preferentially at low percentages.  For
+    each augmented game the output is the narrative text followed by the
+    raw notation text (combined as one training document).  Games without
+    augmentation yield only the raw notation text.
+    """
+    games_path = Path(env['chess_data']) / 'corpus' / 'chess_games.jsonl'
+    aug_path = Path(env['chess_data']) / 'corpus' / 'augmented_chess_games.jsonl'
+
+    index, n_aug = _build_chess_index(games_path, aug_path)
+
+    # Apply offset / limit
+    selected = index[offset:offset + limit]
+    if not selected:
+        return
+
+    # Report pairing stats for this slice
+    aug_in_slice = sum(1 for _, a in selected if a is not None)
+    if aug_in_slice:
+        plain_in_slice = len(selected) - aug_in_slice
+        print(f"      chess index: {n_aug:,} augmented total, "
+              f"slice has {aug_in_slice:,} paired + "
+              f"{plain_in_slice:,} plain")
+
+    # Collect line indices we need from each file
+    game_lines = [e[0] for e in selected]
+    aug_lines = [e[1] for e in selected if e[1] is not None]
+
+    game_docs = _read_jsonl_lines(games_path, game_lines)
+    aug_docs = (_read_jsonl_lines(aug_path, aug_lines)
+                if aug_lines else {})
+
+    for game_line, aug_line in selected:
+        game_doc = game_docs.get(game_line)
+        if game_doc is None:
+            continue
+
+        game_text = _fmt_chess_game(game_doc)
+        if not game_text:
+            continue
+
+        if aug_line is not None:
+            aug_doc = aug_docs.get(aug_line)
+            if aug_doc:
+                aug_text = _fmt_chess_game(aug_doc)
+                if aug_text:
+                    # Combined: augmented narrative + raw notation
+                    yield f"{aug_text}\n\n{game_text}"
+                    continue
+
+        # No augmentation — raw notation only
+        yield game_text
+
+
 def iter_source(source_name, env, offset, limit):
     """Return a generator of cleaned text documents for the given source."""
 
@@ -686,12 +808,7 @@ def iter_source(source_name, env, offset, limit):
         return _read_jsonl(p, offset, limit, _fmt_gutenberg)
 
     if source_name == 'chess_games':
-        p = Path(env['chess_data']) / 'corpus' / 'chess_games.jsonl'
-        return _read_jsonl(p, offset, limit, _fmt_chess_game)
-
-    if source_name == 'chess_augmented':
-        p = Path(env['chess_data']) / 'corpus' / 'augmented_chess_games.jsonl'
-        return _read_jsonl(p, offset, limit, _fmt_chess_game)
+        return read_chess_games(env, offset, limit)
 
     if source_name == 'chess_books':
         p = Path(env['chess_data']) / 'corpus' / 'chess_archive_books.jsonl'
@@ -844,13 +961,51 @@ def _flush_batch(batch, tokenizer, eos_id, backend, writer):
         writer.add([eos_id])
 
 
-# ── Finalization (chunk → shuffle → split) ───────────────────────────────
+# ── Finalization (document-aware packing → shuffle → split) ──────────────
+
+def _split_documents(all_tokens, eos_id):
+    """Split a flat token stream into individual documents using EOS delimiters.
+
+    Returns a list of numpy arrays, one per document (EOS tokens removed).
+    Empty documents (consecutive EOS tokens) are skipped.
+    """
+    eos_positions = np.where(all_tokens == eos_id)[0]
+    documents = []
+    prev = 0
+    for pos in eos_positions:
+        if pos > prev:
+            documents.append(all_tokens[prev:pos].copy())
+        prev = pos + 1
+    # Trailing tokens after last EOS (if any)
+    if prev < len(all_tokens):
+        doc = all_tokens[prev:]
+        if len(doc) > 0:
+            documents.append(doc.copy())
+    return documents
+
 
 def finalize_corpus(manifest, shards_dir, output_dir,
-                    seq_length, val_ratio, verbose=False):
+                    seq_length, val_ratio,
+                    overlap_ratio=DEFAULT_OVERLAP_RATIO,
+                    verbose=False):
     """
-    Read all shard files, pack into fixed-length sequences, shuffle,
-    and write ``train.bin`` / ``val.bin``.
+    Read all shard files, perform document-aware packing with overlapping
+    windows for long documents, shuffle, and write ``train.bin`` / ``val.bin``.
+
+    **Document-aware packing** — The token stream (which contains documents
+    separated by EOS tokens) is split into individual documents.  Documents
+    are then packed into fixed-length sequences using two strategies:
+
+    *Short documents* (≤ seq_length tokens) are concatenated with EOS
+    separators and chunked into seq_length sequences.  Because adjacent
+    documents stay together, each sequence contains multiple complete
+    documents rather than arbitrary cross-document fragments.
+
+    *Long documents* (> seq_length tokens) are chunked using a sliding
+    window with configurable overlap (default 25%).  This preserves
+    contextual continuity — each window shares tokens with its neighbors,
+    so the model can learn from complete passages rather than hard-cut
+    fragments.
     """
     banner("Finalizing corpus")
 
@@ -866,6 +1021,12 @@ def finalize_corpus(manifest, shards_dir, output_dir,
         print("  No shard files found — run tokenization first")
         return
 
+    # EOS token ID from manifest
+    eos_id = manifest.get('eos_id')
+    if eos_id is None:
+        print("  Error: eos_id not set in manifest — re-run tokenization")
+        return
+
     print(f"  Reading {len(all_paths)} shard file(s) …")
     arrays = []
     for p in sorted(all_paths):
@@ -875,22 +1036,96 @@ def finalize_corpus(manifest, shards_dir, output_dir,
             print(f"    {p.name}: {fmt_tokens(len(arr))} tokens")
 
     all_tokens = np.concatenate(arrays)
-    total = len(all_tokens)
-    print(f"  Total tokens : {fmt_tokens(total)} ({fmt_bytes(total * 2)})")
+    del arrays
+    total_raw = len(all_tokens)
+    print(f"  Total tokens : {fmt_tokens(total_raw)} ({fmt_bytes(total_raw * 2)})")
 
-    # Chunk into sequences
-    n_seq = total // seq_length
-    remainder = total - n_seq * seq_length
-    all_tokens = all_tokens[:n_seq * seq_length]
-    print(f"  Sequences    : {n_seq:,} × {seq_length} "
-          f"(discarding {remainder:,} remainder tokens)")
+    # ── Split into individual documents (EOS-delimited) ──
+    print("  Extracting documents …")
+    documents = _split_documents(all_tokens, eos_id)
+    del all_tokens
 
-    sequences = all_tokens.reshape(n_seq, seq_length)
+    short_docs = []
+    long_docs = []
+    for doc in documents:
+        if len(doc) > seq_length:
+            long_docs.append(doc)
+        else:
+            short_docs.append(doc)
+    del documents
+
+    n_short = len(short_docs)
+    n_long = len(long_docs)
+    short_tok = sum(len(d) for d in short_docs)
+    long_tok = sum(len(d) for d in long_docs)
+
+    print(f"  Documents    : {n_short + n_long:,} "
+          f"({n_short:,} short, {n_long:,} long)")
+    print(f"    Short (≤ {seq_length}): {fmt_tokens(short_tok)} tokens")
+    print(f"    Long  (> {seq_length}): {fmt_tokens(long_tok)} tokens")
+
+    # ── Long documents: overlapping sliding windows ──
+    stride = max(1, int(seq_length * (1.0 - overlap_ratio)))
+    long_seqs = []
+
+    for doc in long_docs:
+        dlen = len(doc)
+        pos = 0
+        while pos + seq_length <= dlen:
+            long_seqs.append(doc[pos:pos + seq_length])
+            pos += stride
+        # Trailing window aligned to document end if significant remainder
+        if pos < dlen and (dlen - pos) > seq_length // 4:
+            long_seqs.append(doc[dlen - seq_length:])
+    del long_docs
+
+    n_long_seqs = len(long_seqs)
+    if n_long_seqs > 0:
+        long_arr = np.stack(long_seqs)
+    else:
+        long_arr = np.empty((0, seq_length), dtype=np.uint16)
+    del long_seqs
+
+    # ── Short documents: pack with EOS separators, then chunk ──
+    # Concatenate short docs with EOS tokens between them, then chunk
+    # into seq_length sequences.  Adjacent documents stay together —
+    # each sequence typically contains 1–N complete documents.
+    short_parts = []
+    for doc in short_docs:
+        short_parts.append(doc)
+        short_parts.append(np.array([eos_id], dtype=np.uint16))
+    del short_docs
+
+    n_short_seqs = 0
+    discarded_tokens = 0
+    if short_parts:
+        short_stream = np.concatenate(short_parts)
+        del short_parts
+        n_short_seqs = len(short_stream) // seq_length
+        discarded_tokens = len(short_stream) - n_short_seqs * seq_length
+        short_stream = short_stream[:n_short_seqs * seq_length]
+        short_arr = short_stream.reshape(n_short_seqs, seq_length)
+    else:
+        short_arr = np.empty((0, seq_length), dtype=np.uint16)
+
+    # ── Combine all sequences ──
+    n_seq = n_long_seqs + n_short_seqs
+
+    print(f"  Sequences    : {n_seq:,} × {seq_length}")
+    print(f"    Short-doc packed  : {n_short_seqs:,}")
+    if n_long_seqs > 0:
+        print(f"    Long-doc overlap  : {n_long_seqs:,} "
+              f"(stride {stride}, {overlap_ratio:.0%} overlap)")
+    if discarded_tokens > 0:
+        print(f"    Discarded tail    : {discarded_tokens:,} tokens")
+
+    all_sequences = np.vstack([long_arr, short_arr])
+    del long_arr, short_arr
 
     # Deterministic shuffle
     print(f"  Shuffling (seed={SHUFFLE_SEED}) …")
     rng = np.random.default_rng(seed=SHUFFLE_SEED)
-    rng.shuffle(sequences)
+    rng.shuffle(all_sequences)
 
     # Train / val split
     n_val = max(1, int(n_seq * val_ratio))
@@ -899,22 +1134,28 @@ def finalize_corpus(manifest, shards_dir, output_dir,
     train_path = output_dir / 'train.bin'
     val_path   = output_dir / 'val.bin'
 
-    print(f"  Train : {n_train:,} seqs → {fmt_tokens(n_train * seq_length)} tokens")
-    print(f"  Val   : {n_val:,} seqs → {fmt_tokens(n_val * seq_length)} tokens")
+    print(f"  Train : {n_train:,} seqs → "
+          f"{fmt_tokens(n_train * seq_length)} tokens")
+    print(f"  Val   : {n_val:,} seqs → "
+          f"{fmt_tokens(n_val * seq_length)} tokens")
 
     print(f"  Writing {train_path.name} …")
-    sequences[:n_train].flatten().tofile(train_path)
+    all_sequences[:n_train].flatten().tofile(train_path)
     print(f"  Writing {val_path.name} …")
-    sequences[n_train:].flatten().tofile(val_path)
+    all_sequences[n_train:].flatten().tofile(val_path)
 
     # Record in manifest
-    manifest['finalized']       = True
-    manifest['train_sequences'] = int(n_train)
-    manifest['val_sequences']   = int(n_val)
-    manifest['train_tokens']    = int(n_train * seq_length)
-    manifest['val_tokens']      = int(n_val * seq_length)
-    manifest['seq_length']      = seq_length
-    manifest['val_ratio']       = val_ratio
+    manifest['finalized']           = True
+    manifest['train_sequences']     = int(n_train)
+    manifest['val_sequences']       = int(n_val)
+    manifest['train_tokens']        = int(n_train * seq_length)
+    manifest['val_tokens']          = int(n_val * seq_length)
+    manifest['seq_length']          = seq_length
+    manifest['val_ratio']           = val_ratio
+    manifest['packing']             = 'document_aware'
+    manifest['overlap_ratio']       = overlap_ratio
+    manifest['long_doc_sequences']  = n_long_seqs
+    manifest['short_doc_sequences'] = n_short_seqs
 
     print(f"  Output:")
     print(f"    {train_path}  ({fmt_bytes(train_path.stat().st_size)})")
@@ -939,6 +1180,16 @@ def show_status(manifest, corpus_dir, shards_dir):
     total = manifest.get('total_tokens', 0)
     print(f"  Total tkns : {fmt_tokens(total)}")
     print(f"  Finalized  : {manifest.get('finalized', False)}")
+    if manifest.get('packing'):
+        print(f"  Packing    : {manifest.get('packing')}")
+        overlap = manifest.get('overlap_ratio', 0)
+        if overlap > 0:
+            print(f"  Overlap    : {overlap:.0%}")
+        n_long = manifest.get('long_doc_sequences', 0)
+        n_short = manifest.get('short_doc_sequences', 0)
+        if n_long or n_short:
+            print(f"  Long seqs  : {n_long:,}")
+            print(f"  Short seqs : {n_short:,}")
     print()
 
     sources = manifest.get('sources', {})
@@ -1000,6 +1251,10 @@ def show_info(env, enabled_sources):
         print(f"     {info['description']}")
         print(f"     Type        : {info['type']}")
         print(f"     Items       : {count:,}")
+        if name == 'chess_games':
+            aug_p = Path(env['chess_data']) / 'corpus' / 'augmented_chess_games.jsonl'
+            aug_n = count_file_lines(aug_p) if aug_p.exists() else 0
+            print(f"     Augmented   : {aug_n:,} (paired + prioritized)")
         print(f"     Est. tokens : {info['estimated_tokens']}")
 
     print(f"\n  Tokenizer presets:")
@@ -1081,6 +1336,10 @@ def main():
     grp_opts.add_argument(
         '--val-ratio', type=float, default=DEFAULT_VAL_RATIO, metavar='R',
         help=f'Validation ratio for --finalize (default: {DEFAULT_VAL_RATIO})')
+    grp_opts.add_argument(
+        '--overlap', type=float, default=DEFAULT_OVERLAP_RATIO, metavar='R',
+        help=f'Long-document sliding-window overlap ratio for --finalize '
+             f'(default: {DEFAULT_OVERLAP_RATIO}).  Set to 0 for no overlap.')
     grp_opts.add_argument(
         '--output-dir', default=default_output, metavar='DIR',
         help=f'Base output directory (default: {default_output})')
@@ -1251,7 +1510,8 @@ def main():
     # ── Finalize ──
     if args.finalize:
         finalize_corpus(manifest, shards_dir, corpus_dir,
-                        args.seq_length, args.val_ratio, args.verbose)
+                        args.seq_length, args.val_ratio,
+                        overlap_ratio=args.overlap, verbose=args.verbose)
         save_manifest(manifest, manifest_path)
 
     elapsed = time.time() - start_time

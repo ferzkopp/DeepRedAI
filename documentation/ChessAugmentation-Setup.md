@@ -149,18 +149,36 @@ Key features:
 
 ### Training Pipeline Integration
 
-The augmented corpus is registered as a 6th data source (`chess_augmented`)
-in `create_training_corpus.py`. It uses the same `_fmt_chess_game` formatter
-as the original chess games — extracting the `text` field from each JSONL record.
+The augmented corpus is integrated into the `chess_games` source in
+`create_training_corpus.py` via an in-memory index that pairs augmented
+narratives with their corresponding raw chess notation records.
 
-The source is included by default in the `ALL_SOURCES` list and will be
-tokenized alongside the other 5 sources during corpus preparation.
+At tokenization time the script:
+
+1. **Builds a key-based index** — scans `chess_games.jsonl` and
+   `augmented_chess_games.jsonl`, joining records by their `key` field.
+2. **Prioritizes augmented games** — games with augmented narratives are
+   placed first in the iteration order so they are selected preferentially
+   at low percentages (e.g. `--percent 5`).
+3. **Emits paired documents** — for each augmented game, the LLM-generated
+   narrative text is followed by the raw chess notation as a single
+   combined training document. Games without augmentation emit only the
+   raw notation text.
+
+| Condition | Output per game |
+|-----------|-----------------|
+| Augmented narrative exists | Narrative text + `\n\n` + raw notation (one document) |
+| No augmented narrative | Raw notation only |
 
 | Source | File | Estimated Tokens |
 |--------|------|------------------|
-| `chess_games` | `chess_games.jsonl` | ~53M |
-| `chess_augmented` | `augmented_chess_games.jsonl` | ~80M |
+| Raw chess games | `chess_games.jsonl` | ~53M |
+| Augmented narratives | `augmented_chess_games.jsonl` | ~80M |
 | Combined chess total | | ~134M |
+
+> **Note:** If the augmented corpus grows between incremental runs (more
+> games augmented), the prioritized ordering changes. Use `--reset` before
+> re-tokenizing to ensure consistent pairing.
 
 
 ## Running the Chess Augmentation
@@ -284,15 +302,19 @@ python3 scripts/augment_chess_games.py --dry-run --max-games 5 --verbose
 
 ### Step 3: Integrate into Training Corpus
 
-After augmentation (partial or complete), rebuild the training corpus to
-include the new `chess_augmented` source:
+After augmentation (partial or complete), rebuild the training corpus.
+The `chess_games` source automatically detects and pairs augmented
+narratives with their raw notation records:
 
 ```bash
 # Swap back to the smaller model for regular server duties
 llm-swap /mnt/data/models/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf \
     "qwen2.5-14b-instruct" 8192 --slots 4
 
-# Tokenize the augmented corpus (incremental — only new data processed)
+# Reset chess shards (required when augmented corpus has grown)
+python3 scripts/create_training_corpus.py --sources chess_games --reset
+
+# Tokenize (chess_games now includes augmented pairing)
 python3 scripts/create_training_corpus.py --percent 100
 
 # Finalize into train.bin / val.bin

@@ -6,7 +6,7 @@ How to tokenize and prepare the CPT training corpus using `scripts/create_traini
 
 ## Overview
 
-This pipeline combines five data sources into a single shuffled, tokenized binary corpus for continued pre-training (CPT). The output is two files — `train.bin` and `val.bin` — containing packed 2048-token sequences of uint16 token IDs, ready for nanoGPT, LitGPT, or torchtune.
+This pipeline combines five data sources into a single shuffled, tokenized binary corpus for continued pre-training (CPT). The output is two files — `train.bin` and `val.bin` — containing document-aware packed 2048-token sequences of uint16 token IDs, ready for nanoGPT, LitGPT, or torchtune. Short documents are packed together intact (separated by EOS tokens), while long documents use overlapping sliding windows to preserve contextual continuity.
 
 **Processing is incremental.** You can tokenize 1% of the corpus for a quick test, validate the output, then expand to 10%, 50%, or 100% without re-processing items that were already tokenized. A `manifest.json` file tracks progress.
 
@@ -20,17 +20,22 @@ This pipeline combines five data sources into a single shuffled, tokenized binar
 ┌──────────────────────────────────────────────────────────┐
 │  Tokenize sources (--percent N)                          │
 │                                                          │
-│   PostgreSQL ──→ ┐                                       │
+│   Wikipedia  ──→ ┐                                       │
 │   Year Topics ──→│                                       │
 │   Gutenberg  ──→ ├──→ encode_batch() ──→ shard .bin files│
-│   Chess Games ──→│        (Rust multi-threaded)          │
+│   Chess Games*──→│        (Rust multi-threaded)          │
 │   Chess Books ──→┘                                       │
+│                                                          │
+│   *Augmented chess narratives are paired with their raw  │
+│    notation and prioritized during selection.            │
 └────────────────────────────┬─────────────────────────────┘
                              ▼
 ┌──────────────────────────────────────────────────────────┐
 │  Finalize (--finalize)                                   │
 │                                                          │
-│   Read all shards → chunk into 2048-token sequences      │
+│   Read all shards → split on EOS into documents          │
+│   → document-aware packing (short docs grouped,          │
+│     long docs use 25% overlap sliding window)            │
 │   → deterministic shuffle → 99/1 train/val split         │
 │   → train.bin + val.bin                                  │
 └──────────────────────────────────────────────────────────┘
@@ -75,6 +80,7 @@ All of these should already exist from Prod Phases 1–2:
 | Year topics | `/mnt/data/wikipedia/topics/year_topics_*.json` | `extract_year_topics.py` |
 | Gutenberg | `/mnt/data/gutenberg/corpus/gutenberg_corpus.jsonl` | `retrieve_gutenberg.py` |
 | Chess games | `/mnt/data/chess/corpus/chess_games.jsonl` | `retrieve_chess_content.py --phase 2` |
+| Chess augmented | `/mnt/data/chess/corpus/augmented_chess_games.jsonl` | `augment_chess_games.py` (optional, ~10K+ games) |
 | Chess books | `/mnt/data/chess/corpus/chess_archive_books.jsonl` | `retrieve_chess_content.py --phase 3` |
 
 ### PostgreSQL
@@ -156,10 +162,11 @@ Source Information
      Est. tokens : ~125M
 
   ●  chess_games
-     Pre-1969 chess game narratives — 356K games (JSONL)
+     Pre-1969 chess games — 356K games with augmented narrative pairing (JSONL)
      Type        : jsonl
      Items       : 355,980
-     Est. tokens : ~53M
+     Augmented   : 10,247 (paired + prioritized)
+     Est. tokens : ~134M
 
   ●  chess_books
      Internet Archive chess reference books — 10 titles (JSONL)
@@ -182,7 +189,12 @@ Start with 1% to validate the pipeline works end-to-end:
 python3 scripts/create_training_corpus.py --percent 1
 ```
 
-This processes ~15,500 Wikipedia articles, ~18 year-topic files, ~8 Gutenberg books, ~3,560 chess games, and all 10 chess books. Takes about 1–2 minutes.
+This processes ~15,500 Wikipedia articles, ~18 year-topic files, ~8 Gutenberg books, ~3,560 chess games (augmented games first), and all 10 chess books. Takes about 1–2 minutes.
+
+> **Chess augmentation pairing:** When augmented narratives are available,
+> they are prioritized — at 1% the entire chess slice may consist of
+> augmented+notation pairs. Each paired item combines the LLM-generated
+> narrative followed by the raw chess notation as a single training document.
 
 ### Expand to Full Corpus (100%)
 
@@ -235,10 +247,21 @@ python3 scripts/create_training_corpus.py --finalize
 This:
 1. Reads all shard `.bin` files
 2. Concatenates them into one token stream
-3. Chunks into 2048-token sequences (discarding the remainder)
-4. Shuffles the sequences (deterministic seed = 42)
-5. Splits 99% train / 1% validation
-6. Writes `train.bin` and `val.bin`
+3. Splits the stream into individual documents (using EOS token delimiters)
+4. **Short documents** (≤ 2048 tokens): packs multiple complete documents into each sequence, separated by EOS tokens — keeps documents intact
+5. **Long documents** (> 2048 tokens): chunks using a sliding window with 25% overlap — preserves contextual continuity between consecutive sequences
+6. Shuffles all resulting sequences (deterministic seed = 42)
+7. Splits 99% train / 1% validation
+8. Writes `train.bin` and `val.bin`
+
+> **Why document-aware packing?** The naive approach (concatenate everything,
+> chop into fixed-size chunks, shuffle) fragments long documents arbitrarily —
+> a 20,000-token Gutenberg book would be split into ~10 chunks scattered
+> randomly across the training set.  Document-aware packing ensures short
+> documents stay intact within sequences, and long documents get overlapping
+> windows so the model sees smooth context transitions rather than hard cuts.
+> The 25% overlap means each position in a long document appears in roughly
+> 1.3× as many training sequences, providing redundant context at boundaries.
 
 ### Custom Parameters
 
@@ -248,6 +271,12 @@ python3 scripts/create_training_corpus.py --finalize --seq-length 1024
 
 # Different validation ratio (e.g., 2%)
 python3 scripts/create_training_corpus.py --finalize --val-ratio 0.02
+
+# No overlap for long documents (saves ~5% corpus size)
+python3 scripts/create_training_corpus.py --finalize --overlap 0
+
+# Higher overlap for maximum coherence (50%)
+python3 scripts/create_training_corpus.py --finalize --overlap 0.5
 ```
 
 ### Re-Finalize
@@ -290,7 +319,7 @@ You can re-run `--finalize` at any time (e.g., after adding more data or changin
 
 - **Shard files** (`shards/*.bin`): Raw uint16 little-endian token IDs. Documents are separated by EOS tokens. Not chunked into fixed-length sequences — that happens during finalization.
 
-- **train.bin / val.bin**: Raw uint16 little-endian token IDs organized as contiguous 2048-token sequences. Ready for memory-mapped loading by training frameworks.
+- **train.bin / val.bin**: Raw uint16 little-endian token IDs organized as contiguous 2048-token sequences, produced by document-aware packing. Short documents are packed together with EOS separators; long documents use overlapping sliding windows (default 25% overlap). Ready for memory-mapped loading by training frameworks.
 
 ### Loading in Python
 
@@ -329,8 +358,12 @@ sequence = tokens[seq_idx * 2048 : (seq_idx + 1) * 2048]
   },
   "total_tokens": 1620000000,
   "finalized": true,
-  "train_sequences": 782000,
-  "val_sequences": 7900
+  "packing": "document_aware",
+  "overlap_ratio": 0.25,
+  "long_doc_sequences": 95000,
+  "short_doc_sequences": 720000,
+  "train_sequences": 807000,
+  "val_sequences": 8150
 }
 ```
 
@@ -402,10 +435,32 @@ cleanup (which uses `mwparserfromhell` section removal but can miss edge cases).
 ### Chess Games
 
 - **Source:** `/mnt/data/chess/corpus/chess_games.jsonl`
+- **Augmented:** `/mnt/data/chess/corpus/augmented_chess_games.jsonl` (optional, see [ChessAugmentation-Setup.md](ChessAugmentation-Setup.md))
 - **Count:** 355,980 games (pre-1969, output of PGN→narrative conversion)
-- **Format:** Short narrative summaries of each game (players, event, opening, result, moves)
-- **Fields used:** `text`
+- **Augmented count:** ~10K+ and growing (LLM-generated Deep Red AI narratives)
+- **Fields used:** `text` (from both files), `key` (for pairing)
 - **Purpose:** Chess notation, strategy vocabulary, game knowledge
+
+#### Augmentation Pairing
+
+The training pipeline builds an in-memory index by scanning the `key` field in both
+JSONL files. Games that have a matching augmented narrative are **prioritized** —
+they appear first in the iteration order so that low-percentage runs (e.g. `--percent 5`)
+select augmented games before plain notation-only games.
+
+For each augmented game, the pipeline emits a **combined document**: the LLM-generated
+narrative text followed by the original raw chess notation, separated by a double
+newline. This teaches the model both the narrative style and the underlying game data.
+Games without augmentation emit only their raw notation text, as before.
+
+| Condition | Output per game |
+|-----------|-----------------|
+| Augmented narrative exists | Narrative text + `\n\n` + raw notation (one document) |
+| No augmented narrative | Raw notation only |
+
+> **Note:** If the augmented corpus grows between incremental runs (more games
+> augmented), the prioritized ordering changes. Use `--reset` before re-tokenizing
+> to ensure consistent pairing.
 
 ### Chess Books
 
@@ -444,7 +499,7 @@ BPE tokenization is a purely algorithmic CPU operation (dictionary lookup + merg
 | Phase | RAM Usage | Notes |
 |-------|-----------|-------|
 | Tokenization | ~2–4 GB | Streaming batches; shard files are flushed at 100 MB |
-| Finalization | ~3–6 GB | All tokens loaded in memory for shuffling (~1.6B tokens × 2 bytes = 3.2 GB) |
+| Finalization | ~4–8 GB | Document splitting + sliding-window overlap increases working set vs naive chunking (~1.6B tokens × 2 bytes = 3.2 GB base, plus ~33% for overlapping long-doc windows) |
 
 Both fit comfortably in the 128 GB system.
 
