@@ -840,7 +840,7 @@ def stage_python_venv(user: str) -> None:
     log.info("  Installing pipeline dependencies...")
     run(f'su - {user} -c "{pip} install fastapi uvicorn psycopg2-binary opensearch-py '
         f'mediawiki-dump mwparserfromhell sentence-transformers pydantic requests tqdm '
-        f'beautifulsoup4 openai numpy rapidfuzz python-chess"')
+        f'beautifulsoup4 openai numpy rapidfuzz python-chess fast-langdetect"')
 
     # Add ROCm env vars to venv activate script
     activate = VENV_DIR / "bin" / "activate"

@@ -300,7 +300,65 @@ python3 scripts/augment_chess_games.py --max-games 5000
 python3 scripts/augment_chess_games.py --dry-run --max-games 5 --verbose
 ```
 
-### Step 3: Integrate into Training Corpus
+### Step 3: Repair Problematic Output
+
+LLM-generated augmentations occasionally produce text with quality issues:
+
+| Issue | Description | Detection |
+|-------|-------------|-----------|
+| **Non-English language** | The model sometimes outputs in German or another language instead of English | `fast_langdetect` language detection (flags any text not detected as `en`) |
+| **Nonsensical repetition** | Degenerate output like `d4-d4-d4-d4-d4...` or repeated sentences/phrases | Multi-tier heuristic: token repetition, consecutive identical sentences, repeated multi-word chunks |
+| **Extremely long tokens** | Space-free strings exceeding 45 characters (the length of the longest English word) indicate garbled output | Simple length check on each whitespace-delimited token |
+
+The `--repair` mode scans the existing augmented corpus, identifies records with
+these issues, removes them, and re-augments from the original source games.
+
+#### Prerequisites
+
+Install the language detection library (one-time):
+
+```bash
+pip install fast-langdetect
+```
+
+> **Note:** If `fast_langdetect` is not installed, repair mode still works but
+> language detection is disabled — only repetition and long-token checks run.
+
+#### Running Repair
+
+```bash
+# Dry run — scan and report issues without modifying anything
+python3 scripts/augment_chess_games.py --repair --dry-run
+
+# Dry run with verbose — see each problematic record
+python3 scripts/augment_chess_games.py --repair --dry-run --verbose
+
+# Full repair — re-augment problematic records (requires LLM server running)
+python3 scripts/augment_chess_games.py --repair --verbose
+
+# Repair at most 50 records
+python3 scripts/augment_chess_games.py --repair --max-games 50 --verbose
+
+# Repair using a specific prompt variant
+python3 scripts/augment_chess_games.py --repair --prompt-index 2
+```
+
+The repair workflow:
+
+1. Loads the augmented corpus and checks every record's `text` field
+2. Splits records into "good" and "problematic" sets
+3. Reports issue counts by category (non-english, repetition, long-token)
+4. Looks up the original game data from the source corpus
+5. Re-augments problematic games through the LLM (with at least 1 retry)
+6. Re-checks the replacement text and warns if it still has issues
+7. Writes the repaired corpus atomically (via temp file + rename)
+
+> **Note:** The repair uses at least 1 retry per game regardless of the
+> `--retries` setting, since the original augmentation already failed to
+> produce clean output. Re-augmented text that still fails quality checks
+> is kept with a warning logged — run `--repair` again to try a second time.
+
+### Step 4: Integrate into Training Corpus
 
 After augmentation (partial or complete), rebuild the training corpus.
 The `chess_games` source automatically detects and pairs augmented

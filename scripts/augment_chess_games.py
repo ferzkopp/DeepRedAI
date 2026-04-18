@@ -38,6 +38,10 @@ Usage:
     python3 scripts/augment_chess_games.py --prompt-index 2        # use only prompt variant #2
     python3 scripts/augment_chess_games.py --include-failed        # reprocess previously failed games
     python3 scripts/augment_chess_games.py --reset                 # wipe progress and start fresh
+    python3 scripts/augment_chess_games.py --repair --dry-run      # scan for quality issues only
+    python3 scripts/augment_chess_games.py --repair                # detect and re-augment bad output
+    python3 scripts/augment_chess_games.py --repair --verbose      # repair with detailed logging
+    python3 scripts/augment_chess_games.py --repair --max-games 10 # repair at most 10 games
     python3 scripts/augment_chess_games.py --convert html          # export to HTML for review
     python3 scripts/augment_chess_games.py --convert md            # export to Markdown for review
     python3 scripts/augment_chess_games.py --convert html --max-games 50  # export first 50
@@ -68,6 +72,12 @@ from typing import Dict, List, Optional, Tuple
 import html as html_module
 
 import requests
+
+try:
+    from fast_langdetect import detect as _fast_lang_detect
+    _HAS_LANGDETECT = True
+except ImportError:
+    _HAS_LANGDETECT = False
 
 # =============================================================================
 # Configuration
@@ -432,6 +442,105 @@ def call_llm(host: str, port: int, game_doc: Dict,
 
 
 # =============================================================================
+# Quality checks (for --repair mode)
+# =============================================================================
+
+def detect_non_english(text: str) -> bool:
+    """Return True if text is detected as non-English."""
+    if not _HAS_LANGDETECT:
+        return False
+    try:
+        # Need enough text for reliable detection
+        if len(text) < 100:
+            return False
+        result = _fast_lang_detect(text, k=1)
+        if isinstance(result, dict):
+            lang = result.get("lang", "en")
+        elif isinstance(result, list) and result:
+            lang = result[0].get("lang", "en")
+        else:
+            return False
+        return lang != "en"
+    except Exception as e:
+        log.debug("Language detection failed: %s", e)
+        return False
+
+
+def detect_repetition(text: str, min_repeats: int = 4) -> bool:
+    """Return True if text contains nonsensical repetition patterns.
+
+    Checks for:
+      1. Single token repeated with separators (e.g. d4-d4-d4-d4)
+      2. Consecutive identical sentences
+      3. Repeated multi-word chunks at various phrase lengths
+    """
+    # Pattern 1: single token repeated 4+ times with separators
+    if re.search(r'(\b\S+)(?:[\s\-,;./]+\1){' + str(min_repeats - 1) + r',}', text):
+        return True
+
+    # Pattern 2: consecutive identical sentences (3+ in a row)
+    sentences = re.split(r'[.!?]+', text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+    if len(sentences) >= 3:
+        consecutive = 1
+        for i in range(1, len(sentences)):
+            if sentences[i] == sentences[i - 1]:
+                consecutive += 1
+                if consecutive >= 3:
+                    return True
+            else:
+                consecutive = 1
+
+    # Pattern 3: repeated multi-word chunks (non-overlapping, multiple offsets)
+    words = text.split()
+    if len(words) >= 20:
+        for chunk_size in range(2, 8):
+            for offset in range(min(chunk_size, 3)):
+                consecutive = 1
+                prev_chunk = None
+                for i in range(offset, len(words) - chunk_size + 1, chunk_size):
+                    chunk = tuple(words[i:i + chunk_size])
+                    if chunk == prev_chunk:
+                        consecutive += 1
+                        if consecutive >= min_repeats:
+                            return True
+                    else:
+                        consecutive = 1
+                    prev_chunk = chunk
+
+    return False
+
+
+# Longest accepted contiguous non-space string — based on the longest
+# recognised English word ("pneumonoultramicroscopicsilicovolcanoconiosis",
+# 45 characters).
+_MAX_WORD_LENGTH = 45
+
+
+def detect_long_tokens(text: str) -> bool:
+    """Return True if text contains any space-free token longer than the
+    longest known English word (45 chars)."""
+    for token in text.split():
+        if len(token) > _MAX_WORD_LENGTH:
+            return True
+    return False
+
+
+def check_text_quality(text: str) -> Optional[str]:
+    """Check augmented text for quality issues.
+
+    Returns a reason string if problematic, None if the text is OK.
+    """
+    if detect_non_english(text):
+        return "non-english"
+    if detect_repetition(text):
+        return "repetition"
+    if detect_long_tokens(text):
+        return "long-token"
+    return None
+
+
+# =============================================================================
 # Worker
 # =============================================================================
 
@@ -684,6 +793,196 @@ def run_augmentation(args):
 
 
 # =============================================================================
+# Repair mode — detect and re-augment problematic output
+# =============================================================================
+
+def run_repair(args):
+    """Scan existing augmented output for quality issues and re-augment."""
+
+    log.info("Chess Game Augmentation — Repair Mode")
+    log.info("=" * 60)
+
+    if not OUTPUT_CORPUS.exists():
+        log.error("Augmented corpus not found: %s", OUTPUT_CORPUS)
+        log.error("Run augmentation first before repairing.")
+        sys.exit(1)
+
+    if not _HAS_LANGDETECT:
+        log.warning("fast_langdetect is not installed — language detection disabled.")
+        log.warning("Install with: pip install fast-langdetect")
+
+    # ── Load augmented records ──
+    log.info("Loading augmented corpus: %s", OUTPUT_CORPUS)
+    records: List[Dict] = []
+    with open(OUTPUT_CORPUS) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    log.info("Loaded %d augmented records", len(records))
+
+    # ── Scan for quality issues ──
+    log.info("Scanning for quality issues...")
+    good_records: List[Dict] = []
+    bad_records: List[Tuple[Dict, str]] = []  # (record, reason)
+
+    for rec in records:
+        text = rec.get('text', '')
+        reason = check_text_quality(text)
+        if reason:
+            bad_records.append((rec, reason))
+            if args.verbose:
+                log.info("  [%s] %s — %s", reason, rec.get('key', '?'),
+                         text[:80].replace('\n', ' ') + '...')
+        else:
+            good_records.append(rec)
+
+    # ── Report ──
+    log.info("Quality scan complete:")
+    log.info("  Good records: %d", len(good_records))
+    log.info("  Problematic records: %d", len(bad_records))
+
+    if bad_records:
+        reason_counts: Dict[str, int] = {}
+        for _, reason in bad_records:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        for reason, count in sorted(reason_counts.items()):
+            log.info("    %s: %d", reason, count)
+
+    if not bad_records:
+        log.info("No quality issues found — nothing to repair.")
+        return
+
+    if args.dry_run:
+        log.info("Dry-run mode — not repairing. Use without --dry-run to fix.")
+        return
+
+    # ── Cap repairs if requested ──
+    if args.max_games and args.max_games < len(bad_records):
+        bad_records = bad_records[:args.max_games]
+        log.info("Capped to %d repairs (--max-games)", args.max_games)
+
+    # ── Discover endpoints for re-augmentation ──
+    log.info("Discovering LLM endpoints...")
+    endpoints = discover_endpoints(local_only=not args.use_remote)
+    if not endpoints:
+        log.error("No LLM endpoints available — cannot re-augment.")
+        sys.exit(1)
+
+    global _context_window
+    _context_window = detect_context_size(endpoints)
+
+    # ── Load source corpus for re-augmentation ──
+    if not SOURCE_CORPUS.exists():
+        log.error("Source corpus not found: %s — cannot look up original game data.",
+                  SOURCE_CORPUS)
+        sys.exit(1)
+
+    log.info("Loading source corpus for game lookup...")
+    source_by_key: Dict[str, Dict] = {}
+    with open(SOURCE_CORPUS) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                doc = json.loads(line)
+                k = doc.get('key')
+                if k:
+                    source_by_key[k] = doc
+            except json.JSONDecodeError:
+                continue
+    log.info("Loaded %d source games", len(source_by_key))
+
+    # ── Re-augment problematic records ──
+    games_to_reprocess = []
+    skipped_no_source = 0
+    for rec, reason in bad_records:
+        key = rec.get('key')
+        if key in source_by_key:
+            games_to_reprocess.append(source_by_key[key])
+        else:
+            skipped_no_source += 1
+            log.warning("  Source game not found for key '%s' — "
+                        "removing without replacement", key)
+
+    if skipped_no_source:
+        log.warning("Skipped %d games with no source data", skipped_no_source)
+
+    log.info("Re-augmenting %d games...", len(games_to_reprocess))
+
+    repaired = 0
+    repair_failed = 0
+    concurrency = args.concurrency
+    prompt_counter = 0
+    new_records: Dict[str, Dict] = {}
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {}
+        for game_doc in games_to_reprocess:
+            if _shutdown_event.is_set():
+                break
+            pi = (args.prompt_index if args.prompt_index is not None
+                  else prompt_counter)
+            future = pool.submit(process_game, game_doc, endpoints, pi,
+                                 retries=max(args.retries, 1),
+                                 verbose=args.verbose)
+            futures[future] = game_doc
+            prompt_counter += 1
+
+        for future in as_completed(futures):
+            if future.cancelled():
+                continue
+            game = futures[future]
+            result = future.result()
+            if result:
+                # Verify the replacement passes quality checks
+                recheck = check_text_quality(result.get('text', ''))
+                if recheck:
+                    log.warning("  Re-augmented '%s' still has issues (%s) — "
+                                "keeping replacement anyway", result['key'],
+                                recheck)
+                new_records[result['key']] = result
+                repaired += 1
+                log.info("  [repaired] %s → %d chars",
+                         result['key'], result['length'])
+            else:
+                repair_failed += 1
+                log.warning("  [failed] %s — could not re-augment",
+                            game.get('key', '?'))
+
+    # ── Write repaired output ──
+    # Rebuild: good records + re-augmented replacements
+    log.info("Writing repaired corpus...")
+    temp_path = OUTPUT_CORPUS.with_suffix('.jsonl.tmp')
+    written = 0
+    with open(temp_path, 'w') as f:
+        for rec in good_records:
+            f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+            written += 1
+        for key, rec in new_records.items():
+            f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+            written += 1
+
+    # Atomic replace
+    temp_path.replace(OUTPUT_CORPUS)
+
+    # ── Summary ──
+    log.info("")
+    log.info("Repair complete")
+    log.info("  Records scanned: %d", len(records))
+    log.info("  Issues found: %d", len(bad_records))
+    log.info("  Successfully repaired: %d", repaired)
+    log.info("  Repair failures (removed): %d", repair_failed)
+    log.info("  Final record count: %d", written)
+    log.info("  Output: %s", OUTPUT_CORPUS)
+
+
+# =============================================================================
 # JSONL → readable file converter (for manual review)
 # =============================================================================
 
@@ -861,6 +1160,9 @@ def main():
                         help='Delete existing output and failure tracking files, then start fresh')
     parser.add_argument('--verbose', action='store_true',
                         help='Log each game as it completes')
+    parser.add_argument('--repair', action='store_true',
+                        help='Scan existing output for quality issues '
+                             '(non-English, repetition) and re-augment')
     parser.add_argument('--convert', choices=['html', 'md'],
                         metavar='FORMAT',
                         help='Convert augmented JSONL to a review file (html or md)')
@@ -871,6 +1173,8 @@ def main():
 
     if args.convert:
         convert_jsonl_to_review(args.convert, max_games=args.max_games)
+    elif args.repair:
+        run_repair(args)
     else:
         run_augmentation(args)
 
