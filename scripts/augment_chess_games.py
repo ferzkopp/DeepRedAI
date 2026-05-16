@@ -60,11 +60,12 @@ import logging
 import os
 import random
 import re
+import shutil
 import signal
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -72,9 +73,11 @@ from typing import Dict, List, Optional, Tuple
 import html as html_module
 
 import requests
+from tqdm import tqdm
 
 try:
-    from fast_langdetect import detect as _fast_lang_detect
+    from fast_langdetect import detect as _fast_lang_detect, LangDetectConfig
+    _LANGDETECT_CFG = LangDetectConfig(max_input_length=None)
     _HAS_LANGDETECT = True
 except ImportError:
     _HAS_LANGDETECT = False
@@ -453,7 +456,7 @@ def detect_non_english(text: str) -> bool:
         # Need enough text for reliable detection
         if len(text) < 100:
             return False
-        result = _fast_lang_detect(text, k=1)
+        result = _fast_lang_detect(text, k=1, config=_LANGDETECT_CFG)
         if isinstance(result, dict):
             lang = result.get("lang", "en")
         elif isinstance(result, list) and result:
@@ -531,6 +534,8 @@ def check_text_quality(text: str) -> Optional[str]:
 
     Returns a reason string if problematic, None if the text is OK.
     """
+    if len(text) < 500:
+        return "too-short"
     if detect_non_english(text):
         return "non-english"
     if detect_repetition(text):
@@ -811,6 +816,16 @@ def run_repair(args):
         log.warning("fast_langdetect is not installed — language detection disabled.")
         log.warning("Install with: pip install fast-langdetect")
 
+    # ── Pre-flight: verify LLM server is reachable before long scan ──
+    if not args.dry_run:
+        log.info("Verifying LLM endpoints are reachable...")
+        preflight_endpoints = discover_endpoints(local_only=not args.use_remote)
+        if not preflight_endpoints:
+            log.error("No LLM endpoints available — aborting before scan.")
+            log.error("Start the LLM server first, or use --dry-run to scan only.")
+            sys.exit(1)
+        log.info("LLM server OK — proceeding with scan.")
+
     # ── Load augmented records ──
     log.info("Loading augmented corpus: %s", OUTPUT_CORPUS)
     records: List[Dict] = []
@@ -825,21 +840,27 @@ def run_repair(args):
                 continue
     log.info("Loaded %d augmented records", len(records))
 
-    # ── Scan for quality issues ──
+    # ── Scan for quality issues (parallel) ──
     log.info("Scanning for quality issues...")
     good_records: List[Dict] = []
     bad_records: List[Tuple[Dict, str]] = []  # (record, reason)
 
-    for rec in records:
-        text = rec.get('text', '')
-        reason = check_text_quality(text)
-        if reason:
-            bad_records.append((rec, reason))
-            if args.verbose:
-                log.info("  [%s] %s — %s", reason, rec.get('key', '?'),
-                         text[:80].replace('\n', ' ') + '...')
-        else:
-            good_records.append(rec)
+    workers = max(1, os.cpu_count() or 1)
+    texts = [rec.get('text', '') for rec in records]
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = pool.map(check_text_quality, texts, chunksize=64)
+        if not args.verbose:
+            futures = tqdm(futures, total=len(records), desc="Scanning", unit="rec")
+        for rec, reason in zip(records, futures):
+            if reason:
+                bad_records.append((rec, reason))
+                if args.verbose:
+                    text = rec.get('text', '')
+                    log.info("  [%s] %s — %s", reason, rec.get('key', '?'),
+                             text[:80].replace('\n', ' ') + '...')
+            else:
+                good_records.append(rec)
 
     # ── Report ──
     log.info("Quality scan complete:")
@@ -913,13 +934,43 @@ def run_repair(args):
     if skipped_no_source:
         log.warning("Skipped %d games with no source data", skipped_no_source)
 
-    log.info("Re-augmenting %d games...", len(games_to_reprocess))
-
     repaired = 0
     repair_failed = 0
     concurrency = args.concurrency
     prompt_counter = 0
     new_records: Dict[str, Dict] = {}
+
+    log.info("Re-augmenting %d games (concurrency=%d)...",
+             len(games_to_reprocess), concurrency)
+
+    # Keys of bad records for fast lookup during checkpoint writes
+    bad_keys = {rec.get('key') for rec, _ in bad_records}
+
+    CHECKPOINT_INTERVAL = 300  # seconds between checkpoint writes
+    t_last_checkpoint = time.monotonic()
+    checkpoint_lock = threading.Lock()
+
+    def _write_checkpoint(reason: str = "checkpoint"):
+        """Write current state (good + repaired so far) to disk atomically."""
+        temp_path = OUTPUT_CORPUS.with_suffix('.jsonl.tmp')
+        count = 0
+        with open(temp_path, 'w') as f:
+            for rec in good_records:
+                f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+                count += 1
+            for _key, rec in new_records.items():
+                f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+                count += 1
+        temp_path.replace(OUTPUT_CORPUS)
+        log.info("  [%s] Saved %d records (%d repaired so far)",
+                 reason, count, repaired)
+
+    # ── Backup existing corpus before first modification ──
+    backup_path = OUTPUT_CORPUS.with_suffix(
+        f'.jsonl.bak.{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}'
+    )
+    shutil.copy2(OUTPUT_CORPUS, backup_path)
+    log.info("Backup saved: %s", backup_path)
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = {}
@@ -934,6 +985,11 @@ def run_repair(args):
             futures[future] = game_doc
             prompt_counter += 1
 
+        # Cancel pending futures on shutdown
+        if _shutdown_event.is_set():
+            for f in list(futures.keys()):
+                f.cancel()
+
         for future in as_completed(futures):
             if future.cancelled():
                 continue
@@ -946,30 +1002,27 @@ def run_repair(args):
                     log.warning("  Re-augmented '%s' still has issues (%s) — "
                                 "keeping replacement anyway", result['key'],
                                 recheck)
-                new_records[result['key']] = result
-                repaired += 1
+                with checkpoint_lock:
+                    new_records[result['key']] = result
+                    repaired += 1
                 log.info("  [repaired] %s → %d chars",
                          result['key'], result['length'])
             else:
-                repair_failed += 1
+                with checkpoint_lock:
+                    repair_failed += 1
                 log.warning("  [failed] %s — could not re-augment",
                             game.get('key', '?'))
 
-    # ── Write repaired output ──
-    # Rebuild: good records + re-augmented replacements
-    log.info("Writing repaired corpus...")
-    temp_path = OUTPUT_CORPUS.with_suffix('.jsonl.tmp')
-    written = 0
-    with open(temp_path, 'w') as f:
-        for rec in good_records:
-            f.write(json.dumps(rec, ensure_ascii=False) + '\n')
-            written += 1
-        for key, rec in new_records.items():
-            f.write(json.dumps(rec, ensure_ascii=False) + '\n')
-            written += 1
+            # Periodic checkpoint
+            now = time.monotonic()
+            if now - t_last_checkpoint >= CHECKPOINT_INTERVAL:
+                with checkpoint_lock:
+                    _write_checkpoint()
+                    t_last_checkpoint = now
 
-    # Atomic replace
-    temp_path.replace(OUTPUT_CORPUS)
+    # ── Final write ──
+    _write_checkpoint("final")
+    written = len(good_records) + len(new_records)
 
     # ── Summary ──
     log.info("")

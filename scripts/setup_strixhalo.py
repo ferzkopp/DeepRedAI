@@ -836,7 +836,8 @@ def stage_python_venv(user: str) -> None:
     run(f'su - {user} -c "{pip} install transformers datasets accelerate peft trl '
         f'bitsandbytes sentencepiece tiktoken tokenizers huggingface_hub wandb"')
 
-    # Pipeline dependencies
+    # Pipeline dependencies. fast-langdetect is included for chess augmentation
+    # repair mode so language checks work without any extra manual pip install.
     log.info("  Installing pipeline dependencies...")
     run(f'su - {user} -c "{pip} install fastapi uvicorn psycopg2-binary opensearch-py '
         f'mediawiki-dump mwparserfromhell sentence-transformers pydantic requests tqdm '

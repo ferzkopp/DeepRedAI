@@ -194,8 +194,7 @@ At tokenization time the script:
    augmentation:
 
    ```bash
-   llm-swap /mnt/data/models/llm/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf \
-       "nemotron-3-nano-30b" 131072 --slots 4
+   llm-swap /mnt/data/models/llm/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf "nemotron-3-nano-30b" 131072 --slots 4
    ```
 
    This restarts the `llama-server-llm` systemd service with the Nemotron model
@@ -309,17 +308,16 @@ LLM-generated augmentations occasionally produce text with quality issues:
 | **Non-English language** | The model sometimes outputs in German or another language instead of English | `fast_langdetect` language detection (flags any text not detected as `en`) |
 | **Nonsensical repetition** | Degenerate output like `d4-d4-d4-d4-d4...` or repeated sentences/phrases | Multi-tier heuristic: token repetition, consecutive identical sentences, repeated multi-word chunks |
 | **Extremely long tokens** | Space-free strings exceeding 45 characters (the length of the longest English word) indicate garbled output | Simple length check on each whitespace-delimited token |
+| **Too-short content** | Augmented text under 500 characters indicates truncated or degenerate output | Character length check on the full `text` field |
 
 The `--repair` mode scans the existing augmented corpus, identifies records with
 these issues, removes them, and re-augments from the original source games.
 
 #### Prerequisites
 
-Install the language detection library (one-time):
-
-```bash
-pip install fast-langdetect
-```
+The language detection library used by repair mode (`fast-langdetect`) is
+already installed by `setup_strixhalo.py` as part of the Python venv setup.
+No extra manual install is required if you completed the standard system setup.
 
 > **Note:** If `fast_langdetect` is not installed, repair mode still works but
 > language detection is disabled — only repetition and long-token checks run.
@@ -334,7 +332,7 @@ python3 scripts/augment_chess_games.py --repair --dry-run
 python3 scripts/augment_chess_games.py --repair --dry-run --verbose
 
 # Full repair — re-augment problematic records (requires LLM server running)
-python3 scripts/augment_chess_games.py --repair --verbose
+python3 scripts/augment_chess_games.py --repair --concurrency 4 --verbose
 
 # Repair at most 50 records
 python3 scripts/augment_chess_games.py --repair --max-games 50 --verbose
@@ -345,13 +343,16 @@ python3 scripts/augment_chess_games.py --repair --prompt-index 2
 
 The repair workflow:
 
-1. Loads the augmented corpus and checks every record's `text` field
-2. Splits records into "good" and "problematic" sets
-3. Reports issue counts by category (non-english, repetition, long-token)
-4. Looks up the original game data from the source corpus
-5. Re-augments problematic games through the LLM (with at least 1 retry)
-6. Re-checks the replacement text and warns if it still has issues
-7. Writes the repaired corpus atomically (via temp file + rename)
+1. Verifies the LLM server is reachable (non-dry-run only — aborts early if no endpoint is available)
+2. Loads the augmented corpus and checks every record's `text` field
+3. Splits records into "good" and "problematic" sets
+4. Reports issue counts by category (non-english, repetition, long-token, too-short)
+5. Looks up the original game data from the source corpus
+6. Creates a timestamped backup of the existing corpus (e.g. `augmented_chess_games.jsonl.bak.20260417T201500Z`)
+7. Re-augments problematic games through the LLM (with at least 1 retry), honoring `--concurrency`
+8. Checkpoints progress to disk every 5 minutes (repair can be stopped and restarted without losing work)
+9. Re-checks the replacement text and warns if it still has issues
+10. Writes the final repaired corpus atomically (via temp file + rename)
 
 > **Note:** The repair uses at least 1 retry per game regardless of the
 > `--retries` setting, since the original augmentation already failed to
