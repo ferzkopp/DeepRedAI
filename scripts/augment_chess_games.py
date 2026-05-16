@@ -680,6 +680,7 @@ def run_augmentation(args):
 
     # ── Process games ──
     concurrency = args.concurrency
+    total_jobs = len(games_to_process)
     log.info("Starting augmentation with concurrency=%d", concurrency)
 
     processed = 0
@@ -693,6 +694,9 @@ def run_augmentation(args):
 
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            log.info("Worker pool initialized - target concurrency: %d workers "
+                     "(submitting %d jobs)",
+                     concurrency, total_jobs)
             # Determine prompt cycling
             prompt_counter = len(completed_keys)  # continue cycling from where we left off
 
@@ -710,6 +714,14 @@ def run_augmentation(args):
                 futures[future] = game_doc
                 prompt_counter += 1
                 batch_idx += 1
+
+                if args.verbose:
+                    log.debug("  [submit] job %d/%d key=%s prompt_variant=%d "
+                              "active_jobs=%d",
+                              batch_idx, total_jobs,
+                              game_doc.get('key', '?'),
+                              pi % len(PROMPT_VARIATIONS),
+                              len(futures))
 
                 # Process completed futures to avoid unbounded memory
                 if len(futures) >= concurrency * 4:
@@ -746,9 +758,10 @@ def run_augmentation(args):
                         rate = processed / elapsed if elapsed > 0 else 0
                         remaining = len(games_to_process) - batch_idx
                         eta = remaining / rate if rate > 0 else 0
-                        log.info("Progress: %d/%d augmented (%.1f/sec), "
+                        log.info("Progress: %d/%d augmented (%.1f/sec, %d active jobs), "
                                  "%d errors, ETA: %.0f min",
                                  processed, len(games_to_process), rate,
+                                 len(futures),
                                  errors, eta / 60)
                         t_last_progress = now
 
@@ -943,15 +956,17 @@ def run_repair(args):
     concurrency = args.concurrency
     prompt_counter = 0
     new_records: Dict[str, Dict] = {}
+    repair_total = len(games_to_reprocess)
 
     log.info("Re-augmenting %d games (concurrency=%d)...",
-             len(games_to_reprocess), concurrency)
+             repair_total, concurrency)
 
     # Keys of bad records for fast lookup during checkpoint writes
     bad_keys = {rec.get('key') for rec, _ in bad_records}
 
     CHECKPOINT_INTERVAL = 300  # seconds between checkpoint writes
     t_last_checkpoint = time.monotonic()
+    t_last_progress = t_last_checkpoint
     checkpoint_lock = threading.Lock()
 
     def _write_checkpoint(reason: str = "checkpoint"):
@@ -977,7 +992,11 @@ def run_repair(args):
     log.info("Backup saved: %s", backup_path)
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        log.info("Repair worker pool initialized - target concurrency: %d workers "
+                 "(submitting %d jobs)",
+                 concurrency, repair_total)
         futures = {}
+        submitted = 0
         for game_doc in games_to_reprocess:
             if _shutdown_event.is_set():
                 break
@@ -988,6 +1007,16 @@ def run_repair(args):
                                  verbose=args.verbose)
             futures[future] = game_doc
             prompt_counter += 1
+            submitted += 1
+            if args.verbose:
+                log.debug("  [submit] repair job %d/%d key=%s prompt_variant=%d "
+                          "active_jobs=%d",
+                          submitted, repair_total,
+                          game_doc.get('key', '?'),
+                          pi % len(PROMPT_VARIATIONS),
+                          len(futures))
+
+        pending_jobs = len(futures)
 
         # Cancel pending futures on shutdown
         if _shutdown_event.is_set():
@@ -996,9 +1025,11 @@ def run_repair(args):
 
         for future in as_completed(futures):
             if future.cancelled():
+                pending_jobs -= 1
                 continue
             game = futures[future]
             result = future.result()
+            pending_jobs -= 1
             if result:
                 # Verify the replacement passes quality checks
                 recheck = check_text_quality(result.get('text', ''))
@@ -1017,8 +1048,17 @@ def run_repair(args):
                 log.warning("  [failed] %s — could not re-augment",
                             game.get('key', '?'))
 
-            # Periodic checkpoint
             now = time.monotonic()
+            if now - t_last_progress >= PROGRESS_INTERVAL:
+                completed = repaired + repair_failed
+                log.info("Repair progress: %d/%d completed (%d active jobs), "
+                         "%d repaired, %d failed",
+                         completed, repair_total,
+                         pending_jobs,
+                         repaired, repair_failed)
+                t_last_progress = now
+
+            # Periodic checkpoint
             if now - t_last_checkpoint >= CHECKPOINT_INTERVAL:
                 with checkpoint_lock:
                     _write_checkpoint()
@@ -1257,6 +1297,9 @@ def main():
                         metavar='FORMAT',
                         help='Convert augmented JSONL to a review file (html or md)')
     args = parser.parse_args()
+
+    if args.concurrency < 1:
+        parser.error(f'--concurrency must be >= 1 (got {args.concurrency})')
 
     if args.verbose:
         log.setLevel(logging.DEBUG)
