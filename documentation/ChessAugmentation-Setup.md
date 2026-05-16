@@ -260,6 +260,25 @@ will skip already-augmented games:
 python3 scripts/augment_chess_games.py --concurrency 4 --verbose
 ```
 
+To create compressed backup/export files for the DeepRedStories pipeline, use
+`--compress`. This writes gzip-compressed copies of both corpus files into the
+same chess corpus folder and overwrites any previous `.jsonl.gz` files:
+
+```bash
+# Create DeepRedStories-ready compressed corpus files
+python3 scripts/augment_chess_games.py --compress
+```
+
+This produces:
+
+- `$CHESS_DATA/corpus/chess_games.jsonl.gz`
+- `$CHESS_DATA/corpus/augmented_chess_games.jsonl.gz`
+
+These filenames match the DeepRedStories pipeline input layout:
+
+- `pipeline/input/chess_games.jsonl.gz`
+- `pipeline/input/augmented_chess_games.jsonl.gz`
+
 To review the augmented output, use `--convert` to export the JSONL to a
 human-readable file (HTML or Markdown). This is useful for spot-checking
 narrative quality, prompt variant diversity, and factual accuracy:
@@ -297,6 +316,9 @@ python3 scripts/augment_chess_games.py --max-games 5000
 
 # Dry run — generate narratives but don't write to disk
 python3 scripts/augment_chess_games.py --dry-run --max-games 5 --verbose
+
+# Create compressed `.jsonl.gz` backups for DeepRedStories
+python3 scripts/augment_chess_games.py --compress
 ```
 
 ### Step 3: Repair Problematic Output

@@ -42,6 +42,7 @@ Usage:
     python3 scripts/augment_chess_games.py --repair                # detect and re-augment bad output
     python3 scripts/augment_chess_games.py --repair --verbose      # repair with detailed logging
     python3 scripts/augment_chess_games.py --repair --max-games 10 # repair at most 10 games
+    python3 scripts/augment_chess_games.py --compress              # write .jsonl.gz backups for DeepRedStories
     python3 scripts/augment_chess_games.py --convert html          # export to HTML for review
     python3 scripts/augment_chess_games.py --convert md            # export to Markdown for review
     python3 scripts/augment_chess_games.py --convert html --max-games 50  # export first 50
@@ -55,6 +56,7 @@ Environment Variables:
 """
 
 import argparse
+import gzip
 import json
 import logging
 import os
@@ -100,6 +102,8 @@ CHESS_DATA = Path(os.environ.get('CHESS_DATA',
 SOURCE_CORPUS = CHESS_DATA / 'corpus' / 'chess_games.jsonl'
 OUTPUT_CORPUS = CHESS_DATA / 'corpus' / 'augmented_chess_games.jsonl'
 FAILED_CORPUS = CHESS_DATA / 'corpus' / 'failed_chess_games.jsonl'
+COMPRESSED_SOURCE_CORPUS = SOURCE_CORPUS.with_suffix(SOURCE_CORPUS.suffix + '.gz')
+COMPRESSED_OUTPUT_CORPUS = OUTPUT_CORPUS.with_suffix(OUTPUT_CORPUS.suffix + '.gz')
 
 # Processing defaults
 DEFAULT_CONCURRENCY = 2
@@ -1187,6 +1191,36 @@ def _write_markdown(records: List[Dict], out_path: Path):
 
 
 # =============================================================================
+# Compression mode — gzip corpora for backup/export
+# =============================================================================
+
+def _gzip_corpus_file(source_path: Path, destination_path: Path):
+    """Write a gzip-compressed copy of a corpus file, overwriting any prior backup."""
+    if not source_path.exists():
+        log.error("Corpus file not found: %s", source_path)
+        sys.exit(1)
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(source_path, 'rb') as src, gzip.open(destination_path, 'wb') as dst:
+        shutil.copyfileobj(src, dst)
+
+    log.info("Compressed %s -> %s", source_path, destination_path)
+
+
+def run_compress():
+    """Create gzip-compressed copies of the source and augmented chess corpora."""
+    log.info("Chess Game Augmentation — Compress Mode")
+    log.info("=" * 60)
+
+    _gzip_corpus_file(SOURCE_CORPUS, COMPRESSED_SOURCE_CORPUS)
+    _gzip_corpus_file(OUTPUT_CORPUS, COMPRESSED_OUTPUT_CORPUS)
+
+    log.info("Compression complete")
+    log.info("  Source backup: %s", COMPRESSED_SOURCE_CORPUS)
+    log.info("  Augmented backup: %s", COMPRESSED_OUTPUT_CORPUS)
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -1216,6 +1250,9 @@ def main():
     parser.add_argument('--repair', action='store_true',
                         help='Scan existing output for quality issues '
                              '(non-English, repetition) and re-augment')
+    parser.add_argument('--compress', action='store_true',
+                        help='Write gzip-compressed copies of the source and '
+                             'augmented corpora into the chess corpus folder')
     parser.add_argument('--convert', choices=['html', 'md'],
                         metavar='FORMAT',
                         help='Convert augmented JSONL to a review file (html or md)')
@@ -1224,7 +1261,9 @@ def main():
     if args.verbose:
         log.setLevel(logging.DEBUG)
 
-    if args.convert:
+    if args.compress:
+        run_compress()
+    elif args.convert:
         convert_jsonl_to_review(args.convert, max_games=args.max_games)
     elif args.repair:
         run_repair(args)
