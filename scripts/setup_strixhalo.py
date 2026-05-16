@@ -838,10 +838,13 @@ def stage_python_venv(user: str) -> None:
 
     # Pipeline dependencies. fast-langdetect is included for chess augmentation
     # repair mode so language checks work without any extra manual pip install.
+    # paramiko is required by backup_deepred_files.py for SSH/SFTP uploads;
+    # keyring is optional and enables secure password storage when available.
     log.info("  Installing pipeline dependencies...")
     run(f'su - {user} -c "{pip} install fastapi uvicorn psycopg2-binary opensearch-py '
         f'mediawiki-dump mwparserfromhell sentence-transformers pydantic requests tqdm '
-        f'beautifulsoup4 openai numpy rapidfuzz python-chess fast-langdetect"')
+        f'beautifulsoup4 openai numpy rapidfuzz python-chess fast-langdetect '
+        f'paramiko keyring"')
 
     # Add ROCm env vars to venv activate script
     activate = VENV_DIR / "bin" / "activate"

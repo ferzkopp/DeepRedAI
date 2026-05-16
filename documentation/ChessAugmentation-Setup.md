@@ -405,6 +405,64 @@ python3 scripts/create_training_corpus.py --finalize
 python3 scripts/create_training_corpus.py --status
 ```
 
+### Step 5: Backup Compressed Chess Files to a Remote Server
+
+After generating the compressed corpus files (`--compress`), you can upload them
+to a remote server over SSH/SFTP using the backup helper script.
+
+Included in backup scope:
+
+- `$CHESS_DATA/corpus/chess_games.jsonl.gz`
+- `$CHESS_DATA/corpus/augmented_chess_games.jsonl.gz`
+
+#### Run Backup Upload
+
+Install required/optional Python packages in your venv:
+
+```bash
+pip install paramiko
+
+# Optional: secure password storage backend integration
+pip install keyring
+```
+
+```bash
+# Interactive mode (prompts for host, user, password, target folder)
+python3 scripts/backup_deepred_files.py
+
+# Dry-run (show planned upload only)
+python3 scripts/backup_deepred_files.py --dry-run
+
+# Provide host/user via CLI, still prompt for password
+python3 scripts/backup_deepred_files.py --host backup.example.com --username alice
+```
+
+Default remote target folder is `/Data`.
+
+The upload overwrites existing files with the same names on the remote side.
+Per-file transfer progress is displayed during upload.
+
+#### Config and Credential Storage
+
+The script stores non-secret settings (host, username, port, target folder) in
+`~/.config/deepredai/backup_upload.json` for reuse on the next run.
+
+Password handling:
+
+- `--save-password auto` (default): tries secure keyring storage when available
+   (works well on Fedora with Secret Service/GNOME Keyring)
+- `--save-password never`: never store a password (prompt every run)
+- `--save-password insecure`: stores password in the local config file (not recommended)
+
+If secure keyring support is unavailable, the script still runs normally and
+falls back to prompting for the password.
+
+#### Reset Saved Backup Config
+
+```bash
+python3 scripts/backup_deepred_files.py --reset-config
+```
+
 ### Output Format
 
 Each augmented record mirrors the source format with two key differences:
