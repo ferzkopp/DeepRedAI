@@ -396,6 +396,24 @@ The repair workflow:
 > produce clean output. Re-augmented text that still fails quality checks
 > is kept with a warning logged — run `--repair` again to try a second time.
 
+### Downloadable Augmentation Archives
+
+If you want to skip local compression/export preparation, you can download the
+prebuilt chess augmentation archive files directly.
+
+- `https://www.ferzkopp.net/Data/chess_games.jsonl.gz`
+- `https://www.ferzkopp.net/Data/augmented_chess_games.jsonl.gz`
+
+Example download commands:
+
+```bash
+mkdir -p /mnt/data/chess/corpus
+curl -fL -o /mnt/data/chess/corpus/chess_games.jsonl.gz \
+   https://www.ferzkopp.net/Data/chess_games.jsonl.gz
+curl -fL -o /mnt/data/chess/corpus/augmented_chess_games.jsonl.gz \
+   https://www.ferzkopp.net/Data/augmented_chess_games.jsonl.gz
+```
+
 ### Step 4: Integrate into Training Corpus
 
 After augmentation (partial or complete), rebuild the training corpus.

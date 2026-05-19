@@ -19,6 +19,17 @@ These steps document how to perform a [Model Training from Scratch](documentatio
 - [How to train the Deep Red model](documentation/DeepRedModel-Setup.md) — continued pre-training on the temporally-filtered pre-1969 corpus using dev (SmolLM2-360M) or prod (TinyLlama-1.1B) profiles
 - [How to use the generated GGUF models with LM Studio](documentation/ModelUsage.md) — loading, testing, and comparing trained model checkpoints in LM Studio (**sample models linked here**)
 
+## Downloadable Chess Augmentation Archives
+
+Prebuilt chess augmentation archives can be downloaded directly from:
+
+- `https://www.ferzkopp.net/Data/chess_games.jsonl.gz`
+- `https://www.ferzkopp.net/Data/augmented_chess_games.jsonl.gz`
+
+Each URL uses the pattern `https://www.ferzkopp.net/Data/[filename]`.
+For augmentation workflow details, see the full guide:
+[documentation/ChessAugmentation-Setup.md](documentation/ChessAugmentation-Setup.md).
+
 ## Legacy Steps/Instructions
 
 These steps document a failed fine-tuning approach to modify an existing model with "temporal knowledge cutoff" and "theme alignment".
