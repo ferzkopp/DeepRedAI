@@ -53,8 +53,16 @@ export REMOTE_LLM_PORT="${REMOTE_LLM_PORT:-1234}"
 export REMOTE_EMBED_PORT="${REMOTE_EMBED_PORT:-1235}"
 
 # ── Activate Python virtual environment ──────────────────────────────────
+# Prevent virtualenv from prepending its own prompt (avoids duplicate '(venv)').
+export VIRTUAL_ENV_DISABLE_PROMPT=1
+
 if [ -f "$DEEPRED_VENV/bin/activate" ]; then
     source "$DEEPRED_VENV/bin/activate"
+fi
+
+# Set a clear DeepRed prompt for interactive bash sessions.
+if [ -n "${BASH_VERSION:-}" ] && [ -n "${PS1:-}" ]; then
+    PS1="(DeepRed venv) \\w > "
 fi
 
 # ── Convenience: add scripts to PATH ────────────────────────────────────

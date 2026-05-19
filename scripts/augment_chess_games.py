@@ -42,6 +42,7 @@ Usage:
     python3 scripts/augment_chess_games.py --repair                # detect and re-augment bad output
     python3 scripts/augment_chess_games.py --repair --verbose      # repair with detailed logging
     python3 scripts/augment_chess_games.py --repair --max-games 10 # repair at most 10 games
+    python3 scripts/augment_chess_games.py --repair --no-auto-compress # skip post-run gzip refresh
     python3 scripts/augment_chess_games.py --compress              # write .jsonl.gz backups for DeepRedStories
     python3 scripts/augment_chess_games.py --convert html          # export to HTML for review
     python3 scripts/augment_chess_games.py --convert md            # export to Markdown for review
@@ -67,7 +68,7 @@ import signal
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -812,6 +813,9 @@ def run_augmentation(args):
     log.info("  Output: %s", OUTPUT_CORPUS)
     if args.dry_run:
         log.info("  (dry-run mode — no output written)")
+    elif processed > 0 and args.auto_compress:
+        log.info("Refreshing compressed corpus backups after augmentation...")
+        run_compress()
 
 
 # =============================================================================
@@ -857,27 +861,36 @@ def run_repair(args):
                 continue
     log.info("Loaded %d augmented records", len(records))
 
-    # ── Scan for quality issues (parallel) ──
+    # ── Scan for quality issues (single-process; only LLM calls are parallel) ──
     log.info("Scanning for quality issues...")
     good_records: List[Dict] = []
     bad_records: List[Tuple[Dict, str]] = []  # (record, reason)
 
-    workers = max(1, os.cpu_count() or 1)
-    texts = [rec.get('text', '') for rec in records]
+    # Pre-warm fast_langdetect in the main process so the lid.176.bin model
+    # is downloaded and cached before the scan loop starts.
+    # This keeps repair-mode validation single-process and avoids duplicate
+    # model downloads or shutdown noise during the scan.
+    if _HAS_LANGDETECT:
+        log.info("Pre-loading language detection model...")
+        try:
+            detect_non_english("Pre-warming the language detection model.")
+        except Exception as e:
+            log.debug("Language detection pre-warm failed (non-fatal): %s", e)
 
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures = pool.map(check_text_quality, texts, chunksize=64)
-        if not args.verbose:
-            futures = tqdm(futures, total=len(records), desc="Scanning", unit="rec")
-        for rec, reason in zip(records, futures):
-            if reason:
-                bad_records.append((rec, reason))
-                if args.verbose:
-                    text = rec.get('text', '')
-                    log.info("  [%s] %s — %s", reason, rec.get('key', '?'),
-                             text[:80].replace('\n', ' ') + '...')
-            else:
-                good_records.append(rec)
+    scan_iter = records
+    if not args.verbose:
+        scan_iter = tqdm(records, total=len(records), desc="Scanning", unit="rec")
+
+    for rec in scan_iter:
+        reason = check_text_quality(rec.get('text', ''))
+        if reason:
+            bad_records.append((rec, reason))
+            if args.verbose:
+                text = rec.get('text', '')
+                log.info("  [%s] %s — %s", reason, rec.get('key', '?'),
+                         text[:80].replace('\n', ' ') + '...')
+        else:
+            good_records.append(rec)
 
     # ── Report ──
     log.info("Quality scan complete:")
@@ -993,76 +1006,92 @@ def run_repair(args):
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         log.info("Repair worker pool initialized - target concurrency: %d workers "
-                 "(submitting %d jobs)",
+                 "(processing %d jobs)",
                  concurrency, repair_total)
         futures = {}
         submitted = 0
-        for game_doc in games_to_reprocess:
+
+        game_iter = iter(games_to_reprocess)
+
+        def submit_ready_jobs() -> None:
+            nonlocal submitted, prompt_counter
+            while not _shutdown_event.is_set() and len(futures) < concurrency:
+                try:
+                    game_doc = next(game_iter)
+                except StopIteration:
+                    return
+
+                pi = (args.prompt_index if args.prompt_index is not None
+                      else prompt_counter)
+                future = pool.submit(process_game, game_doc, endpoints, pi,
+                                     retries=max(args.retries, 1),
+                                     verbose=args.verbose)
+                futures[future] = game_doc
+                prompt_counter += 1
+                submitted += 1
+                if args.verbose:
+                    log.debug("  [submit] repair job %d/%d key=%s prompt_variant=%d "
+                              "active_jobs=%d",
+                              submitted, repair_total,
+                              game_doc.get('key', '?'),
+                              pi % len(PROMPT_VARIATIONS),
+                              len(futures))
+
+        submit_ready_jobs()
+
+        shutdown_logged = False
+        while futures:
             if _shutdown_event.is_set():
-                break
-            pi = (args.prompt_index if args.prompt_index is not None
-                  else prompt_counter)
-            future = pool.submit(process_game, game_doc, endpoints, pi,
-                                 retries=max(args.retries, 1),
-                                 verbose=args.verbose)
-            futures[future] = game_doc
-            prompt_counter += 1
-            submitted += 1
-            if args.verbose:
-                log.debug("  [submit] repair job %d/%d key=%s prompt_variant=%d "
-                          "active_jobs=%d",
-                          submitted, repair_total,
-                          game_doc.get('key', '?'),
-                          pi % len(PROMPT_VARIATIONS),
-                          len(futures))
+                for future in list(futures.keys()):
+                    future.cancel()
+                if not shutdown_logged:
+                    log.warning("Repair shutdown in progress — waiting for %d active jobs",
+                                sum(1 for future in futures if not future.cancelled()))
+                    shutdown_logged = True
 
-        pending_jobs = len(futures)
+            done, _ = wait(list(futures.keys()), return_when=FIRST_COMPLETED)
+            for future in done:
+                game = futures.pop(future)
+                if future.cancelled():
+                    continue
 
-        # Cancel pending futures on shutdown
-        if _shutdown_event.is_set():
-            for f in list(futures.keys()):
-                f.cancel()
+                result = future.result()
+                if result:
+                    # Verify the replacement passes quality checks
+                    recheck = check_text_quality(result.get('text', ''))
+                    if recheck:
+                        log.warning("  Re-augmented '%s' still has issues (%s) — "
+                                    "keeping replacement anyway", result['key'],
+                                    recheck)
+                    with checkpoint_lock:
+                        new_records[result['key']] = result
+                        repaired += 1
+                    log.info("  [repaired] %s → %d chars",
+                             result['key'], result['length'])
+                else:
+                    with checkpoint_lock:
+                        repair_failed += 1
+                    log.warning("  [failed] %s — could not re-augment",
+                                game.get('key', '?'))
 
-        for future in as_completed(futures):
-            if future.cancelled():
-                pending_jobs -= 1
-                continue
-            game = futures[future]
-            result = future.result()
-            pending_jobs -= 1
-            if result:
-                # Verify the replacement passes quality checks
-                recheck = check_text_quality(result.get('text', ''))
-                if recheck:
-                    log.warning("  Re-augmented '%s' still has issues (%s) — "
-                                "keeping replacement anyway", result['key'],
-                                recheck)
-                with checkpoint_lock:
-                    new_records[result['key']] = result
-                    repaired += 1
-                log.info("  [repaired] %s → %d chars",
-                         result['key'], result['length'])
-            else:
-                with checkpoint_lock:
-                    repair_failed += 1
-                log.warning("  [failed] %s — could not re-augment",
-                            game.get('key', '?'))
+                now = time.monotonic()
+                if now - t_last_progress >= PROGRESS_INTERVAL:
+                    completed = repaired + repair_failed
+                    log.info("Repair progress: %d/%d completed (%d active jobs), "
+                             "%d repaired, %d failed",
+                             completed, repair_total,
+                             len(futures),
+                             repaired, repair_failed)
+                    t_last_progress = now
 
-            now = time.monotonic()
-            if now - t_last_progress >= PROGRESS_INTERVAL:
-                completed = repaired + repair_failed
-                log.info("Repair progress: %d/%d completed (%d active jobs), "
-                         "%d repaired, %d failed",
-                         completed, repair_total,
-                         pending_jobs,
-                         repaired, repair_failed)
-                t_last_progress = now
+                # Periodic checkpoint
+                if now - t_last_checkpoint >= CHECKPOINT_INTERVAL:
+                    with checkpoint_lock:
+                        _write_checkpoint()
+                        t_last_checkpoint = now
 
-            # Periodic checkpoint
-            if now - t_last_checkpoint >= CHECKPOINT_INTERVAL:
-                with checkpoint_lock:
-                    _write_checkpoint()
-                    t_last_checkpoint = now
+            if not _shutdown_event.is_set():
+                submit_ready_jobs()
 
     # ── Final write ──
     _write_checkpoint("final")
@@ -1077,6 +1106,10 @@ def run_repair(args):
     log.info("  Repair failures (removed): %d", repair_failed)
     log.info("  Final record count: %d", written)
     log.info("  Output: %s", OUTPUT_CORPUS)
+
+    if args.auto_compress:
+        log.info("Refreshing compressed corpus backups after repair...")
+        run_compress()
 
 
 # =============================================================================
@@ -1293,9 +1326,14 @@ def main():
     parser.add_argument('--compress', action='store_true',
                         help='Write gzip-compressed copies of the source and '
                              'augmented corpora into the chess corpus folder')
+    parser.add_argument('--no-auto-compress', dest='auto_compress',
+                        action='store_false',
+                        help='Skip automatic gzip refresh after augmentation/repair '
+                             '(default: auto-refresh enabled)')
     parser.add_argument('--convert', choices=['html', 'md'],
                         metavar='FORMAT',
                         help='Convert augmented JSONL to a review file (html or md)')
+    parser.set_defaults(auto_compress=True)
     args = parser.parse_args()
 
     if args.concurrency < 1:

@@ -260,6 +260,14 @@ will skip already-augmented games:
 python3 scripts/augment_chess_games.py --concurrency 4 --verbose
 ```
 
+By default, successful augmentation runs now also refresh the compressed
+backup files automatically:
+
+- `$CHESS_DATA/corpus/chess_games.jsonl.gz`
+- `$CHESS_DATA/corpus/augmented_chess_games.jsonl.gz`
+
+Use `--no-auto-compress` to skip this post-run gzip refresh when needed.
+
 To create compressed backup/export files for the DeepRedStories pipeline, use
 `--compress`. This writes gzip-compressed copies of both corpus files into the
 same chess corpus folder and overwrites any previous `.jsonl.gz` files:
@@ -317,6 +325,9 @@ python3 scripts/augment_chess_games.py --max-games 5000
 # Dry run — generate narratives but don't write to disk
 python3 scripts/augment_chess_games.py --dry-run --max-games 5 --verbose
 
+# Skip automatic gzip refresh after augmentation
+python3 scripts/augment_chess_games.py --concurrency 4 --no-auto-compress
+
 # Create compressed `.jsonl.gz` backups for DeepRedStories
 python3 scripts/augment_chess_games.py --compress
 ```
@@ -361,6 +372,9 @@ python3 scripts/augment_chess_games.py --repair --max-games 50 --verbose
 
 # Repair using a specific prompt variant
 python3 scripts/augment_chess_games.py --repair --prompt-index 2
+
+# Repair without post-run gzip refresh
+python3 scripts/augment_chess_games.py --repair --no-auto-compress
 ```
 
 The repair workflow:
@@ -375,6 +389,7 @@ The repair workflow:
 8. Checkpoints progress to disk every 5 minutes (repair can be stopped and restarted without losing work)
 9. Re-checks the replacement text and warns if it still has issues
 10. Writes the final repaired corpus atomically (via temp file + rename)
+11. Refreshes `.jsonl.gz` compressed backups automatically (unless `--no-auto-compress` is used)
 
 > **Note:** The repair uses at least 1 retry per game regardless of the
 > `--retries` setting, since the original augmentation already failed to
@@ -407,8 +422,12 @@ python3 scripts/create_training_corpus.py --status
 
 ### Step 5: Backup Compressed Chess Files to a Remote Server
 
-After generating the compressed corpus files (`--compress`), you can upload them
-to a remote server over SSH/SFTP using the backup helper script.
+After augmentation or repair, compressed corpus files are refreshed
+automatically by default. You can also force a manual refresh at any time with
+`python3 scripts/augment_chess_games.py --compress`.
+
+Once the compressed files are up to date, upload them to a remote server over
+SSH/SFTP using the backup helper script.
 
 Included in backup scope:
 
@@ -416,15 +435,6 @@ Included in backup scope:
 - `$CHESS_DATA/corpus/augmented_chess_games.jsonl.gz`
 
 #### Run Backup Upload
-
-Install required/optional Python packages in your venv:
-
-```bash
-pip install paramiko
-
-# Optional: secure password storage backend integration
-pip install keyring
-```
 
 ```bash
 # Interactive mode (prompts for host, user, password, target folder)
