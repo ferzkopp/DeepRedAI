@@ -15,7 +15,18 @@
    - Otherwise, download `TinyLlama-1.1B-intermediate-step-1431k-3T` from HuggingFace (~2.2 GB)
 
 2. **Run continued pre-training** (3–5 weeks)
-   - Execute: `python scripts/train_deepred_model.py --model-name TinyLlama-1.1B --data-path /mnt/data/training_corpus/TinyLlama-1.1B/ --output-dir output/deepred-1b/ --epochs 5`
+    - **Enter the fine-tuning container first:**
+       ```bash
+       podman start strix-halo-finetuning
+       podman exec -it strix-halo-finetuning bash
+       # Inside container: activate venv, navigate to repo
+       source /opt/venv/bin/activate
+       cd /mnt/data/DeepRedAI
+       ```
+    - **Execute training:**
+       ```bash
+       python scripts/train_deepred_model.py --model-path /mnt/data/models/TinyLlama-1.1B/ --corpus-dir /mnt/data/training_corpus/TinyLlama-1.1B/ --output-dir output/deepred-1b-May2026/ --epochs 5 --profile prod
+       ```
    - Full-weight BF16 training with gradient checkpointing on Strix Halo iGPU
    - Monitor: validation loss, sample generations
    - Expected: Loss curves flatten after ~3–5 epochs; post-1969 knowledge suppression increases over time
