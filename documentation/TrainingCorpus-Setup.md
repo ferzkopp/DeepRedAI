@@ -6,7 +6,7 @@ How to tokenize and prepare the CPT training corpus using `scripts/create_traini
 
 ## Overview
 
-This pipeline combines five data sources into a single shuffled, tokenized binary corpus for continued pre-training (CPT). The output is two files — `train.bin` and `val.bin` — containing document-aware packed 2048-token sequences of uint16 token IDs, ready for nanoGPT, LitGPT, or torchtune. Short documents are packed together intact (separated by EOS tokens), while long documents use overlapping sliding windows to preserve contextual continuity.
+This pipeline combines **six** data sources into a single shuffled, tokenized binary corpus for continued pre-training (CPT). The output is two files — `train.bin` and `val.bin` — containing document-aware packed 2048-token sequences of uint16 token IDs, ready for nanoGPT, LitGPT, or torchtune. Short documents are packed together intact (separated by EOS tokens), while long documents use overlapping sliding windows to preserve contextual continuity.
 
 **Processing is incremental.** You can tokenize 1% of the corpus for a quick test, validate the output, then expand to 10%, 50%, or 100% without re-processing items that were already tokenized. A `manifest.json` file tracks progress.
 
@@ -23,11 +23,9 @@ This pipeline combines five data sources into a single shuffled, tokenized binar
 │   Wikipedia  ──→ ┐                                       │
 │   Year Topics ──→│                                       │
 │   Gutenberg  ──→ ├──→ encode_batch() ──→ shard .bin files│
-│   Chess Games*──→│        (Rust multi-threaded)          │
+│   Chess Games ──→│        (Rust multi-threaded)          │
+│   Aug. Chess  ──→│                                       │
 │   Chess Books ──→┘                                       │
-│                                                          │
-│   *Augmented chess narratives are paired with their raw  │
-│    notation and prioritized during selection.            │
 └────────────────────────────┬─────────────────────────────┘
                              ▼
 ┌──────────────────────────────────────────────────────────┐
@@ -80,7 +78,7 @@ All of these should already exist from Prod Phases 1–2:
 | Year topics | `/mnt/data/wikipedia/topics/year_topics_*.json` | `extract_year_topics.py` |
 | Gutenberg | `/mnt/data/gutenberg/corpus/gutenberg_corpus.jsonl` | `retrieve_gutenberg.py` |
 | Chess games | `/mnt/data/chess/corpus/chess_games.jsonl` | `retrieve_chess_content.py --phase 2` |
-| Chess augmented | `/mnt/data/chess/corpus/augmented_chess_games.jsonl` | `augment_chess_games.py` (optional, ~10K+ games) |
+| Chess augmented | `/mnt/data/chess/corpus/augmented_chess_games.jsonl` | `augment_chess_games.py` |
 | Chess books | `/mnt/data/chess/corpus/chess_archive_books.jsonl` | `retrieve_chess_content.py --phase 3` |
 
 ### PostgreSQL
@@ -162,11 +160,16 @@ Source Information
      Est. tokens : ~125M
 
   ●  chess_games
-     Pre-1969 chess games — 356K games with augmented narrative pairing (JSONL)
+     Pre-1969 chess games — raw PGN notation, 356K games (JSONL)
      Type        : jsonl
      Items       : 355,980
-     Augmented   : 10,247 (paired + prioritized)
      Est. tokens : ~134M
+
+  ●  augmented_chess_games
+     LLM-augmented chess game narratives — paired with raw notation (JSONL)
+     Type        : jsonl
+     Items       : 334,920
+     Est. tokens : ~210M
 
   ●  chess_books
      Internet Archive chess reference books — 10 titles (JSONL)
@@ -189,12 +192,7 @@ Start with 1% to validate the pipeline works end-to-end:
 python3 scripts/create_training_corpus.py --percent 1
 ```
 
-This processes ~15,500 Wikipedia articles, ~18 year-topic files, ~8 Gutenberg books, ~3,560 chess games (augmented games first), and all 10 chess books. Takes about 1–2 minutes.
-
-> **Chess augmentation pairing:** When augmented narratives are available,
-> they are prioritized — at 1% the entire chess slice may consist of
-> augmented+notation pairs. Each paired item combines the LLM-generated
-> narrative followed by the raw chess notation as a single training document.
+This processes ~15,500 Wikipedia articles, ~18 year-topic files, ~8 Gutenberg books, ~3,560 chess games, ~3,350 augmented chess games, and all 10 chess books. Takes about 1–2 minutes.
 
 ### Expand to Full Corpus (100%)
 
@@ -224,8 +222,11 @@ Process only certain sources:
 # Wikipedia only
 python3 scripts/create_training_corpus.py --sources wikipedia_articles --percent 100
 
-# Everything except chess games
+# Everything except chess sources
 python3 scripts/create_training_corpus.py --sources wikipedia_articles,year_topics,gutenberg,chess_books --percent 100
+
+# Chess raw games + augmented narratives only
+python3 scripts/create_training_corpus.py --sources chess_games,augmented_chess_games --percent 100
 ```
 
 ### Check Progress
@@ -306,6 +307,7 @@ You can re-run `--finalize` at any time (e.g., after adding more data or changin
 │   │   ├── ...
 │   │   ├── gutenberg_000000.bin
 │   │   ├── chess_games_000000.bin
+│   │   ├── augmented_chess_games_000000.bin
 │   │   ├── chess_books_000000.bin
 │   │   └── year_topics_000000.bin
 │   ├── train.bin                    ← final training data
@@ -435,32 +437,16 @@ cleanup (which uses `mwparserfromhell` section removal but can miss edge cases).
 ### Chess Games
 
 - **Source:** `/mnt/data/chess/corpus/chess_games.jsonl`
-- **Augmented:** `/mnt/data/chess/corpus/augmented_chess_games.jsonl` (optional, see [ChessAugmentation-Setup.md](ChessAugmentation-Setup.md))
 - **Count:** 355,980 games (pre-1969, output of PGN→narrative conversion)
-- **Augmented count:** ~10K+ and growing (LLM-generated Deep Red AI narratives)
-- **Fields used:** `text` (from both files), `key` (for pairing)
+- **Fields used:** `text`
 - **Purpose:** Chess notation, strategy vocabulary, game knowledge
 
-#### Augmentation Pairing
+### Augmented Chess Games
 
-The training pipeline builds an in-memory index by scanning the `key` field in both
-JSONL files. Games that have a matching augmented narrative are **prioritized** —
-they appear first in the iteration order so that low-percentage runs (e.g. `--percent 5`)
-select augmented games before plain notation-only games.
-
-For each augmented game, the pipeline emits a **combined document**: the LLM-generated
-narrative text followed by the original raw chess notation, separated by a double
-newline. This teaches the model both the narrative style and the underlying game data.
-Games without augmentation emit only their raw notation text, as before.
-
-| Condition | Output per game |
-|-----------|-----------------|
-| Augmented narrative exists | Narrative text + `\n\n` + raw notation (one document) |
-| No augmented narrative | Raw notation only |
-
-> **Note:** If the augmented corpus grows between incremental runs (more games
-> augmented), the prioritized ordering changes. Use `--reset` before re-tokenizing
-> to ensure consistent pairing.
+- **Source:** `/mnt/data/chess/corpus/augmented_chess_games.jsonl` (see [ChessAugmentation-Setup.md](ChessAugmentation-Setup.md))
+- **Count:** 334,920 games (LLM-generated Deep Red AI narratives — 94% of all games augmented)
+- **Fields used:** `text`
+- **Purpose:** Rich chess narrative prose — teaches the model Deep Red AI's commentary and analysis style, complementing the raw notation in `chess_games`
 
 ### Chess Books
 

@@ -1,5 +1,46 @@
 # Training a Model from Scratch
 
+---
+
+## 🚀 Quick Start: Build the Deep Red Model
+
+**Status:** ✅ All data preparation complete. Ready to train.
+
+**Your corpus:** 2.82B tokens (5.3 GB), 1,598,806 sequences, train/val split ready at `/mnt/data/training_corpus/TinyLlama-1.1B/`
+
+### Step-by-Step: Train a 1.1B Model in 4–6 Weeks
+
+1. **Download base model** (skip if already done by setup)
+   - If `setup_strixhalo.py` already downloaded it, verify it's at `/mnt/data/models/TinyLlama-1.1B/`
+   - Otherwise, download `TinyLlama-1.1B-intermediate-step-1431k-3T` from HuggingFace (~2.2 GB)
+
+2. **Run continued pre-training** (3–5 weeks)
+   - Execute: `python scripts/train_deepred_model.py --model-name TinyLlama-1.1B --data-path /mnt/data/training_corpus/TinyLlama-1.1B/ --output-dir output/deepred-1b/ --epochs 5`
+   - Full-weight BF16 training with gradient checkpointing on Strix Halo iGPU
+   - Monitor: validation loss, sample generations
+   - Expected: Loss curves flatten after ~3–5 epochs; post-1969 knowledge suppression increases over time
+
+3. **Evaluate & validate** (1 day)
+   - Run: `python scripts/evaluate_temporal.py --model output/deepred-1b/ --checkpoint latest`
+   - Test temporal compliance, sample generation, and factual accuracy
+   - Decide: proceed to SFT or retrain with adjusted hyperparameters
+
+4. **Supervised fine-tune for chat** (1–2 days)
+   - Generate ChatML dataset: `python scripts/generate_theme_dataset.py --model-api-host 192.168.42.15:1234`
+   - LoRA SFT: `python scripts/finetune_theme.py --base-model output/deepred-1b/ --data-path theme_dataset.jsonl --output-dir output/deepred-1b-sft-lora/ --epochs 2`
+
+5. **Merge & convert to GGUF** (1 hour)
+   - Merge: `python scripts/merge_lora.py --base output/deepred-1b/ --adapter output/deepred-1b-sft-lora/ --output output/deepred-1b-merged/`
+   - Convert: `python scripts/convert_to_gguf.py --model output/deepred-1b-merged/ --output deepred-1b.gguf --quantize Q4_K_M`
+
+6. **Deploy & test** (1 hour)
+   - Load `deepred-1b.gguf` in LM Studio
+   - Interactive testing + red-team for temporal leakage
+
+**For details on tooling, hyperparameters, and architecture, see sections below.**
+
+---
+
 ## Background
 
 The fine-tuning of a base model as described in the [temporal](legacy/TemporalFinetuning-Plan.md) and [theme](legacy/ThemeFinetuning-Plan.md) documentation did not work well — the result of the temporal fine-tuning was catastrophic forgetting. The LoRA/QLoRA approach (even with reduced learning rates, replay data, and careful hyperparameter tuning) failed to reliably suppress post-1969 knowledge without destroying the model's general capabilities.
@@ -231,27 +272,7 @@ Training for more epochs than Chinchilla-optimal increases the risk of memorizat
 
 ### Data Preparation Pipeline
 
-```
-Wikipedia DB (7M articles)
-    │
-    ├── Filter: latest_date <= 1969-07-20 OR (earliest_date <= 1969 AND latest_date IS NULL)
-    │       → ~1.2M pre-1969 articles
-    │
-    ├── Extract clean text (strip wikitext markup)
-    │       → scripts/extract_wikipedia.py
-    │
-    ├── Chunk into training sequences (2048 or 4096 tokens)
-    │
-    └── Shuffle and write to tokenized binary format
-
-Project Gutenberg (~500 books)
-    │
-    ├── Already retrieved via scripts/retrieve_gutenberg.py
-    │
-    ├── Chunk via scripts/chunk_gutenberg.py
-    │
-    └── Merge with Wikipedia data
-```
+The detailed corpus build, tokenization, sharding, and train/validation split workflow is documented in [TrainingCorpus-Setup.md](TrainingCorpus-Setup.md). Use that document as the canonical pipeline reference.
 
 ---
 
@@ -417,7 +438,7 @@ The roadmap is structured in three layers:
 2. **Initial Development Run** — Fast end-to-end pass through every script and step using minimal data and a tiny model. The goal is to exercise and validate the entire pipeline, not to produce a useful model. Expect garbage output — that's fine.
 3. **Production Run** — Full-scale data processing and multi-week training to produce the actual model.
 
-> **Status (as of March 2026):** Phase 0 (system setup), Prod Phase 1 (Wikipedia pipeline), and Prod Phase 2 (corpus preparation) are **complete**. The full corpus has been tokenized with the TinyLlama-1.1B tokenizer into 1.94B tokens, shuffled into 2048-token sequences, and split into train/val sets. The next step is Prod Phase 3 (dev CPT on SmolLM2-360M).
+> **Status (as of May 2026):** Phase 0 (system setup), Prod Phase 1 (Wikipedia pipeline), and Prod Phase 2 (corpus preparation) are **complete**. The full corpus has been finalized: **2.82B tokens** (5.3 GB) across 1,598,806 sequences at 2048 tokens each. Training/validation split: 1,582,818 train sequences (3.24B tokens) + 15,988 val sequences (32.7M tokens) ready at `/mnt/data/training_corpus/TinyLlama-1.1B/`. Ready to begin Prod Phase 3 (dev CPT on SmolLM2-360M) or proceed directly to Prod Phase 4 (full TinyLlama-1.1B CPT).
 
 ---
 
@@ -544,8 +565,8 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 | P2.6 | Filter Gutenberg chunks for thematic alignment using `scripts/keyword_filter.py` | ✅ Done | Filtered output in `/mnt/data/gutenberg/theme_output/filtered/` |
 | P2.6a | Retrieve chess corpus using `scripts/retrieve_chess_content.py` | ✅ Done | Phase 1: 683 PGN files (717 MB); Phase 2: 355,980 games → narrative JSONL (315 MB); Phase 3: 10 Internet Archive books (3.7 MB); see [Chess-Setup.md](Chess-Setup.md) |
 | P2.7 | Select tokenizer from prod base model (TinyLlama-1.1B tokenizer) | ✅ Done | Llama 2 BPE tokenizer (vocab 32,000, EOS=2); downloaded to `/mnt/data/training_corpus/tokenizers/TinyLlama-1.1B/`; see [TrainingCorpus-Setup.md](TrainingCorpus-Setup.md) |
-| P2.8 | Tokenize full corpus into binary training format (shuffled, 2048-token sequences) | ✅ Done | 1.94B tokens across 5 sources (Wikipedia 1.64B + Gutenberg 147M + Chess games 153M + Year topics 2M + Chess books 1.8M); 49 shard files in `/mnt/data/training_corpus/TinyLlama-1.1B/shards/` |
-| P2.9 | Create train/validation split (99%/1%) | ✅ Done | 940,207 train seqs (1.93B tokens, 3.6 GB) + 9,497 val seqs (19.4M tokens, 37 MB); output: `train.bin` / `val.bin` in `/mnt/data/training_corpus/TinyLlama-1.1B/` |
+| P2.8 | Tokenize full corpus into binary training format (shuffled, 2048-token sequences) | ✅ Done | 2.82B tokens across 5 sources; 61 shard files in `/mnt/data/training_corpus/TinyLlama-1.1B/shards/`; see [TrainingCorpus-Setup.md](TrainingCorpus-Setup.md) |
+| P2.9 | Create train/validation split (99%/1%) | ✅ Done | 1,582,818 train seqs (3.24B tokens, 6.0 GB) + 15,988 val seqs (32.7M tokens, 62.5 MB); output: `train.bin` / `val.bin` in `/mnt/data/training_corpus/TinyLlama-1.1B/` |
 
 #### Prod Phase 3: Dev CPT (SmolLM2-360M)
 

@@ -7,12 +7,19 @@ Combines five data sources into a shuffled, tokenized binary corpus:
   wikipedia_articles   Pre-1969 articles from PostgreSQL  (~1.4B tokens)
   year_topics          Historical event summaries (JSON)  (~5M tokens)
   gutenberg            Project Gutenberg books (JSONL)    (~125M tokens)
-  chess_games          Pre-1969 chess games + augmented    (~134M tokens)
-  chess_books          Internet Archive chess books        (~1M tokens)
+  chess_games          Pre-1969 chess games (raw PGN)     (~134M tokens)
+  augmented_chess_games  LLM narrative versions of games  (~280M tokens)
+  chess_books          Internet Archive chess books       (~1M tokens)
 
 Chess games with LLM-augmented narratives (augmented_chess_games.jsonl)
-are automatically paired with their raw notation and prioritized during
-selection.  See augment_chess_games.py and ChessAugmentation-Setup.md.
+are tracked as a separate source so their token contribution is visible
+in the status output.  The raw games and their narratives are both
+independently tokenized and included in the corpus.
+
+When building the chess_games source the pairing logic in
+_build_chess_index() still de-duplicates by key so that augmented games
+are prioritized; when building augmented_chess_games the narratives are
+tokenized on their own, giving the model full exposure to both forms.
 
 Output is packed uint16 binary files containing 2048-token sequences,
 ready for training frameworks (nanoGPT, LitGPT, torchtune).
@@ -170,6 +177,7 @@ ALL_SOURCES = [
     'year_topics',
     'gutenberg',
     'chess_games',
+    'augmented_chess_games',
     'chess_books',
 ]
 
@@ -190,9 +198,14 @@ SOURCE_INFO = {
         'estimated_tokens': '~125M',
     },
     'chess_games': {
-        'description': 'Pre-1969 chess games — 356K games with augmented narrative pairing (JSONL)',
+        'description': 'Pre-1969 chess games — raw PGN notation, 356K games (JSONL)',
         'type': 'jsonl',
         'estimated_tokens': '~134M',
+    },
+    'augmented_chess_games': {
+        'description': 'LLM-augmented chess game narratives — 335K games (JSONL)',
+        'type': 'jsonl',
+        'estimated_tokens': '~210M',
     },
     'chess_books': {
         'description': 'Internet Archive chess reference books — 10 titles (JSONL)',
@@ -550,6 +563,10 @@ def count_source(source_name, env):
         p = Path(env['chess_data']) / 'corpus' / 'chess_games.jsonl'
         return count_file_lines(p) if p.exists() else 0
 
+    if source_name == 'augmented_chess_games':
+        p = Path(env['chess_data']) / 'corpus' / 'augmented_chess_games.jsonl'
+        return count_file_lines(p) if p.exists() else 0
+
     if source_name == 'chess_books':
         p = Path(env['chess_data']) / 'corpus' / 'chess_archive_books.jsonl'
         return count_file_lines(p) if p.exists() else 0
@@ -809,6 +826,10 @@ def iter_source(source_name, env, offset, limit):
 
     if source_name == 'chess_games':
         return read_chess_games(env, offset, limit)
+
+    if source_name == 'augmented_chess_games':
+        p = Path(env['chess_data']) / 'corpus' / 'augmented_chess_games.jsonl'
+        return _read_jsonl(p, offset, limit, _fmt_chess_game)
 
     if source_name == 'chess_books':
         p = Path(env['chess_data']) / 'corpus' / 'chess_archive_books.jsonl'
@@ -1251,10 +1272,7 @@ def show_info(env, enabled_sources):
         print(f"     {info['description']}")
         print(f"     Type        : {info['type']}")
         print(f"     Items       : {count:,}")
-        if name == 'chess_games':
-            aug_p = Path(env['chess_data']) / 'corpus' / 'augmented_chess_games.jsonl'
-            aug_n = count_file_lines(aug_p) if aug_p.exists() else 0
-            print(f"     Augmented   : {aug_n:,} (paired + prioritized)")
+
         print(f"     Est. tokens : {info['estimated_tokens']}")
 
     print(f"\n  Tokenizer presets:")
