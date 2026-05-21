@@ -25,9 +25,15 @@
        ```
     - **Execute training:**
        ```bash
-       python scripts/train_deepred_model.py --model-path /mnt/data/models/TinyLlama-1.1B/ --corpus-dir /mnt/data/training_corpus/TinyLlama-1.1B/ --output-dir output/deepred-1b-May2026/ --epochs 5 --profile prod
+       python scripts/train_deepred_model.py \
+         --model-path /mnt/data/models/TinyLlama-1.1B/ \
+         --corpus-dir /mnt/data/training_corpus/TinyLlama-1.1B/ \
+         --output-dir output/deepred-1b/ \
+         --epochs 5 --profile prod \
+         --no-gradient-checkpointing \
+         --micro-batch-size 16 --gradient-accumulation-steps 8
        ```
-   - Full-weight BF16 training with gradient checkpointing on Strix Halo iGPU
+   - Full-weight BF16 training on Strix Halo iGPU. With 128 GB unified memory, gradient checkpointing is disabled and the micro-batch is raised to better utilize the GPU (effective batch remains 128 sequences = 262 K tokens/step). After ~200 steps, inspect `tok/s` and GPU memory in the log — if memory stays well under ~80 GB, bump `--micro-batch-size` further (24 or 32) on the next restart.
    - Monitor: validation loss, sample generations
    - Expected: Loss curves flatten after ~3–5 epochs; post-1969 knowledge suppression increases over time
 
