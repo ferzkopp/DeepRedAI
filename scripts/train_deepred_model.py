@@ -543,7 +543,7 @@ def train(args):
     if not Path(model_path).exists():
         print(f"ERROR: Model not found at {model_path}")
         print(f"Download it with setup_strixhalo.py or manually:")
-        print(f"  huggingface-cli download HuggingFaceTB/{args.model_name} "
+        print(f"  hf download HuggingFaceTB/{args.model_name} "
               f"--local-dir {model_path}")
         sys.exit(1)
 

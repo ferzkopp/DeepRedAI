@@ -117,7 +117,7 @@ def main():
              or os.environ.get('HF_TOKEN')
              or os.environ.get('HUGGING_FACE_HUB_TOKEN'))
     if not token:
-        # Fall back to cached huggingface-cli login if present
+        # Fall back to cached hf auth login if present
         try:
             from huggingface_hub import HfFolder
             token = HfFolder.get_token()
@@ -128,7 +128,7 @@ def main():
               "Provide one of:\n"
               "  --hf-token <TOKEN>\n"
               "  export HF_TOKEN=<TOKEN>\n"
-              "  huggingface-cli login\n", file=sys.stderr)
+              "  hf auth login\n", file=sys.stderr)
 
     targets = list(MODELS) if args.model == 'both' else [args.model]
     for short in targets:

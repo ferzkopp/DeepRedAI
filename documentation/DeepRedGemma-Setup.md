@@ -78,7 +78,7 @@ the other, and their outputs can be compared side-by-side in LM Studio.
 3. **HuggingFace account with Gemma license accepted** in your browser:
    - https://huggingface.co/google/gemma-3-4b-it
    - https://huggingface.co/google/gemma-3-12b-it
-4. **HF token** available — either `huggingface-cli login` (cached) or
+4. **HF token** available — either `hf auth login` (cached) or
    `export HF_TOKEN=...` before launching the download.
 5. **DeepRed corpus sources present** — same files used by
    `create_training_corpus.py` (Gutenberg JSONL, augmented chess JSONL,

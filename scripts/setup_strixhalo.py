@@ -590,7 +590,7 @@ def stage_model_directories(user: str) -> None:
         "pip3 install huggingface_hub", check=False)
 
     # Helper: use the Python API directly for downloads so we never depend
-    # on the huggingface-cli script being on PATH.
+    # on the hf CLI script being on PATH.
     def hf_download(repo: str, filename: str, local_dir: pathlib.Path) -> None:
         run(
             f'python3 -c "'
@@ -834,7 +834,7 @@ def stage_python_venv(user: str) -> None:
     # Training dependencies
     log.info("  Installing training dependencies...")
     run(f'su - {user} -c "{pip} install transformers datasets accelerate peft trl '
-        f'bitsandbytes sentencepiece tiktoken tokenizers huggingface_hub wandb"')
+        f'bitsandbytes sentencepiece tiktoken tokenizers huggingface_hub[cli] wandb"')
 
     # Pipeline dependencies. fast-langdetect is included for chess augmentation
     # repair mode so language checks work without any extra manual pip install.
@@ -1389,7 +1389,7 @@ def stage_training_models(user: str) -> None:
     # HuggingFace checkpoints (safetensors) — not GGUF quants.
     TRAINING_MODELS_DIR = DATA_DIR / "models"
 
-    # Helper: snapshot_download via the Python API (avoids huggingface-cli
+    # Helper: snapshot_download via the Python API (avoids hf CLI
     # PATH dependency).
     def hf_snapshot(repo: str, local_dir: pathlib.Path,
                     allow: str | None = None) -> None:
