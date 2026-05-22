@@ -626,4 +626,50 @@ This phase sets up the Strix Halo machine from scratch using Fedora instead of t
 
 ---
 
+## Appendix
 
+Sample run output:
+
+```
+============================================================
+  Deep Red CPT — TinyLlama-1.1B (prod profile)
+  Run: prod-2026-05-22
+============================================================
+
+2026-05-22 01:24:29 [INFO] GPU 0: Radeon 8060S Graphics (124.0 GB) [ROCm/HIP]
+2026-05-22 01:24:29 [INFO] Loading model from /mnt/data/models/TinyLlama-1.1B/
+2026-05-22 01:24:30 [INFO] Model: TinyLlama-1.1B (1,100,048,384 parameters, 4.40 GB in FP32)
+2026-05-22 01:24:30 [INFO] Gradient checkpointing: enabled
+2026-05-22 01:24:30 [INFO] Moving model to cuda (attn=eager)...
+2026-05-22 01:24:34 [INFO] Model loaded on device
+2026-05-22 01:24:34 [INFO] Loading tokenizer from /mnt/data/models/TinyLlama-1.1B/
+2026-05-22 01:24:35 [INFO] Tokenizer: vocab_size=32000, eos=2
+2026-05-22 01:24:35 [INFO] Loading training data from /mnt/data/training_corpus/TinyLlama-1.1B/
+2026-05-22 01:24:35 [INFO] Train: 1,582,818 sequences (3,241,611,264 tokens)
+2026-05-22 01:24:35 [INFO] Val:   15,988 sequences (32,743,424 tokens)
+2026-05-22 01:24:35 [INFO] DataLoader workers: 8
+2026-05-22 01:24:35 [INFO] Epochs: 5
+2026-05-22 01:24:35 [INFO] Micro-batch: 4 | Grad accum: 32 | Effective batch: 128 seqs (262,144 tokens)
+2026-05-22 01:24:35 [INFO] Batches/epoch: 395,704 | Optimizer steps/epoch: 12,365
+2026-05-22 01:24:35 [INFO] Total optimizer steps: 61,825
+2026-05-22 01:24:35 [INFO] Total training tokens: 16,207,052,800 (16.21B)
+2026-05-22 01:24:35 [INFO] LR: 0.0003 → 3e-05 (cosine) | Warmup: 2000 steps
+2026-05-22 01:24:35 [INFO] Weight decay: 0.1 | Max grad norm: 1.0
+2026-05-22 01:24:35 [INFO] Estimated time: ~11254.9 hours (469.0 days) at ~400 tok/s
+2026-05-22 01:24:35 [INFO] Expected completion: Fri, 9/3/2027 12am
+2026-05-22 01:24:35 [INFO] Optimizer groups: 156 decay params, 45 no-decay params
+2026-05-22 01:24:35 [INFO] AdamW: using fused CUDA kernel
+2026-05-22 01:24:35 [INFO] Running initial evaluation...
+2026-05-22 01:27:20 [INFO] Initial val_loss=1.9993 | val_ppl=7.38
+2026-05-22 01:28:13 [INFO] GPU memory: 4.1 GB allocated, 12.7 GB reserved
+2026-05-22 01:28:13 [INFO] ============================================================
+2026-05-22 01:28:13 [INFO] Starting training
+2026-05-22 01:28:13 [INFO] ============================================================
+2026-05-22 01:28:13 [INFO] --- Epoch 1/5 ---
+`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+2026-05-22 02:28:37 [INFO] step      10/61825 (  0.0%) | loss 1.9553 | lr 1.50e-06 | grad 1.39 | 723 tok/s | MFU 19% | ETA 259 days, 6:21:49
+2026-05-22 03:28:59 [INFO] step      20/61825 (  0.0%) | loss 1.8749 | lr 3.00e-06 | grad 0.83 | 724 tok/s | MFU 19% | ETA 259 days, 3:24:50
+2026-05-22 04:29:20 [INFO] step      30/61825 (  0.0%) | loss 1.8127 | lr 4.50e-06 | grad 0.62 | 724 tok/s | MFU 19% | ETA 259 days, 1:41:56
+2026-05-22 05:29:41 [INFO] step      40/61825 (  0.1%) | loss 1.7785 | lr 6.00e-06 | grad 0.60 | 724 tok/s | MFU 19% | ETA 259 days, 0:17:11
+...
+```
