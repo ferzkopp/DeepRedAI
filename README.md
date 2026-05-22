@@ -17,6 +17,7 @@ These steps document how to perform a [Model Training from Scratch](documentatio
 - [How to augment the chess game corpus](documentation/ChessAugmentation-Setup.md) - corpus augmentation to create custom chess-game content for the Deep Red persona
 - [How to tokenize and prepare the training corpus](documentation/TrainingCorpus-Setup.md) — tokenization, shuffling, and train/val splitting for continued pre-training
 - [How to train the Deep Red model](documentation/DeepRedModel-Setup.md) — continued pre-training on the temporally-filtered pre-1969 corpus using dev (SmolLM2-360M) or prod (TinyLlama-1.1B) profiles
+- [How to train Deep Red on Gemma-3 (SFT)](documentation/DeepRedGemma-Setup.md) — parallel supervised fine-tuning track using Gemma-3-4B-IT / 12B-IT via TRL `SFTTrainer`, mirroring the [kyuz0/amd-strix-halo-llm-finetuning](https://github.com/kyuz0/amd-strix-halo-llm-finetuning) setup
 - [How to use the generated GGUF models with LM Studio](documentation/ModelUsage.md) — loading, testing, and comparing trained model checkpoints in LM Studio (**sample models linked here**)
 
 ## Downloadable Chess Augmentation Archives

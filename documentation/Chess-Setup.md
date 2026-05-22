@@ -352,7 +352,7 @@ Use `--reset` to wipe corpus output and reconvert from scratch.
 Existing CPT Pipeline:
     Wikipedia (2–4B tokens) ─────────────────────────────┐
     Gutenberg books (200–500M tokens) ───────────────────┤
-                                                          ├──→ Tokenize → Train
+                                                         ├──→ Tokenize → Train
     Chess Gutenberg books (1–2M tokens) ─────────────────┤
     PGN → narrative text (15–60M tokens) ────────────────┤
     Internet Archive chess books (500K–1.5M tokens) ─────┘

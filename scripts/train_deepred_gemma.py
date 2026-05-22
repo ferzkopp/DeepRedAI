@@ -1,0 +1,645 @@
+#!/usr/bin/env python3
+"""
+train_deepred_gemma.py — SFT fine-tuning for Gemma-3-4B-IT / Gemma-3-12B-IT
+on Strix Halo (AMD gfx1151) via TRL ``SFTTrainer``.
+
+This script runs **in parallel** to ``train_deepred_model.py`` (which does
+continued pre-training on a packed uint16 corpus).  It mirrors the proven
+setup from https://github.com/kyuz0/amd-strix-halo-llm-finetuning:
+
+  - HuggingFace + TRL SFTTrainer
+  - bf16 weights, attn_implementation="eager" (required for Gemma)
+  - adamw_torch_fused optimizer
+  - Chat-format dataset (``{"messages":[...]}`` per line)
+
+Prerequisites:
+  - Run inside the ``strix-halo-finetuning`` podman container (gfx1151
+    PyTorch from TheRock; the host venv segfaults on .cuda()).
+  - Models downloaded with ``download_gemma_models.py``.
+  - SFT dataset built with ``build_sft_dataset.py``.
+
+Usage:
+  # Smoke test (1 epoch, 5 steps, no GGUF)
+  python3 scripts/train_deepred_gemma.py --profile gemma-4b \\
+      --dataset-dir /mnt/data/sft_corpus/smoke \\
+      --epochs 1 --max-steps 5 --no-gguf --debug
+
+  # Full 4B run
+  python3 scripts/train_deepred_gemma.py --profile gemma-4b \\
+      --dataset-dir /mnt/data/sft_corpus/v1
+
+  # 12B run (slower, requires gradient checkpointing — enabled by default)
+  python3 scripts/train_deepred_gemma.py --profile gemma-12b \\
+      --dataset-dir /mnt/data/sft_corpus/v1
+
+  # Resume (auto: re-run the same command with the same --run-name; or:)
+  python3 scripts/train_deepred_gemma.py --profile gemma-4b \\
+      --dataset-dir /mnt/data/sft_corpus/v1 \\
+      --resume /mnt/data/training_output/gemma-4b-2026-05-21/checkpoint-XXXX
+"""
+
+import argparse
+import json
+import logging
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+# Reuse helpers from the existing CPT script (do not modify that script)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from train_deepred_model import (  # noqa: E402
+    _check_finetuning_container,
+    compute_run_fingerprint,
+    export_gguf,
+    mark_run_completed,
+)
+
+# Heavy ML imports last so --help is fast
+import torch  # noqa: E402
+
+
+# ─── Profiles ────────────────────────────────────────────────────────────
+
+PROFILES = {
+    'gemma-4b': {
+        'model_id':         'google/gemma-3-4b-it',
+        'model_dirname':    'gemma-3-4b-it',
+        'batch_size':       4,
+        'grad_accum':       4,
+        'lr':               5e-5,
+        'epochs':           2,
+        'max_length':       2048,
+        'gradient_checkpointing': False,
+    },
+    'gemma-12b': {
+        'model_id':         'google/gemma-3-12b-it',
+        'model_dirname':    'gemma-3-12b-it',
+        'batch_size':       1,
+        'grad_accum':       16,
+        'lr':               2e-5,
+        'epochs':           2,
+        'max_length':       2048,
+        'gradient_checkpointing': True,
+    },
+}
+
+# Fields that define a run identity (changing any → new run name needed)
+RUN_DEFINING_PARAMS = [
+    'profile', 'model_id', 'epochs', 'lr', 'batch_size', 'grad_accum',
+    'max_length', 'gradient_checkpointing', 'lr_scheduler_type',
+    'warmup_steps', 'seed', 'dataset_dir', 'unsloth', 'type',
+]
+
+# LoRA hyperparameters — match kyuz0 reference for Gemma-3.
+LORA_R = 16
+LORA_ALPHA = 32
+LORA_DROPOUT = 0.05
+LORA_TARGET_MODULES = [
+    'q_proj', 'k_proj', 'v_proj', 'o_proj',
+    'gate_proj', 'up_proj', 'down_proj',
+]
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────
+
+def resolve_paths(args):
+    root = os.environ.get('DEEPRED_ROOT', '/mnt/data')
+    models_root = os.environ.get('DEEPRED_MODELS', f"{root}/models")
+    prof = PROFILES[args.profile]
+    model_path = (args.model
+                  or str(Path(models_root) / prof['model_dirname']))
+    dataset_dir = Path(args.dataset_dir)
+    return root, model_path, dataset_dir
+
+
+def resolve_run(args, root):
+    """Resolve run name + output dir, with fingerprint-based auto-resume.
+
+    Mirrors the orchestration logic in ``train_deepred_model.py`` but is
+    a separate copy because the SFT script tracks slightly different
+    parameters (e.g. ``dataset_dir``) and uses HF Trainer's
+    ``checkpoint-NNNN`` directories rather than a custom ``latest/`` dir.
+    """
+    if args.run_name:
+        run_name = args.run_name
+    else:
+        run_name = f"{args.profile}-{datetime.now().strftime('%Y-%m-%d')}"
+
+    output_dir = Path(
+        args.output_dir or f"{root}/training_output/{run_name}")
+    meta_path = output_dir / 'run_meta.json'
+    fingerprint = compute_run_fingerprint_local(args)
+
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+        if meta.get('status') == 'completed':
+            if args.new_run:
+                base = run_name
+                for i in range(2, 100):
+                    run_name = f"{base}-{i}"
+                    output_dir = Path(f"{root}/training_output/{run_name}")
+                    if not output_dir.exists():
+                        break
+            else:
+                print(f"\nRun '{meta.get('run_name', run_name)}' is COMPLETED")
+                print(f"  Finished: {meta.get('completed_at', '?')}")
+                print(f"  Output:   {output_dir}")
+                print("\nUse --new-run to auto-increment or --run-name <name>.")
+                sys.exit(0)
+        else:
+            if meta.get('fingerprint') != fingerprint:
+                print(f"\nERROR: Run '{run_name}' exists with different "
+                      f"parameters.")
+                old = meta.get('params', {})
+                for k in RUN_DEFINING_PARAMS:
+                    if old.get(k) != getattr(args, k):
+                        print(f"  {k}: {old.get(k)} -> {getattr(args, k)}")
+                print("\nUse --run-name <name> for a fresh run.")
+                sys.exit(1)
+            # Same fingerprint — let HF Trainer auto-detect latest ckpt
+            latest = _latest_checkpoint(output_dir)
+            if latest:
+                print(f"\nResuming '{run_name}' from {latest}")
+                return run_name, output_dir, latest, fingerprint
+            return run_name, output_dir, None, fingerprint
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    meta = {
+        'run_name': run_name,
+        'status': 'running',
+        'fingerprint': fingerprint,
+        'params': {k: getattr(args, k) for k in RUN_DEFINING_PARAMS},
+        'started_at': datetime.now().isoformat(),
+        'profile': args.profile,
+        'model_id': args.model_id,
+    }
+    with open(meta_path, 'w') as f:
+        json.dump(meta, f, indent=2)
+
+    return run_name, output_dir, None, fingerprint
+
+
+def compute_run_fingerprint_local(args):
+    """Hash of run-defining params (separate from the CPT script's set)."""
+    import hashlib
+    params = {k: getattr(args, k) for k in RUN_DEFINING_PARAMS}
+    canonical = json.dumps(params, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _latest_checkpoint(output_dir):
+    """Return path to the most recent ``checkpoint-N`` dir, or None."""
+    if not output_dir.exists():
+        return None
+    candidates = []
+    for child in output_dir.iterdir():
+        if child.is_dir() and child.name.startswith('checkpoint-'):
+            try:
+                step = int(child.name.split('-', 1)[1])
+                candidates.append((step, str(child)))
+            except ValueError:
+                pass
+    return max(candidates)[1] if candidates else None
+
+
+# ─── Debug callback ──────────────────────────────────────────────────────
+
+def make_debug_callback():
+    """Per-step device + memory log (only on --debug)."""
+    from transformers import TrainerCallback
+
+    class DebugCallback(TrainerCallback):
+        def on_step_begin(self, args, state, control, model=None, **kwargs):
+            if state.global_step > 3 and state.global_step % 50 != 0:
+                return
+            device = next(model.parameters()).device if model else '?'
+            mem = (torch.cuda.memory_allocated() / 1e9
+                   if torch.cuda.is_available() else 0)
+            print(f"[step {state.global_step}] dev={device} "
+                  f"mem={mem:.2f}GB", flush=True)
+
+        def on_step_end(self, args, state, control, model=None, **kwargs):
+            if state.global_step > 3 and state.global_step % 50 != 0:
+                return
+            peak = (torch.cuda.max_memory_allocated() / 1e9
+                    if torch.cuda.is_available() else 0)
+            print(f"[step {state.global_step}] DONE peak={peak:.2f}GB",
+                  flush=True)
+
+    return DebugCallback()
+
+
+# ─── Training ────────────────────────────────────────────────────────────
+
+def train(args):
+    prof = PROFILES[args.profile]
+    args.model_id = prof['model_id']  # for fingerprint + meta
+
+    # 1. Container check (skips on CUDA/CPU; warns on ROCm-outside-container)
+    _check_finetuning_container()
+
+    # 2. Paths + run orchestration
+    root, model_path, dataset_dir = resolve_paths(args)
+    if not Path(model_path).exists():
+        print(f"ERROR: model not found at {model_path}")
+        print("Download it with:")
+        print(f"  python3 scripts/download_gemma_models.py "
+              f"--model {prof['model_dirname']}")
+        sys.exit(1)
+
+    train_jsonl = dataset_dir / 'train.jsonl'
+    val_jsonl = dataset_dir / 'val.jsonl'
+    if not train_jsonl.exists() or not val_jsonl.exists():
+        print(f"ERROR: dataset not found at {dataset_dir}")
+        print("Build it with:")
+        print("  python3 scripts/build_sft_dataset.py --tag v1")
+        sys.exit(1)
+
+    if args.resume:
+        run_name = args.run_name
+        output_dir = (Path(args.output_dir) if args.output_dir
+                      else Path(args.resume).parent)
+        resume_from = args.resume
+        fingerprint = compute_run_fingerprint_local(args)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        run_name, output_dir, resume_from, fingerprint = resolve_run(
+            args, root)
+
+    # 3. Logging
+    log = logging.getLogger('deepred-gemma')
+    log.setLevel(logging.INFO)
+    log.handlers.clear()
+    fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s',
+                            datefmt='%Y-%m-%d %H:%M:%S')
+    fh = logging.FileHandler(output_dir / 'train.log')
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    log.addHandler(fh)
+    log.addHandler(sh)
+
+    log.info(f"Profile          : {args.profile}")
+    log.info(f"Model            : {prof['model_id']}  ({model_path})")
+    log.info(f"Dataset          : {dataset_dir}")
+    log.info(f"Output           : {output_dir}")
+    log.info(f"Run name         : {run_name}")
+    log.info(f"Fingerprint      : {fingerprint}")
+    log.info(f"Epochs           : {args.epochs}")
+    log.info(f"Batch / accum    : {args.batch_size} / {args.grad_accum} "
+             f"(effective={args.batch_size * args.grad_accum})")
+    log.info(f"LR / schedule    : {args.lr} / {args.lr_scheduler_type} "
+             f"(warmup={args.warmup_steps})")
+    log.info(f"Max length       : {args.max_length}")
+    log.info(f"Grad checkpoint  : {args.gradient_checkpointing}")
+    log.info(f"PyTorch          : {torch.__version__}")
+    if torch.cuda.is_available():
+        is_rocm = (hasattr(torch.version, 'hip')
+                   and torch.version.hip is not None)
+        backend = '[ROCm/HIP]' if is_rocm else '[CUDA]'
+        for i in range(torch.cuda.device_count()):
+            p = torch.cuda.get_device_properties(i)
+            log.info(f"GPU {i}            : {p.name} "
+                     f"({p.total_memory / 1e9:.1f} GB) {backend}")
+    else:
+        log.warning("No GPU detected — training on CPU (impractical).")
+
+    # 4. Imports (deferred so --help is snappy)
+    from datasets import load_dataset
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from trl import SFTConfig, SFTTrainer
+
+    # 5. Dataset
+    log.info("Loading dataset…")
+    ds = load_dataset(
+        'json',
+        data_files={'train': str(train_jsonl), 'validation': str(val_jsonl)},
+    )
+    if 'messages' not in ds['train'].column_names:
+        log.error(f"Dataset '{dataset_dir}' missing 'messages' column. "
+                  "Build it with scripts/build_sft_dataset.py.")
+        sys.exit(1)
+    log.info(f"  train      : {len(ds['train']):,} examples")
+    log.info(f"  validation : {len(ds['validation']):,} examples")
+
+    # 6/7. Model + tokenizer — standard HF path or Unsloth fast path.
+    #      Both use bf16 + eager attention (REQUIRED for Gemma soft-capping).
+    if args.unsloth:
+        log.info("Loading model via Unsloth FastLanguageModel "
+                 "(bf16, full FT)…")
+        # Must be set before importing unsloth
+        os.environ.setdefault('UNSLOTH_SKIP_TORCHVISION_CHECK', '1')
+        try:
+            from unsloth import FastLanguageModel
+            from unsloth.chat_templates import get_chat_template
+        except ImportError as e:
+            log.error(f"--unsloth requires the unsloth package: {e}")
+            log.error("Run inside the strix-halo-finetuning container, "
+                      "which ships Unsloth pre-built for gfx1151.")
+            sys.exit(1)
+
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=model_path,
+            max_seq_length=args.max_length,
+            dtype=None,             # auto → bf16 on ROCm
+            load_in_4bit=False,
+        )
+        if args.type == 'lora':
+            log.info(f"Wrapping with Unsloth LoRA adapters "
+                     f"(r={LORA_R}, alpha={LORA_ALPHA})…")
+            model = FastLanguageModel.get_peft_model(
+                model,
+                r=LORA_R,
+                lora_alpha=LORA_ALPHA,
+                target_modules=LORA_TARGET_MODULES,
+                lora_dropout=LORA_DROPOUT,
+                bias='none',
+                task_type='CAUSAL_LM',
+            )
+        else:
+            # Unsloth freezes parameters by default (for LoRA); full FT
+            # needs them re-enabled.
+            for param in model.parameters():
+                param.requires_grad_(True)
+
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        # Pre-apply Gemma chat template to a 'text' column — Unsloth
+        # patches the tokenizer with unpickleable closures, so SFTTrainer
+        # cannot apply the template itself.
+        tokenizer = get_chat_template(tokenizer, chat_template='gemma-3')
+
+        def _apply_template(examples):
+            texts = [
+                tokenizer.apply_chat_template(
+                    m, tokenize=False, add_generation_prompt=False
+                ).removeprefix('<bos>')
+                for m in examples['messages']
+            ]
+            return {'text': texts}
+
+        ds['train'] = ds['train'].map(_apply_template, batched=True)
+        ds['validation'] = ds['validation'].map(_apply_template, batched=True)
+    else:
+        log.info("Loading tokenizer…")
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        log.info("Loading model (bf16, attn_implementation='eager')…")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            dtype=torch.bfloat16,
+            attn_implementation='eager',
+            trust_remote_code=True,
+        )
+        if args.type == 'lora':
+            from peft import LoraConfig, get_peft_model
+            log.info(f"Wrapping with PEFT LoRA adapters "
+                     f"(r={LORA_R}, alpha={LORA_ALPHA})…")
+            lora_config = LoraConfig(
+                r=LORA_R,
+                lora_alpha=LORA_ALPHA,
+                target_modules=LORA_TARGET_MODULES,
+                lora_dropout=LORA_DROPOUT,
+                bias='none',
+                task_type='CAUSAL_LM',
+            )
+            model = get_peft_model(model, lora_config)
+
+    log.info(f"  parameters : {sum(p.numel() for p in model.parameters()):,}")
+    log.info(f"  footprint  : "
+             f"{model.get_memory_footprint() / 1e9:.2f} GB")
+    if args.type == 'lora' and hasattr(model, 'print_trainable_parameters'):
+        model.print_trainable_parameters()
+
+    if args.gradient_checkpointing and not args.unsloth:
+        # Unsloth manages its own checkpointing strategy; don't double-enable.
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={'use_reentrant': False})
+        model.config.use_cache = False
+
+    # 8. SFTConfig
+    sft_args = dict(
+        output_dir=str(output_dir),
+        max_length=args.max_length,
+        packing=False,
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=max(1, args.batch_size),
+        gradient_accumulation_steps=args.grad_accum,
+        gradient_checkpointing=args.gradient_checkpointing,
+        gradient_checkpointing_kwargs=(
+            {'use_reentrant': False}
+            if args.gradient_checkpointing else None),
+        optim='adamw_torch_fused',
+        learning_rate=args.lr,
+        lr_scheduler_type=args.lr_scheduler_type,
+        warmup_steps=args.warmup_steps,
+        bf16=True,
+        fp16=False,
+        logging_steps=10,
+        save_strategy='epoch',
+        eval_strategy='epoch',
+        save_total_limit=2,
+        report_to='none',
+        dataset_kwargs={'add_special_tokens': False,
+                        'append_concat_token': True},
+        # Gemma 12B has vision params unused in text-only training
+        ddp_find_unused_parameters=True,
+        seed=args.seed,
+    )
+    if args.max_steps:
+        sft_args['max_steps'] = args.max_steps
+
+    if args.unsloth:
+        # Unsloth path uses pre-templated 'text' column and cannot pickle
+        # the patched tokenizer across worker processes.
+        sft_args['dataset_text_field'] = 'text'
+        sft_args['dataset_num_proc'] = 1
+
+    training_args = SFTConfig(**sft_args)
+
+    # 9. Trainer
+    callbacks = [make_debug_callback()] if args.debug else []
+    trainer = SFTTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=ds['train'],
+        eval_dataset=ds['validation'],
+        processing_class=tokenizer,
+        callbacks=callbacks,
+    )
+
+    # 10. Train
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    log.info("=" * 60)
+    log.info("Starting training")
+    log.info("=" * 60)
+    t0 = time.time()
+    train_result = trainer.train(resume_from_checkpoint=resume_from)
+    elapsed = time.time() - t0
+    peak_gb = (torch.cuda.max_memory_allocated() / 1e9
+               if torch.cuda.is_available() else 0)
+
+    log.info("-" * 60)
+    log.info(f"Training complete  : {elapsed / 3600:.2f} h "
+             f"({elapsed:.0f} s)")
+    log.info(f"Peak GPU memory    : {peak_gb:.2f} GB")
+    log.info(f"Final train loss   : "
+             f"{train_result.metrics.get('train_loss', float('nan')):.4f}")
+
+    # 11. Final save + run metadata
+    final_dir = output_dir / 'final'
+    trainer.save_model(str(final_dir))
+    tokenizer.save_pretrained(str(final_dir))
+    if args.type == 'lora':
+        log.info(f"LoRA adapters saved: {final_dir}")
+    else:
+        log.info(f"Final model saved  : {final_dir}")
+
+    # 12. GGUF export (optional)
+    if not args.no_gguf:
+        # LoRA adapters cannot be exported directly to GGUF — merge into
+        # the base weights first.  Save the merged model to a sibling dir
+        # so the adapter checkpoint at ``final/`` is preserved.
+        if args.type == 'lora':
+            merged_dir = output_dir / 'final-merged'
+            try:
+                log.info("Merging LoRA adapters into base weights for "
+                         "GGUF export…")
+                merged = trainer.model.merge_and_unload()
+                merged.save_pretrained(str(merged_dir),
+                                       safe_serialization=True)
+                tokenizer.save_pretrained(str(merged_dir))
+                gguf_src = str(merged_dir)
+                log.info(f"Merged model saved : {merged_dir}")
+            except Exception as e:
+                log.warning(f"LoRA merge failed: {e} — skipping GGUF export")
+                gguf_src = None
+        else:
+            gguf_src = str(final_dir)
+
+        if gguf_src:
+            gguf_path = output_dir / 'gguf' / f"{run_name}-final.gguf"
+            ok = export_gguf(gguf_src, str(gguf_path),
+                             quant_type=args.gguf_quant, log=log)
+            if ok:
+                log.info(f"GGUF exported      : {gguf_path}")
+            else:
+                log.warning("GGUF export skipped/failed "
+                            "(see warnings above)")
+
+    # 13. Mark run complete
+    mark_run_completed(output_dir)
+    log.info(f"Run '{run_name}' marked completed")
+
+
+# ─── CLI ─────────────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument('--profile', choices=list(PROFILES),
+                   default='gemma-4b',
+                   help='Profile preset (default: gemma-4b).')
+    p.add_argument('--dataset-dir', required=True,
+                   help='Directory containing train.jsonl / val.jsonl '
+                        '(produced by build_sft_dataset.py).')
+    p.add_argument('--model', default=None,
+                   help='Override local model path (default: '
+                        '$DEEPRED_MODELS/<profile model dirname>).')
+
+    # Hyperparameter overrides (default to profile values)
+    p.add_argument('--epochs', type=int)
+    p.add_argument('--batch-size', type=int)
+    p.add_argument('--grad-accum', type=int)
+    p.add_argument('--lr', type=float)
+    p.add_argument('--max-length', type=int)
+    p.add_argument('--gradient-checkpointing',
+                   dest='gradient_checkpointing',
+                   action='store_true', default=None)
+    p.add_argument('--no-gradient-checkpointing',
+                   dest='gradient_checkpointing',
+                   action='store_false')
+
+    p.add_argument('--lr-scheduler-type', default='cosine',
+                   choices=['cosine', 'constant', 'linear',
+                            'constant_with_warmup'],
+                   help='LR schedule (default cosine; kyuz0 uses constant).')
+    p.add_argument('--warmup-steps', type=int, default=100,
+                   help='Warmup steps (default 100).')
+
+    p.add_argument('--max-steps', type=int, default=0,
+                   help='Hard cap on optimizer steps (0 = use epochs).')
+
+    p.add_argument('--seed', type=int, default=42)
+
+    # Run orchestration
+    p.add_argument('--run-name', default=None,
+                   help='Custom run name (default: <profile>-<YYYY-MM-DD>).')
+    p.add_argument('--output-dir', default=None,
+                   help='Override output dir '
+                        '(default: $DEEPRED_ROOT/training_output/<run-name>).')
+    p.add_argument('--new-run', action='store_true',
+                   help='If existing run is completed, auto-increment name.')
+    p.add_argument('--resume', default=None,
+                   help='Explicit checkpoint dir to resume from.')
+
+    # GGUF
+    p.add_argument('--no-gguf', action='store_true',
+                   help='Skip final GGUF export.')
+    p.add_argument('--gguf-quant', default='q8_0',
+                   help='llama.cpp quant type (default q8_0).')
+
+    p.add_argument('--debug', action='store_true',
+                   help='Per-step device/memory prints.')
+
+    p.add_argument('--unsloth', action='store_true',
+                   help='Use Unsloth FastLanguageModel for ~2-3x speedup '
+                        'and ~30%% lower peak memory. Requires the '
+                        'strix-halo-finetuning container (ships a '
+                        'gfx1151-patched Unsloth build). Works with both '
+                        '--type full and --type lora.')
+
+    p.add_argument('--type', choices=['full', 'lora'], default='full',
+                   help='Training mode: "full" trains all weights, '
+                        '"lora" trains low-rank adapters '
+                        f'(r={LORA_R}, alpha={LORA_ALPHA}, target '
+                        'modules: q/k/v/o + gate/up/down proj). '
+                        'Default: full.')
+
+    args = p.parse_args()
+
+    # Apply profile defaults for any unset hyperparameter
+    prof = PROFILES[args.profile]
+    if args.epochs is None:               args.epochs = prof['epochs']
+    if args.batch_size is None:           args.batch_size = prof['batch_size']
+    if args.grad_accum is None:           args.grad_accum = prof['grad_accum']
+    if args.lr is None:                   args.lr = prof['lr']
+    if args.max_length is None:           args.max_length = prof['max_length']
+    if args.gradient_checkpointing is None:
+        args.gradient_checkpointing = prof['gradient_checkpointing']
+
+    return args
+
+
+def main():
+    args = parse_args()
+    train(args)
+
+
+if __name__ == '__main__':
+    main()
