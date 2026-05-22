@@ -78,8 +78,20 @@ the other, and their outputs can be compared side-by-side in LM Studio.
 3. **HuggingFace account with Gemma license accepted** in your browser:
    - https://huggingface.co/google/gemma-3-4b-it
    - https://huggingface.co/google/gemma-3-12b-it
-4. **HF token** available — either `hf auth login` (cached) or
-   `export HF_TOKEN=...` before launching the download.
+4. **HF token** available. The recommended setup is to save the token to
+   `~/hf_token.txt` — `deepred-env.sh` will read it on `source` and export
+   `HF_TOKEN` (and `HUGGING_FACE_HUB_TOKEN`) automatically:
+
+   ```bash
+   # paste your token (single line, no trailing newline matters — whitespace is stripped)
+   echo 'hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' > ~/hf_token.txt
+   chmod 600 ~/hf_token.txt   # keep it readable only by your user
+   source deepred-env.sh      # summary line should now show "HF_TOKEN = (loaded, N chars)"
+   ```
+
+   Override the path with `export HF_TOKEN_FILE=/some/other/path` before
+   sourcing if needed. Alternatives still work: `hf auth login` (cached)
+   or `export HF_TOKEN=...` directly.
 5. **DeepRed corpus sources present** — same files used by
    `create_training_corpus.py` (Gutenberg JSONL, augmented chess JSONL,
    year_topics JSON, optionally PostgreSQL wikipedia).

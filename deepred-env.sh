@@ -52,6 +52,23 @@ export REMOTE_HOST="${REMOTE_HOST:-}"
 export REMOTE_LLM_PORT="${REMOTE_LLM_PORT:-1234}"
 export REMOTE_EMBED_PORT="${REMOTE_EMBED_PORT:-1235}"
 
+# ── HuggingFace token ────────────────────────────────────────────────────
+# Loaded from ~/hf_token.txt (or $HF_TOKEN_FILE) if not already set in the
+# environment.  Used by scripts such as download_gemma_models.py to access
+# gated repositories (Gemma, etc.).  The file should contain only the
+# token on a single line; keep it readable only by your user (chmod 600).
+export HF_TOKEN_FILE="${HF_TOKEN_FILE:-$HOME/hf_token.txt}"
+if [ -z "${HF_TOKEN:-}" ] && [ -r "$HF_TOKEN_FILE" ]; then
+    HF_TOKEN="$(tr -d '[:space:]' < "$HF_TOKEN_FILE")"
+    if [ -n "$HF_TOKEN" ]; then
+        export HF_TOKEN
+        # Mirror to the alternate variable name used by huggingface_hub.
+        export HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
+    else
+        unset HF_TOKEN
+    fi
+fi
+
 # ── Activate Python virtual environment ──────────────────────────────────
 # Prevent virtualenv from prepending its own prompt (avoids duplicate '(venv)').
 export VIRTUAL_ENV_DISABLE_PROMPT=1
@@ -84,4 +101,9 @@ if [ -n "$REMOTE_HOST" ]; then
     echo "  REMOTE_HOST    = $REMOTE_HOST (LLM :$REMOTE_LLM_PORT, embed :$REMOTE_EMBED_PORT)"
 else
     echo "  REMOTE_HOST    = (not set — remote GPU server disabled)"
+fi
+if [ -n "${HF_TOKEN:-}" ]; then
+    echo "  HF_TOKEN       = (loaded, ${#HF_TOKEN} chars)"
+else
+    echo "  HF_TOKEN       = (not set — create $HF_TOKEN_FILE to enable)"
 fi
