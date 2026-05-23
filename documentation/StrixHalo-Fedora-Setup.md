@@ -303,7 +303,7 @@ Enter BIOS and look for:
 - **UMA Frame Buffer Size** → Set to **minimum** (e.g., 1 GB on MS-S1 MAX)
 - **VRAM Size** or **iGPU Memory** → Leave at minimum / default
 
-> **Why minimum?** The UMA Frame Buffer (GART) is a **fixed** memory reservation that is never available to the OS. On Linux, GPU memory is allocated dynamically via GTT (Graphics Translation Table) using kernel parameters — the setup script configures `amdgpu.gttsize` and `ttm.pages_limit` to allow the iGPU to access up to ~124 GB on demand while keeping the memory available to the CPU when idle. Setting UMA to maximum (e.g., 96 GB) would wastefully lock that memory away from the system. AMD's own [Strix Halo system optimization guide](https://rocm.docs.amd.com/en/latest/how-to/system-optimization/strixhalo.html) recommends keeping VRAM reservation small (e.g., 0.5 GB) and increasing the shared TTM/GTT limit instead. The [Strix Halo Toolboxes project](https://strix-halo-toolboxes.com/#config) tests with only 512 MB BIOS allocation and the [strixhalo.wiki](https://strixhalo.wiki/AI/AI_Capabilities_Overview) explicitly recommends: *"set GART to the minimum (eg, 512MB) and then allocating automatically via GTT."*
+> **Why minimum?** The UMA Frame Buffer (GART) is a **fixed** memory reservation that is never available to the OS. On Linux, GPU memory is allocated dynamically via GTT (Graphics Translation Table) using kernel parameters — the setup script configures `amdgpu.gttsize` and `ttm.pages_limit` to allow the iGPU to access up to **96 GB** on demand while keeping the remaining ~32 GB hard-reserved for the OS, Python, and the tokenized HF dataset during SFT runs. (Earlier revisions allowed up to ~124 GB; this was reduced after the kernel OOM killer started reaping `train_deepred_gemma.py` during real-corpus runs — see [DeepRedGemma-Setup.md](DeepRedGemma-Setup.md) → Troubleshooting → "Run is killed early".) Setting UMA to maximum (e.g., 96 GB) in BIOS would wastefully lock that memory away from the system. AMD's own [Strix Halo system optimization guide](https://rocm.docs.amd.com/en/latest/how-to/system-optimization/strixhalo.html) recommends keeping VRAM reservation small (e.g., 0.5 GB) and increasing the shared TTM/GTT limit instead. The [Strix Halo Toolboxes project](https://strix-halo-toolboxes.com/#config) tests with only 512 MB BIOS allocation and the [strixhalo.wiki](https://strixhalo.wiki/AI/AI_Capabilities_Overview) explicitly recommends: *"set GART to the minimum (eg, 512MB) and then allocating automatically via GTT."*
 
 ### Step 5: Data Disk Setup
 
@@ -494,7 +494,7 @@ The script runs through these stages in order:
 |-------|------|---------|-------------|
 | 1 | `system_packages` | No | Install build tools, development packages |
 | 2 | `disable_sleep` | No | Mask sleep/suspend/hibernate targets for always-on operation |
-| 3 | `gtt_memory` | **Yes** | Configure kernel parameters for GPU memory, regenerate GRUB (reconnect via SSH after reboot) |
+| 3 | `gtt_memory` | **Yes** | Configure kernel parameters for GPU memory (96 GiB GTT cap), disable zram swap, regenerate GRUB (reconnect via SSH after reboot) |
 | 4 | `gpu_groups` | **Yes** | Add user to `render`/`video` groups (reconnect via SSH after reboot) |
 | 5 | `vscode` | No | Install VSCode + Python and Copilot extensions |
 | 6 | `toolbox_setup` | No | Install Podman/toolbox, create ROCm toolbox |

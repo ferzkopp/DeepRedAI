@@ -52,6 +52,25 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+# Reduce allocator fragmentation on the unified-memory GPU. Variable
+# sequence lengths in SFT cause the caching allocator to accumulate
+# reserved-but-unallocated blocks that can push us over the GTT cap on
+# the next long-sequence batch (observed: ~7.5 GiB stranded → OOM at
+# step 11 on the 4B profile). Must be set BEFORE `import torch`.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
+# Unsloth MUST be imported before transformers/trl/peft to install its
+# kernel patches; otherwise it warns and silently disables optimizations.
+# Sniff the CLI early (argparse hasn't run yet) so this stays opt-in.
+if '--unsloth' in sys.argv:
+    os.environ.setdefault('UNSLOTH_SKIP_TORCHVISION_CHECK', '1')
+    try:
+        import unsloth  # noqa: F401,E402
+    except ImportError:
+        # Defer the friendly error message to train() where we have
+        # logging set up; here we just let the later import fail loudly.
+        pass
+
 from train_deepred_model import (  # noqa: E402
     _check_finetuning_container,
     compute_run_fingerprint,
@@ -139,20 +158,27 @@ def resolve_run(args, root):
         with open(meta_path) as f:
             meta = json.load(f)
 
-        if meta.get('status') == 'completed':
-            if args.new_run:
-                base = run_name
-                for i in range(2, 100):
-                    run_name = f"{base}-{i}"
-                    output_dir = Path(f"{root}/training_output/{run_name}")
-                    if not output_dir.exists():
-                        break
-            else:
-                print(f"\nRun '{meta.get('run_name', run_name)}' is COMPLETED")
-                print(f"  Finished: {meta.get('completed_at', '?')}")
-                print(f"  Output:   {output_dir}")
-                print("\nUse --new-run to auto-increment or --run-name <name>.")
-                sys.exit(0)
+        # --new-run always wins: auto-increment regardless of the existing
+        # run's status. Otherwise a killed/crashed run (status='running')
+        # would trip the fingerprint guard below even when the user has
+        # explicitly asked for a fresh attempt with new parameters.
+        if args.new_run:
+            base = run_name
+            for i in range(2, 100):
+                run_name = f"{base}-{i}"
+                output_dir = Path(f"{root}/training_output/{run_name}")
+                meta_path = output_dir / 'run_meta.json'
+                if not output_dir.exists():
+                    break
+            # Fall through to the "fresh run" path below.
+            meta = None  # type: ignore[assignment]
+
+        elif meta.get('status') == 'completed':
+            print(f"\nRun '{meta.get('run_name', run_name)}' is COMPLETED")
+            print(f"  Finished: {meta.get('completed_at', '?')}")
+            print(f"  Output:   {output_dir}")
+            print("\nUse --new-run to auto-increment or --run-name <name>.")
+            sys.exit(0)
         else:
             if meta.get('fingerprint') != fingerprint:
                 print(f"\nERROR: Run '{run_name}' exists with different "
@@ -161,7 +187,8 @@ def resolve_run(args, root):
                 for k in RUN_DEFINING_PARAMS:
                     if old.get(k) != getattr(args, k):
                         print(f"  {k}: {old.get(k)} -> {getattr(args, k)}")
-                print("\nUse --run-name <name> for a fresh run.")
+                print("\nUse --new-run to auto-increment or "
+                      "--run-name <name> for a fresh run.")
                 sys.exit(1)
             # Same fingerprint — let HF Trainer auto-detect latest ckpt
             latest = _latest_checkpoint(output_dir)
@@ -211,27 +238,148 @@ def _latest_checkpoint(output_dir):
 
 # ─── Debug callback ──────────────────────────────────────────────────────
 
-def make_debug_callback():
-    """Per-step device + memory log (only on --debug)."""
+# ─── Memory monitoring ───────────────────────────────────────────────────
+#
+# Strix Halo's GPU memory is *unified* with host RAM (single 128 GB pool
+# carved between the OS and the amdgpu GTT region). The kernel OOM killer
+# (SIGKILL → bare "Killed" in the shell, no Python traceback) is the most
+# common cause of an SFT run dying mid-step. To diagnose it after the fact
+# we log host + GPU memory at every step *and* on a fixed wall-clock
+# cadence to ``<output_dir>/memory.log`` — both files survive the kill.
+#
+# Sampling is cheap (a few syscalls + torch counters), so this is enabled
+# unconditionally. Disable with --no-memory-monitor if it ever gets in the
+# way.
+
+def _read_meminfo():
+    """Parse /proc/meminfo → dict of kB (Linux only; {} elsewhere)."""
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            out = {}
+            for line in f:
+                k, _, v = line.partition(':')
+                v = v.strip().split()
+                if v:
+                    out[k] = int(v[0])  # kB
+            return out
+    except OSError:
+        return {}
+
+
+def _read_self_rss_kb():
+    """Resident set size of this process, kB (Linux only; 0 elsewhere)."""
+    try:
+        with open('/proc/self/status', 'r') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return 0
+
+
+def _mem_snapshot():
+    """Return a dict of GPU + host memory counters (all in GB)."""
+    snap = {}
+    if torch.cuda.is_available():
+        snap['gpu_alloc'] = torch.cuda.memory_allocated() / 1e9
+        snap['gpu_reserved'] = torch.cuda.memory_reserved() / 1e9
+        snap['gpu_peak'] = torch.cuda.max_memory_allocated() / 1e9
+    mi = _read_meminfo()
+    if mi:
+        snap['mem_total'] = mi.get('MemTotal', 0) / 1e6
+        snap['mem_avail'] = mi.get('MemAvailable', 0) / 1e6
+        snap['mem_free'] = mi.get('MemFree', 0) / 1e6
+        snap['swap_total'] = mi.get('SwapTotal', 0) / 1e6
+        snap['swap_free'] = mi.get('SwapFree', 0) / 1e6
+        snap['swap_used'] = snap['swap_total'] - snap['swap_free']
+    snap['rss'] = _read_self_rss_kb() / 1e6
+    return snap
+
+
+def _format_snap(snap, prefix=''):
+    parts = []
+    if 'gpu_alloc' in snap:
+        parts.append(f"gpu_alloc={snap['gpu_alloc']:.1f}GB")
+        parts.append(f"gpu_reserved={snap['gpu_reserved']:.1f}GB")
+        parts.append(f"gpu_peak={snap['gpu_peak']:.1f}GB")
+    if 'mem_avail' in snap:
+        parts.append(f"rss={snap['rss']:.1f}GB")
+        parts.append(f"mem_avail={snap['mem_avail']:.1f}GB")
+        parts.append(f"mem_free={snap['mem_free']:.1f}GB")
+        parts.append(f"swap_used={snap['swap_used']:.1f}GB")
+    return prefix + ' '.join(parts)
+
+
+def start_memory_monitor(output_dir, interval_s=10):
+    """Start a daemon thread sampling memory every ``interval_s`` seconds.
+
+    Writes one CSV-ish line per sample to ``<output_dir>/memory.log``.
+    Returns the thread + stop event (mostly for tests; the daemon thread
+    exits with the process otherwise).
+    """
+    import threading
+    log_path = Path(output_dir) / 'memory.log'
+    stop = threading.Event()
+
+    columns = ['ts', 'gpu_alloc_gb', 'gpu_reserved_gb', 'gpu_peak_gb',
+               'rss_gb', 'mem_avail_gb', 'mem_free_gb',
+               'swap_used_gb', 'swap_total_gb']
+
+    def _run():
+        with open(log_path, 'a', buffering=1) as f:
+            if log_path.stat().st_size == 0:
+                f.write(','.join(columns) + '\n')
+            while not stop.is_set():
+                s = _mem_snapshot()
+                f.write(','.join([
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    f"{s.get('gpu_alloc', 0):.3f}",
+                    f"{s.get('gpu_reserved', 0):.3f}",
+                    f"{s.get('gpu_peak', 0):.3f}",
+                    f"{s.get('rss', 0):.3f}",
+                    f"{s.get('mem_avail', 0):.3f}",
+                    f"{s.get('mem_free', 0):.3f}",
+                    f"{s.get('swap_used', 0):.3f}",
+                    f"{s.get('swap_total', 0):.3f}",
+                ]) + '\n')
+                stop.wait(interval_s)
+
+    t = threading.Thread(target=_run, name='mem-monitor', daemon=True)
+    t.start()
+    return t, stop
+
+
+def make_debug_callback(log=None, every=50):
+    """Per-step device + host/GPU memory log.
+
+    Always-on (cheap). Prints/logs every step for the first 3 steps and
+    every ``every`` steps thereafter. If ``log`` is a logger, lines also
+    go to ``train.log``; otherwise only to stdout.
+    """
     from transformers import TrainerCallback
+
+    def _emit(msg):
+        if log is not None:
+            log.info(msg)
+        else:
+            print(msg, flush=True)
 
     class DebugCallback(TrainerCallback):
         def on_step_begin(self, args, state, control, model=None, **kwargs):
-            if state.global_step > 3 and state.global_step % 50 != 0:
+            if state.global_step > 3 and state.global_step % every != 0:
                 return
             device = next(model.parameters()).device if model else '?'
-            mem = (torch.cuda.memory_allocated() / 1e9
-                   if torch.cuda.is_available() else 0)
-            print(f"[step {state.global_step}] dev={device} "
-                  f"mem={mem:.2f}GB", flush=True)
+            snap = _mem_snapshot()
+            _emit(f"[step {state.global_step}] dev={device} "
+                  + _format_snap(snap))
 
         def on_step_end(self, args, state, control, model=None, **kwargs):
-            if state.global_step > 3 and state.global_step % 50 != 0:
+            if state.global_step > 3 and state.global_step % every != 0:
                 return
-            peak = (torch.cuda.max_memory_allocated() / 1e9
-                    if torch.cuda.is_available() else 0)
-            print(f"[step {state.global_step}] DONE peak={peak:.2f}GB",
-                  flush=True)
+            snap = _mem_snapshot()
+            _emit(f"[step {state.global_step}] DONE "
+                  + _format_snap(snap))
 
     return DebugCallback()
 
@@ -311,6 +459,33 @@ def train(args):
     else:
         log.warning("No GPU detected — training on CPU (impractical).")
 
+    # Host memory snapshot at startup (Strix Halo GPU memory is unified
+    # with system RAM; OOM kills look like a bare "Killed" in the shell).
+    _startup_snap = _mem_snapshot()
+    log.info("Host memory       : " + _format_snap(_startup_snap))
+    if 'swap_total' in _startup_snap and _startup_snap['swap_total'] > 0:
+        # zram swap uses RAM-backed compressed pages — under unified
+        # memory pressure it competes with the GPU. Warn loudly.
+        try:
+            zram_active = any(
+                Path(p).exists() for p in
+                ('/sys/block/zram0', '/sys/block/zram1'))
+        except OSError:
+            zram_active = False
+        if zram_active:
+            log.warning("zram swap is active — on Strix Halo this can "
+                        "amplify host memory pressure under heavy GPU "
+                        "use. Consider: sudo swapoff /dev/zram0")
+
+    # Background memory sampler (writes <output>/memory.log every 10 s).
+    # Always-on; --no-memory-monitor disables it.
+    _mem_stop = None
+    if not args.no_memory_monitor:
+        _, _mem_stop = start_memory_monitor(output_dir,
+                                            interval_s=args.memory_interval)
+        log.info(f"Memory monitor   : {output_dir / 'memory.log'} "
+                 f"(every {args.memory_interval}s)")
+
     # 4. Imports (deferred so --help is snappy)
     from datasets import load_dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -350,6 +525,14 @@ def train(args):
             max_seq_length=args.max_length,
             dtype=None,             # auto → bf16 on ROCm
             load_in_4bit=False,
+            # Tell Unsloth up-front which kernel path to take.  Without
+            # full_finetuning=True it silently logs "QLoRA and full
+            # finetuning all not selected. Switching to 16bit LoRA." and
+            # installs LoRA-only fast kernels; subsequently calling
+            # ``param.requires_grad_(True)`` re-enables grads on all
+            # params but leaves the LoRA-shaped kernels in place, which
+            # produces NaN loss from step 1 on Gemma-3 / gfx1151.
+            full_finetuning=(args.type != 'lora'),
         )
         if args.type == 'lora':
             log.info(f"Wrapping with Unsloth LoRA adapters "
@@ -388,6 +571,38 @@ def train(args):
 
         ds['train'] = ds['train'].map(_apply_template, batched=True)
         ds['validation'] = ds['validation'].map(_apply_template, batched=True)
+
+        # Pre-tokenize too. SFTTrainer would otherwise call dataset.map()
+        # with a tokenize_fn that closes over the Unsloth-patched
+        # tokenizer; its globals reference torch._dynamo.config (a
+        # ConfigModuleInstance) which dill cannot pickle, so even with
+        # dataset_num_proc=1 the newer `datasets` worker-pool path
+        # explodes. Providing an already-tokenized dataset bypasses
+        # that .map() entirely.
+        max_len = args.max_length
+
+        # Gemma-3's "tokenizer" returned by get_chat_template is actually
+        # a Gemma3Processor (multimodal wrapper). Its __call__ packs
+        # input_ids into a numpy array, which fails on variable-length
+        # sequences without padding. Use the underlying fast tokenizer
+        # directly for text-only training.
+        text_tokenizer = getattr(tokenizer, 'tokenizer', tokenizer)
+
+        def _tokenize(examples):
+            out = text_tokenizer(
+                examples['text'],
+                truncation=True,
+                max_length=max_len,
+                add_special_tokens=False,
+            )
+            return out
+
+        ds['train'] = ds['train'].map(
+            _tokenize, batched=True,
+            remove_columns=ds['train'].column_names)
+        ds['validation'] = ds['validation'].map(
+            _tokenize, batched=True,
+            remove_columns=ds['validation'].column_names)
     else:
         log.info("Loading tokenizer…")
         tokenizer = AutoTokenizer.from_pretrained(
@@ -462,15 +677,18 @@ def train(args):
         sft_args['max_steps'] = args.max_steps
 
     if args.unsloth:
-        # Unsloth path uses pre-templated 'text' column and cannot pickle
-        # the patched tokenizer across worker processes.
-        sft_args['dataset_text_field'] = 'text'
+        # Dataset is already tokenized above (see Unsloth branch). TRL
+        # will detect 'input_ids' and skip its own .map() tokenization,
+        # which is what we need to avoid the ConfigModuleInstance
+        # pickling failure. dataset_num_proc=1 is still set as a belt-
+        # and-braces measure for any internal map() calls.
         sft_args['dataset_num_proc'] = 1
 
     training_args = SFTConfig(**sft_args)
 
     # 9. Trainer
-    callbacks = [make_debug_callback()] if args.debug else []
+    callbacks = [make_debug_callback(log=log,
+                                     every=50 if not args.debug else 1)]
     trainer = SFTTrainer(
         model=model,
         args=training_args,
@@ -606,6 +824,13 @@ def parse_args():
 
     p.add_argument('--debug', action='store_true',
                    help='Per-step device/memory prints.')
+
+    p.add_argument('--no-memory-monitor', action='store_true',
+                   help='Disable the background host+GPU memory sampler '
+                        '(default: enabled, writes memory.log every 10s).')
+    p.add_argument('--memory-interval', type=int, default=10,
+                   help='Memory monitor sampling interval in seconds '
+                        '(default: 10).')
 
     p.add_argument('--unsloth', action='store_true',
                    help='Use Unsloth FastLanguageModel for ~2-3x speedup '

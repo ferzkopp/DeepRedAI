@@ -428,24 +428,85 @@ def stage_disable_sleep(user: str) -> None:
 
 @stage("gtt_memory", "Configure kernel parameters for GPU memory", requires_reboot=True)
 def stage_gtt_memory(user: str) -> None:
-    # Check if already configured
+    # GPU "GTT" memory on Strix Halo is carved out of unified system RAM.
+    # We cap it at 96 GiB so the OS always retains ~32 GiB for Python +
+    # the tokenized HF dataset during SFT runs at max_length=2048.
+    # See documentation/DeepRedGemma-Setup.md → Troubleshooting →
+    # "Run is killed early" for the rationale and per-workload sizing.
+    #
+    # 98304 MiB = 96 GiB     (gttsize is in MiB)
+    # 25165824 pages × 4 KiB = 96 GiB exactly (pages_limit is 4 KiB pages)
     cmdline = pathlib.Path("/proc/cmdline").read_text()
     needed_params = {
         "iommu=pt": "iommu=pt",
-        "amdgpu.gttsize=126976": "amdgpu.gttsize=126976",
-        "ttm.pages_limit=32505856": "ttm.pages_limit=32505856",
+        "amdgpu.gttsize=98304": "amdgpu.gttsize=98304",
+        "ttm.pages_limit=25165824": "ttm.pages_limit=25165824",
     }
+    # Older revisions of this stage installed 124 GiB or 128 GiB values.
+    # Strip them if found so grubby ends up with exactly one of each key.
+    stale_params = [
+        "amdgpu.gttsize=126976", "ttm.pages_limit=32505856",  # 124 GiB
+        "amdgpu.gttsize=131072", "ttm.pages_limit=33554432",  # 128 GiB
+    ]
 
+    stale_present = [p for p in stale_params if p in cmdline]
     missing = [v for k, v in needed_params.items() if k not in cmdline]
-    if not missing:
-        log.info("  GTT kernel parameters already set — skipping")
+
+    if not missing and not stale_present:
+        log.info("  GTT kernel parameters already set to 96 GiB — skipping")
         return
 
-    log.info("  Adding kernel parameters: %s", " ".join(missing))
-    run(f'grubby --update-kernel=ALL --args="{" ".join(missing)}"')
+    if stale_present:
+        log.info("  Removing stale GTT parameters: %s",
+                 " ".join(stale_present))
+        run(f'grubby --update-kernel=ALL '
+            f'--remove-args="{" ".join(stale_present)}"')
+
+    if missing:
+        log.info("  Adding kernel parameters (96 GiB GPU cap): %s",
+                 " ".join(missing))
+        run(f'grubby --update-kernel=ALL --args="{" ".join(missing)}"')
+
     run("grub2-mkconfig -o /boot/grub2/grub.cfg")
 
-    needs_reboot("Kernel parameters changed — reboot to apply GTT memory settings")
+    # zram swap (Fedora default: 8 GB compressed-in-RAM swap device) makes
+    # unified-memory pressure *worse* on Strix Halo — when the GPU is
+    # already using 70+ GB of RAM, pushing more pages into a RAM-backed
+    # compressed pool just steals more RAM from the GPU and the OS.
+    # Disable it persistently so the kernel OOM killer doesn't fire mid-
+    # training. See documentation/DeepRedGemma-Setup.md → Troubleshooting
+    # → "Run is killed early" → "Disable zram swap" for the rationale.
+    _disable_zram_swap()
+
+    needs_reboot("Kernel parameters changed — reboot to apply "
+                 "96 GiB GTT memory cap")
+
+
+def _disable_zram_swap() -> None:
+    """Turn off zram swap (live) and mask the generator (persistent)."""
+    zram_dev = pathlib.Path("/dev/zram0")
+    swap_active = False
+    if zram_dev.exists():
+        swap_show = run_quiet("swapon --show=NAME --noheadings", check=False)
+        swap_active = "/dev/zram0" in swap_show.stdout
+
+    masked = run_quiet(
+        "systemctl is-enabled systemd-zram-setup@zram0.service",
+        check=False)
+    already_masked = "masked" in masked.stdout
+
+    if not swap_active and already_masked:
+        log.info("  zram swap already disabled and masked — skipping")
+        return
+
+    if swap_active:
+        log.info("  Disabling active zram swap on /dev/zram0")
+        run("swapoff /dev/zram0", check=False)
+
+    if not already_masked:
+        log.info("  Masking systemd-zram-setup@zram0.service "
+                 "(persistent across reboots)")
+        run("systemctl mask systemd-zram-setup@zram0.service", check=False)
 
 
 @stage("gpu_groups", "Add user to render/video groups for GPU access", requires_reboot=True)
