@@ -363,6 +363,41 @@ All parameters have profile-specific defaults. CLI flags override any profile de
 
 ---
 
+## Backup the Trained Model
+
+After a successful run, upload the exported `.gguf` model to the same remote
+server used for the chess corpus backups. The `backup_deepred_files.py` script
+reuses the **same saved connection settings and secure password** (stored in the
+keyring), so no re-entry of credentials is needed if you have run a backup
+before. Models are uploaded to the same remote `/Data` folder.
+
+```bash
+source /mnt/data/DeepRedAI/deepred-env.sh
+
+# Auto-detect and upload the most recently modified .gguf under
+# $DEEPRED_ROOT/training_output
+python3 scripts/backup_deepred_files.py --gguf
+
+# Or upload a specific model file
+python3 scripts/backup_deepred_files.py --gguf \
+    $DEEPRED_ROOT/training_output/<run-name>/gguf/<run-name>-final.gguf
+
+# Preview the planned upload without connecting
+python3 scripts/backup_deepred_files.py --gguf --dry-run
+```
+
+The upload writes to a temporary `.uploading` file and atomically renames it on
+completion, overwriting any existing file of the same name and verifying the
+transferred size. Per-file progress is displayed during upload.
+
+> **Note:** The first time you run any backup, the script prompts for the host,
+> username, password, and target folder, then stores the non-secret settings in
+> `~/.config/deepredai/backup_upload.json` and the password in the system
+> keyring. See [ChessAugmentation-Setup.md](ChessAugmentation-Setup.md) for full
+> details on credential storage and the `--save-password` modes.
+
+---
+
 ## Hardware Utilization
 
 ### Strix Halo iGPU (Primary)

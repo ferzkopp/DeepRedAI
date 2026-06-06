@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
-Backup selected DeepRedAI corpus files to a remote server over SSH/SFTP.
+Backup selected DeepRedAI files to a remote server over SSH/SFTP.
 
-Current scope:
+Default scope (chess corpus):
   - $CHESS_DATA/corpus/chess_games.jsonl.gz
   - $CHESS_DATA/corpus/augmented_chess_games.jsonl.gz
+
+Model scope (--gguf):
+  - A retrained .gguf model file. With no path, the most recently modified
+    .gguf under $DEEPRED_ROOT/training_output is auto-detected.
+
+Both scopes upload to the same remote target folder (default: /Data) and
+reuse the same saved connection settings and secure password (keyring).
 
 Behavior:
   - Prompts interactively for server, username, password, and target folder.
@@ -20,6 +27,8 @@ Examples:
   python3 scripts/backup_deepred_files.py --dry-run
   python3 scripts/backup_deepred_files.py --save-password insecure
   python3 scripts/backup_deepred_files.py --reset-config
+  python3 scripts/backup_deepred_files.py --gguf
+  python3 scripts/backup_deepred_files.py --gguf /path/to/model-final.gguf
 """
 
 import argparse
@@ -60,10 +69,12 @@ logging.getLogger('paramiko').setLevel(logging.WARNING)
 logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
 
 
+DEEPRED_ROOT = Path(os.environ.get('DEEPRED_ROOT', '/mnt/data'))
+
 CHESS_DATA = Path(
     os.environ.get(
         'CHESS_DATA',
-        os.path.join(os.environ.get('DEEPRED_ROOT', '/mnt/data'), 'chess'),
+        os.path.join(str(DEEPRED_ROOT), 'chess'),
     )
 )
 CORPUS_DIR = CHESS_DATA / 'corpus'
@@ -72,9 +83,18 @@ FILES_TO_BACKUP = [
     CORPUS_DIR / 'augmented_chess_games.jsonl.gz',
 ]
 
+# Where train_deepred_model.py / train_deepred_gemma.py write exported models:
+#   $DEEPRED_ROOT/training_output/<run_name>/gguf/<run_name>-final.gguf
+TRAINING_OUTPUT_DIR = Path(
+    os.environ.get('DEEPRED_OUTPUT', str(DEEPRED_ROOT / 'training_output'))
+)
+
 DEFAULT_TARGET_FOLDER = '/Data'
 DEFAULT_PORT = 22
 KEYRING_SERVICE_NAME = 'deepredai-backup-upload'
+
+# Sentinel used when --gguf is passed without an explicit path (auto-detect).
+GGUF_AUTO = '__auto__'
 
 CONFIG_DIR = Path.home() / '.config' / 'deepredai'
 CONFIG_FILE = CONFIG_DIR / 'backup_upload.json'
@@ -283,12 +303,49 @@ def _gather_credentials(args, config: Dict) -> Tuple[str, str, int, str, str]:
     return host, username, port, target_folder, password
 
 
-def _validate_local_files() -> bool:
-    missing = [p for p in FILES_TO_BACKUP if not p.exists()]
+def _find_latest_gguf(search_dir: Path) -> Optional[Path]:
+    """Return the most recently modified .gguf file under search_dir."""
+    if not search_dir.exists():
+        return None
+    candidates = list(search_dir.rglob('*.gguf'))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _resolve_gguf_files(gguf_arg: str) -> list:
+    """Resolve the --gguf argument into a list with a single .gguf file.
+
+    gguf_arg is either an explicit path or the AUTO sentinel, in which case
+    the most recently modified .gguf under TRAINING_OUTPUT_DIR is selected.
+    """
+    if gguf_arg == GGUF_AUTO:
+        latest = _find_latest_gguf(TRAINING_OUTPUT_DIR)
+        if latest is None:
+            log.error('No .gguf files found under %s', TRAINING_OUTPUT_DIR)
+            log.error('Train a model first, or pass an explicit path: --gguf /path/to/model.gguf')
+            return []
+        log.info('Auto-detected most recent model: %s', latest)
+        return [latest]
+
+    path = Path(gguf_arg).expanduser()
+    if not path.exists():
+        log.error('Model file not found: %s', path)
+        return []
+    if path.suffix != '.gguf':
+        log.warning('File does not have a .gguf extension: %s', path)
+    return [path]
+
+
+def _validate_local_files(files: list, chess_mode: bool) -> bool:
+    if not files:
+        return False
+    missing = [p for p in files if not p.exists()]
     if missing:
         for path in missing:
             log.error('Missing required backup file: %s', path)
-        log.error('Create compressed files first: python3 scripts/augment_chess_games.py --compress')
+        if chess_mode:
+            log.error('Create compressed files first: python3 scripts/augment_chess_games.py --compress')
         return False
     return True
 
@@ -343,13 +400,13 @@ def _connect_sftp(host: str, username: str, password: str, port: int):
     return client, client.open_sftp()
 
 
-def _upload_files(sftp, target_folder: str) -> Tuple[int, int]:
+def _upload_files(sftp, target_folder: str, files: list) -> Tuple[int, int]:
     uploaded = 0
     failed = 0
 
     _ensure_remote_dir(sftp, target_folder)
 
-    for local_file in FILES_TO_BACKUP:
+    for local_file in files:
         local_size = local_file.stat().st_size
         remote_final = posixpath.join(target_folder, local_file.name)
         remote_tmp = posixpath.join(target_folder, f".{local_file.name}.uploading")
@@ -401,6 +458,11 @@ def main():
                         help='SSH password (discouraged on CLI; prompts if omitted)')
     parser.add_argument('--target-folder', default=None,
                         help=f'Remote folder (default: {DEFAULT_TARGET_FOLDER})')
+    parser.add_argument('--gguf', nargs='?', const=GGUF_AUTO, default=None,
+                        metavar='PATH',
+                        help='Back up a retrained .gguf model instead of the chess '
+                             'corpus. With no PATH, auto-detects the most recently '
+                             f'modified .gguf under {TRAINING_OUTPUT_DIR}.')
     parser.add_argument('--save-password', choices=['auto', 'never', 'insecure'],
                         default='auto',
                         help='Password storage mode: auto=keyring if available, '
@@ -426,7 +488,13 @@ def main():
         log.info('Config reset complete')
         return
 
-    if not _validate_local_files():
+    chess_mode = args.gguf is None
+    if chess_mode:
+        files_to_backup = list(FILES_TO_BACKUP)
+    else:
+        files_to_backup = _resolve_gguf_files(args.gguf)
+
+    if not _validate_local_files(files_to_backup, chess_mode):
         sys.exit(1)
 
     config = _load_config()
@@ -442,7 +510,7 @@ def main():
         sys.exit(1)
 
     log.info('Backup source files:')
-    for f in FILES_TO_BACKUP:
+    for f in files_to_backup:
         log.info('  - %s', f)
     log.info('Remote destination: %s@%s:%s%s', username, host, port, target_folder)
 
@@ -497,7 +565,7 @@ def main():
     
     # Upload files
     try:
-        uploaded, failed = _upload_files(sftp, target_folder)
+        uploaded, failed = _upload_files(sftp, target_folder, files_to_backup)
     except KeyboardInterrupt:
         log.error('Interrupted by user')
         sys.exit(130)

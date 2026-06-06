@@ -31,6 +31,10 @@ Each URL uses the pattern `https://www.ferzkopp.net/Data/[filename]`.
 For augmentation workflow details, see the full guide:
 [documentation/ChessAugmentation-Setup.md](documentation/ChessAugmentation-Setup.md).
 
+## Downloadable Models
+
+- [DeepRed-gemma-4b-2026-05-23-5-final.gguf](http://www.ferzkopp.net/Data/DeepRed-gemma-4b-2026-05-23-5-final.gguf)
+
 ## Legacy Steps/Instructions
 
 These steps document a failed fine-tuning approach to modify an existing model with "temporal knowledge cutoff" and "theme alignment".
