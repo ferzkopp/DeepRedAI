@@ -36,6 +36,12 @@ Usage:
   python3 scripts/train_deepred_gemma.py --profile gemma-4b \\
       --dataset-dir /mnt/data/sft_corpus/v1 \\
       --resume /mnt/data/training_output/gemma-4b-2026-05-21/checkpoint-XXXX
+
+  # Document a finished run (source model + parameters + results)
+  python3 scripts/train_deepred_gemma.py --profile gemma-4b --summary
+  python3 scripts/train_deepred_gemma.py \\
+      --output-dir /mnt/data/training_output/gemma-4b-2026-05-21 \\
+      --summary --summary-file run-summary.md
 """
 
 import argparse
@@ -234,6 +240,223 @@ def _latest_checkpoint(output_dir):
             except ValueError:
                 pass
     return max(candidates)[1] if candidates else None
+
+
+def _update_run_meta(output_dir, updates):
+    """Merge *updates* into ``run_meta.json`` (created if missing)."""
+    meta_path = Path(output_dir) / 'run_meta.json'
+    meta = {}
+    if meta_path.exists():
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            meta = {}
+    meta.update(updates)
+    with open(meta_path, 'w') as f:
+        json.dump(meta, f, indent=2)
+
+
+# ─── Post-training summary ───────────────────────────────────────────────
+
+def _fmt_bytes(n):
+    """Human-readable byte size."""
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+def _dir_size(path):
+    """Total size in bytes of all files under *path* (0 if missing)."""
+    total = 0
+    if not path.exists():
+        return 0
+    for p in path.rglob('*'):
+        if p.is_file():
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _read_trainer_state(output_dir):
+    """Return parsed ``trainer_state.json`` from final/ or latest ckpt, or {}.
+
+    HF Trainer writes this file with the full ``log_history`` (loss curve,
+    learning rate, eval metrics) plus ``global_step`` / ``epoch``.
+    """
+    for cand in (Path(output_dir) / 'final' / 'trainer_state.json',):
+        if cand.exists():
+            try:
+                with open(cand) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+    latest = _latest_checkpoint(Path(output_dir))
+    if latest:
+        cand = Path(latest) / 'trainer_state.json'
+        if cand.exists():
+            try:
+                with open(cand) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+    return {}
+
+
+def summarize_run(output_dir, out_file=None):
+    """Render a Markdown summary of a completed (or in-progress) SFT run.
+
+    Reads ``run_meta.json`` for the source model and training parameters,
+    ``trainer_state.json`` for loss/step metrics, and inspects the output
+    directory for produced artifacts (final model, merged weights, GGUF
+    exports, checkpoints).  Everything is best-effort: missing pieces are
+    simply omitted so the summary works both post-training and mid-run.
+    """
+    output_dir = Path(output_dir)
+    meta_path = output_dir / 'run_meta.json'
+    if not meta_path.exists():
+        print(f"ERROR: no run_meta.json found in {output_dir}")
+        print("  Point --output-dir / --run-name at a training run "
+              "directory.")
+        sys.exit(1)
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    params  = meta.get('params', {})
+    results = meta.get('results', {})
+    state   = _read_trainer_state(output_dir)
+
+    L = []
+    def emit(line=''):
+        L.append(line)
+
+    def get(key, default='?'):
+        """Prefer top-level meta, fall back to params block."""
+        if key in meta and meta[key] is not None:
+            return meta[key]
+        return params.get(key, default)
+
+    run_name = meta.get('run_name', output_dir.name)
+    status   = meta.get('status', 'unknown')
+
+    emit(f"# DeepRed SFT Run Summary — {run_name}")
+    emit()
+    emit(f"- **Status:** {status}")
+    emit(f"- **Output dir:** {output_dir}")
+    emit(f"- **Started:** {meta.get('started_at', '?')}")
+    emit(f"- **Completed:** {meta.get('completed_at', '(not finished)')}")
+    if meta.get('fingerprint'):
+        emit(f"- **Fingerprint:** {meta['fingerprint']}")
+    emit()
+
+    # ── Source model ──
+    emit("## Source Model")
+    emit()
+    emit(f"- **Profile:** {get('profile')}")
+    emit(f"- **Base model:** {get('model_id')}")
+    if meta.get('model_path'):
+        emit(f"- **Local path:** {meta['model_path']}")
+    train_type = get('type', 'full')
+    emit(f"- **Training mode:** {train_type}")
+    if train_type == 'lora':
+        emit(f"- **LoRA:** r={LORA_R}, alpha={LORA_ALPHA}, "
+             f"dropout={LORA_DROPOUT}")
+    if params.get('unsloth'):
+        emit("- **Unsloth:** enabled")
+    emit()
+
+    # ── Training parameters ──
+    emit("## Training Parameters")
+    emit()
+    bs    = get('batch_size')
+    ga    = get('grad_accum')
+    eff   = (bs * ga if isinstance(bs, int) and isinstance(ga, int)
+             else '?')
+    emit("| Parameter | Value |")
+    emit("|-----------|-------|")
+    emit(f"| Epochs | {get('epochs')} |")
+    emit(f"| Batch size | {bs} |")
+    emit(f"| Grad accumulation | {ga} |")
+    emit(f"| Effective batch | {eff} |")
+    emit(f"| Learning rate | {get('lr')} |")
+    emit(f"| LR scheduler | {get('lr_scheduler_type')} |")
+    emit(f"| Warmup steps | {get('warmup_steps')} |")
+    emit(f"| Max sequence length | {get('max_length')} |")
+    emit(f"| Gradient checkpointing | {get('gradient_checkpointing')} |")
+    emit(f"| Seed | {get('seed')} |")
+    if params.get('dataset_dir'):
+        emit(f"| Dataset | {params['dataset_dir']} |")
+    emit()
+
+    # ── Results ──
+    have_results = bool(results) or bool(state)
+    if have_results:
+        emit("## Results")
+        emit()
+        if results.get('duration_seconds') is not None:
+            secs = results['duration_seconds']
+            emit(f"- **Duration:** {secs / 3600:.2f} h ({secs:.0f} s)")
+        if results.get('final_train_loss') is not None:
+            emit(f"- **Final train loss:** "
+                 f"{results['final_train_loss']:.4f}")
+        if results.get('peak_gpu_gb') is not None:
+            emit(f"- **Peak GPU memory:** {results['peak_gpu_gb']:.2f} GB")
+        gs = state.get('global_step') or results.get('global_step')
+        if gs is not None:
+            emit(f"- **Global steps:** {gs:,}")
+        ep = state.get('epoch') or results.get('epochs_completed')
+        if ep is not None:
+            emit(f"- **Epochs completed:** {ep:.2f}"
+                 if isinstance(ep, float) else f"- **Epochs completed:** {ep}")
+
+        # Last recorded eval loss from the log history, if present
+        log_hist = state.get('log_history', [])
+        eval_losses = [e['eval_loss'] for e in log_hist
+                       if isinstance(e, dict) and 'eval_loss' in e]
+        if eval_losses:
+            emit(f"- **Last eval loss:** {eval_losses[-1]:.4f}")
+            emit(f"- **Best eval loss:** {min(eval_losses):.4f}")
+        emit()
+
+    # ── Artifacts ──
+    emit("## Artifacts")
+    emit()
+    final_dir  = output_dir / 'final'
+    merged_dir = output_dir / 'final-merged'
+    gguf_dir   = output_dir / 'gguf'
+
+    if final_dir.exists():
+        label = 'LoRA adapters' if train_type == 'lora' else 'Final model'
+        emit(f"- **{label}:** `{final_dir}` ({_fmt_bytes(_dir_size(final_dir))})")
+    if merged_dir.exists():
+        emit(f"- **Merged weights:** `{merged_dir}` "
+             f"({_fmt_bytes(_dir_size(merged_dir))})")
+    if gguf_dir.exists():
+        for g in sorted(gguf_dir.glob('*.gguf')):
+            emit(f"- **GGUF:** `{g}` ({_fmt_bytes(g.stat().st_size)})")
+
+    checkpoints = []
+    if output_dir.exists():
+        for child in output_dir.iterdir():
+            if child.is_dir() and child.name.startswith('checkpoint-'):
+                checkpoints.append(child.name)
+    if checkpoints:
+        checkpoints.sort(key=lambda n: int(n.split('-', 1)[1]))
+        emit(f"- **Checkpoints:** {len(checkpoints)} "
+             f"({checkpoints[0]} … {checkpoints[-1]})")
+    emit()
+
+    text = '\n'.join(L)
+    if out_file:
+        Path(out_file).write_text(text)
+        print(f"Summary written to {out_file}")
+    else:
+        print(text)
 
 
 # ─── Debug callback ──────────────────────────────────────────────────────
@@ -717,6 +940,19 @@ def train(args):
     log.info(f"Final train loss   : "
              f"{train_result.metrics.get('train_loss', float('nan')):.4f}")
 
+    # Persist results + resolved model path so `--summary` can report them.
+    _update_run_meta(output_dir, {
+        'model_path': str(model_path),
+        'results': {
+            'duration_seconds': round(elapsed, 1),
+            'peak_gpu_gb': round(peak_gb, 3),
+            'final_train_loss': train_result.metrics.get('train_loss'),
+            'global_step': train_result.metrics.get('global_step')
+                            or getattr(trainer.state, 'global_step', None),
+            'epochs_completed': getattr(trainer.state, 'epoch', None),
+        },
+    })
+
     # 11. Final save + run metadata
     final_dir = output_dir / 'final'
     trainer.save_model(str(final_dir))
@@ -773,9 +1009,10 @@ def parse_args():
     p.add_argument('--profile', choices=list(PROFILES),
                    default='gemma-4b',
                    help='Profile preset (default: gemma-4b).')
-    p.add_argument('--dataset-dir', required=True,
+    p.add_argument('--dataset-dir', required=False, default=None,
                    help='Directory containing train.jsonl / val.jsonl '
-                        '(produced by build_sft_dataset.py).')
+                        '(produced by build_sft_dataset.py). '
+                        'Required for training; not used by --summary.')
     p.add_argument('--model', default=None,
                    help='Override local model path (default: '
                         '$DEEPRED_MODELS/<profile model dirname>).')
@@ -846,6 +1083,16 @@ def parse_args():
                         'modules: q/k/v/o + gate/up/down proj). '
                         'Default: full.')
 
+    # Post-training documentation
+    p.add_argument('--summary', action='store_true',
+                   help='Print a Markdown summary of a finished/in-progress '
+                        'run (source model + training parameters + results) '
+                        'and exit. Resolves the run from --run-name / '
+                        '--output-dir / --profile.')
+    p.add_argument('--summary-file', default=None,
+                   help='Write --summary Markdown to this path instead of '
+                        'stdout.')
+
     args = p.parse_args()
 
     # Apply profile defaults for any unset hyperparameter
@@ -861,8 +1108,27 @@ def parse_args():
     return args
 
 
+def _resolve_output_dir(args):
+    """Resolve a run's output directory without side effects (for --summary)."""
+    root = os.environ.get('DEEPRED_ROOT', '/mnt/data')
+    if args.output_dir:
+        return Path(args.output_dir)
+    run_name = (args.run_name
+                or f"{args.profile}-{datetime.now().strftime('%Y-%m-%d')}")
+    return Path(f"{root}/training_output/{run_name}")
+
+
 def main():
     args = parse_args()
+
+    if args.summary:
+        summarize_run(_resolve_output_dir(args), out_file=args.summary_file)
+        return
+
+    if not args.dataset_dir:
+        print("ERROR: --dataset-dir is required for training.")
+        sys.exit(1)
+
     train(args)
 
 

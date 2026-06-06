@@ -286,6 +286,66 @@ You can re-run `--finalize` at any time (e.g., after adding more data or changin
 
 ---
 
+## Step 5: Document the Corpus
+
+Once tokenization (and optionally finalization) is complete, generate a
+human-readable Markdown summary of exactly what went into the corpus:
+
+```bash
+python3 scripts/create_training_corpus.py --summary
+```
+
+Write it to a file instead of stdout:
+
+```bash
+python3 scripts/create_training_corpus.py --summary \
+    --summary-file documentation/corpus.md
+```
+
+The summary combines **live source availability** (counted at run time) with
+the **actual tokenized counts** recorded in `manifest.json`, and includes:
+
+- **Header** — tokenizer, vocab size, sequence length, manifest timestamps, and whether the corpus has been finalized.
+- **Corpus Composition table** — items used vs. available, token counts, and each source's percentage share.
+- **Mixture by Tokens** — an ASCII bar chart of the token mix across sources.
+- **Sources** — per-source description, type, item counts, tokens, and whether the source was selected for this run.
+- **Finalized Output** — packing mode, long-document overlap, train/val sequence counts, and `train.bin` / `val.bin` sizes (only shown once `--finalize` has run).
+
+Sources that have already been tokenized report their **actual** token counts.
+Sources not yet tokenized fall back to the **estimated** counts from
+`SOURCE_INFO` — these are flagged with `*` and represent what *would be*
+included. This makes `--summary` useful both for documenting a completed
+training run and for previewing a planned corpus before tokenizing.
+
+Example (abridged) output:
+
+```
+# DeepRed Training Corpus Summary
+
+- **Generated:** 2026-06-06 05:42:24 UTC
+- **Tokenizer:** TinyLlama-1.1B (vocab 32,000)
+- **Sequence length:** 2,048 tokens
+- **Finalized:** yes
+
+## Corpus Composition
+
+| Source                | Items used | Items available | Tokens | Share |
+|-----------------------|-----------:|----------------:|-------:|------:|
+| wikipedia_articles    |  1,931,239 |       1,931,239 | 2.00B  | 70.7% |
+| year_topics           |      1,788 |           1,788 | 2.0M   |  0.1% |
+| gutenberg             |        766 |             766 | 146.2M |  5.2% |
+| chess_games           |    355,980 |         355,980 | 415.1M | 14.7% |
+| augmented_chess_games |    334,920 |         334,920 | 262.1M |  9.3% |
+| chess_books           |         10 |              10 | 1.8M   |  0.1% |
+| **Total**             |  2,624,703 |       2,624,703 | 2.82B  | 100%  |
+```
+
+> Pair `--summary` with `--status` (Step 3) — `--status` is a quick
+> terminal progress view, while `--summary` produces shareable Markdown
+> documentation suitable for committing alongside a trained model.
+
+---
+
 ## Output Structure
 
 ```

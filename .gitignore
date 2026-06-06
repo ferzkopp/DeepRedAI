@@ -85,3 +85,4 @@ Thumbs.db
 llama.cpp/
 output/
 .setup_state.json
+unsloth_compiled_cache/

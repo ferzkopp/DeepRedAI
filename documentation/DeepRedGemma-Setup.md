@@ -230,7 +230,82 @@ Change quant with `--gguf-quant q4_k_m`; disable export with `--no-gguf`.
 
 ---
 
-## Step 7 — Backup the trained model
+## Step 7 — Document the run
+
+After training (or at any point during it), generate a Markdown summary of the
+run — the source model, training parameters, results, and produced artifacts:
+
+```bash
+# Resolve the run from its name/profile (default: <profile>-<YYYY-MM-DD>)
+python3 scripts/train_deepred_gemma.py --profile gemma-4b \
+    --run-name gemma-4b-2026-05-23-5 --summary
+
+# Or point directly at the output directory
+python3 scripts/train_deepred_gemma.py \
+    --output-dir $DEEPRED_ROOT/training_output/gemma-4b-2026-05-23-5 \
+    --summary
+
+# Write to a file instead of stdout
+python3 scripts/train_deepred_gemma.py \
+    --output-dir $DEEPRED_ROOT/training_output/gemma-4b-2026-05-23-5 \
+    --summary --summary-file run-summary.md
+```
+
+`--summary` does not load the model or GPU — it just reads on-disk metadata, so
+it runs quickly outside the container. It combines three sources:
+
+- **`run_meta.json`** — source model, profile, training mode (full/LoRA),
+  and all run-defining hyperparameters (epochs, batch size, grad accumulation,
+  learning rate, scheduler, warmup, max length, gradient checkpointing, seed,
+  dataset dir). On a completed run it also records a `results` block (duration,
+  peak GPU memory, final train loss, global steps, epochs).
+- **`trainer_state.json`** (from `final/` or the latest checkpoint) — used as a
+  fallback for step/epoch counts and to pull the last/best eval loss from the
+  loss history.
+- **The output directory** — inspected for produced artifacts (`final/`,
+  `final-merged/`, `gguf/*.gguf`) and checkpoint range, with file sizes.
+
+Everything is best-effort: missing pieces are omitted, so the summary works for
+in-progress runs too (it reports `status: running` and whatever metrics exist).
+
+Example output:
+
+```markdown
+# DeepRed SFT Run Summary — gemma-4b-2026-05-23-5
+
+- **Status:** completed
+- **Started:** 2026-05-23T05:54:09
+- **Completed:** 2026-06-06T04:51:43
+
+## Source Model
+
+- **Profile:** gemma-4b
+- **Base model:** google/gemma-3-4b-it
+- **Training mode:** full
+
+## Training Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Epochs | 2 |
+| Effective batch | 16 |
+| Learning rate | 5e-05 |
+| ...
+
+## Results
+
+- **Global steps:** 40,076
+- **Best eval loss:** 0.7040
+
+## Artifacts
+
+- **Final model:** `.../final` (8.0 GB)
+- **GGUF:** `.../gguf/gemma-4b-2026-05-23-5-final.gguf` (3.8 GB)
+```
+
+---
+
+## Step 8 — Backup the trained model
 
 Upload the exported `.gguf` to the same remote server used for the chess corpus
 backups. The `backup_deepred_files.py` script reuses the **same saved connection

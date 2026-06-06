@@ -62,6 +62,10 @@ Usage:
 
   # Show current progress
   python3 create_training_corpus.py --status
+
+  # Document the corpus as Markdown (use/would-use composition)
+  python3 create_training_corpus.py --summary
+  python3 create_training_corpus.py --summary --summary-file documentation/corpus.md
 """
 
 import json
@@ -1285,6 +1289,164 @@ def show_info(env, enabled_sources):
     print(f"\n  PostgreSQL : {'OK' if ok else 'UNAVAILABLE — ' + msg}")
 
 
+def parse_estimated_tokens(text):
+    """Parse an estimate string such as ``~1.4B`` into an int token count.
+
+    Returns 0 if the value cannot be parsed.
+    """
+    if not text:
+        return 0
+    s = text.strip().lstrip('~').strip()
+    mult = 1
+    if s and s[-1].upper() in ('K', 'M', 'B'):
+        mult = {'K': 1_000, 'M': 1_000_000, 'B': 1_000_000_000}[s[-1].upper()]
+        s = s[:-1]
+    try:
+        return int(float(s) * mult)
+    except ValueError:
+        return 0
+
+
+def show_summary(manifest, env, enabled_sources, corpus_dir, shards_dir,
+                 out_file=None):
+    """Render a Markdown summary documenting the training corpus.
+
+    Combines live source availability (``count_source``) with the actual
+    tokenized counts recorded in the manifest.  Sources that have already
+    been tokenized report their *actual* token counts; sources not yet
+    tokenized fall back to the *estimated* token counts (these are flagged
+    with ``*`` and represent what *would be* used).
+
+    When *out_file* is given the Markdown is written there; otherwise it is
+    printed to stdout (suitable for ``--summary > corpus.md``).
+    """
+    L = []
+
+    def emit(line=''):
+        L.append(line)
+
+    tok_name   = manifest.get('tokenizer') or '(not yet tokenized)'
+    vocab_size = manifest.get('vocab_size')
+    seq_length = manifest.get('seq_length', DEFAULT_SEQ_LENGTH)
+    finalized  = manifest.get('finalized', False)
+    generated  = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
+    sources    = manifest.get('sources', {})
+
+    emit("# DeepRed Training Corpus Summary")
+    emit()
+    emit(f"- **Generated:** {generated}")
+    vocab_str = f"{vocab_size:,}" if isinstance(vocab_size, int) else "?"
+    emit(f"- **Tokenizer:** {tok_name} (vocab {vocab_str})")
+    emit(f"- **Sequence length:** {seq_length:,} tokens")
+    emit(f"- **Manifest created:** {manifest.get('created', '?')}")
+    emit(f"- **Manifest updated:** {manifest.get('updated') or '(never)'}")
+    emit(f"- **Finalized:** {'yes' if finalized else 'no'}")
+    emit()
+
+    # ── Per-source accounting ──
+    rows = []          # (name, used, avail, tokens, est_flag)
+    total_used = total_avail = total_tokens = 0
+    any_estimated = False
+
+    for name in ALL_SOURCES:
+        info  = SOURCE_INFO[name]
+        avail = count_source(name, env)
+        state = sources.get(name, {})
+        used  = state.get('processed_count', 0)
+        tokens = state.get('token_count', 0)
+
+        if tokens > 0:
+            est_flag = False
+        else:
+            tokens = parse_estimated_tokens(info['estimated_tokens'])
+            est_flag = True
+            any_estimated = True
+
+        rows.append((name, used, avail, tokens, est_flag))
+        total_used   += used
+        total_avail  += avail
+        total_tokens += tokens
+
+    emit("## Corpus Composition")
+    emit()
+    emit("| Source | Items used | Items available | Tokens | Share |")
+    emit("|--------|-----------:|----------------:|-------:|------:|")
+    for name, used, avail, tokens, est_flag in rows:
+        share = (tokens / total_tokens * 100) if total_tokens else 0
+        tok_str = fmt_tokens(tokens) + ('*' if est_flag else '')
+        emit(f"| {name} | {used:,} | {avail:,} | {tok_str} | {share:.1f}% |")
+    emit(f"| **Total** | **{total_used:,}** | **{total_avail:,}** | "
+         f"**{fmt_tokens(total_tokens)}** | **100.0%** |")
+    emit()
+    if any_estimated:
+        emit("> `*` Estimated token count — source not yet tokenized "
+             "(reflects what *would be* included).")
+        emit()
+
+    # ── Token mixture bar chart ──
+    emit("## Mixture by Tokens")
+    emit()
+    emit("```")
+    bar_width = 40
+    for name, _used, _avail, tokens, est_flag in rows:
+        share = (tokens / total_tokens) if total_tokens else 0
+        filled = int(round(share * bar_width))
+        bar = '█' * filled + '·' * (bar_width - filled)
+        suffix = '*' if est_flag else ' '
+        emit(f"{name:<24} {bar} {share * 100:5.1f}%{suffix}")
+    emit("```")
+    emit()
+
+    # ── Source descriptions ──
+    emit("## Sources")
+    emit()
+    for name, used, avail, tokens, est_flag in rows:
+        info = SOURCE_INFO[name]
+        in_corpus = name in enabled_sources
+        emit(f"### {name}")
+        emit()
+        emit(f"- {info['description']}")
+        emit(f"- **Type:** {info['type']}")
+        pct = (used / avail * 100) if avail else 0
+        emit(f"- **Items:** {used:,} used / {avail:,} available ({pct:.1f}%)")
+        if est_flag:
+            emit(f"- **Tokens:** {fmt_tokens(tokens)} (estimated)")
+        else:
+            emit(f"- **Tokens:** {fmt_tokens(tokens)}")
+        emit(f"- **Selected for this run:** {'yes' if in_corpus else 'no'}")
+        emit()
+
+    # ── Finalized output ──
+    if finalized:
+        emit("## Finalized Output")
+        emit()
+        emit(f"- **Packing:** {manifest.get('packing', '?')}")
+        overlap = manifest.get('overlap_ratio', 0)
+        emit(f"- **Long-document overlap:** {overlap:.0%}")
+        n_train = manifest.get('train_sequences')
+        n_val   = manifest.get('val_sequences')
+        if isinstance(n_train, int):
+            emit(f"- **Train sequences:** {n_train:,} "
+                 f"({fmt_tokens(n_train * seq_length)} tokens)")
+        if isinstance(n_val, int):
+            emit(f"- **Val sequences:** {n_val:,} "
+                 f"({fmt_tokens(n_val * seq_length)} tokens)")
+        train_path = corpus_dir / 'train.bin'
+        val_path   = corpus_dir / 'val.bin'
+        if train_path.exists():
+            emit(f"- **train.bin:** {fmt_bytes(train_path.stat().st_size)}")
+        if val_path.exists():
+            emit(f"- **val.bin:** {fmt_bytes(val_path.stat().st_size)}")
+        emit()
+
+    text = '\n'.join(L)
+    if out_file:
+        Path(out_file).write_text(text)
+        print(f"Summary written to {out_file}")
+    else:
+        print(text)
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -1317,6 +1479,7 @@ def main():
   %(prog)s --sources wikipedia_articles,gutenberg --percent 100
   %(prog)s --finalize                                   Chunk, shuffle, split
   %(prog)s --status                                     Show progress
+  %(prog)s --summary                                    Document corpus (Markdown)
   %(prog)s --tokenizer SmolLM2-360M --download-tokenizer   Dev tokenizer""",
     )
 
@@ -1336,6 +1499,9 @@ def main():
     grp_action.add_argument(
         '--info', action='store_true',
         help='Print source information and exit')
+    grp_action.add_argument(
+        '--summary', action='store_true',
+        help='Print a Markdown summary documenting the corpus and exit')
     grp_action.add_argument(
         '--reset', action='store_true',
         help='Delete existing shards and manifest, then proceed')
@@ -1361,6 +1527,9 @@ def main():
     grp_opts.add_argument(
         '--output-dir', default=default_output, metavar='DIR',
         help=f'Base output directory (default: {default_output})')
+    grp_opts.add_argument(
+        '--summary-file', default=None, metavar='PATH',
+        help='Write --summary Markdown to PATH instead of stdout')
     grp_opts.add_argument(
         '--workers', type=int, default=None, metavar='N',
         help='Tokenizer thread count (default: all CPU cores)')
@@ -1406,6 +1575,12 @@ def main():
     if args.status:
         manifest = load_manifest(manifest_path)
         show_status(manifest, corpus_dir, shards_dir)
+        return
+
+    if args.summary:
+        manifest = load_manifest(manifest_path)
+        show_summary(manifest, env, sources, corpus_dir, shards_dir,
+                     out_file=args.summary_file)
         return
 
     # ── Need at least one action beyond early exits ──
