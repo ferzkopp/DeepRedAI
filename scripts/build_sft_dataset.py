@@ -147,6 +147,55 @@ def make_pair(user, assistant):
     }
 
 
+def parse_source_limits(spec):
+    """Parse ``source=N,source2=N`` into a dict of per-source caps."""
+    limits = {}
+    if not spec:
+        return limits
+    for raw_part in spec.split(','):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if '=' in part:
+            key, value = part.split('=', 1)
+        elif ':' in part:
+            key, value = part.split(':', 1)
+        else:
+            raise ValueError(
+                f"Invalid source limit '{part}' (expected source=N)")
+        key = key.strip()
+        if key not in ALL_SOURCES:
+            raise ValueError(f"Unknown source in --source-limits: {key}")
+        try:
+            limit = int(value.strip())
+        except ValueError as e:
+            raise ValueError(f"Invalid limit for {key}: {value}") from e
+        if limit < 0:
+            raise ValueError(f"Limit for {key} must be >= 0")
+        limits[key] = limit
+    return limits
+
+
+def _source_stats(pairs):
+    """Return per-source example and character counts for manifest auditing."""
+    out = {}
+    for pair in pairs:
+        source = pair.get('_source', 'unknown')
+        entry = out.setdefault(source, {
+            'examples': 0,
+            'user_chars': 0,
+            'assistant_chars': 0,
+        })
+        entry['examples'] += 1
+        for msg in pair.get('messages', []):
+            content_len = len(msg.get('content') or '')
+            if msg.get('role') == 'user':
+                entry['user_chars'] += content_len
+            elif msg.get('role') == 'assistant':
+                entry['assistant_chars'] += content_len
+    return dict(sorted(out.items()))
+
+
 # ── Per-source builders (each yields dicts with a 'messages' key) ───────
 
 def build_year_topics(env, limit, max_chars):
@@ -407,6 +456,11 @@ def main():
         '--max-samples-per-source', type=int, default=0,
         help='Cap samples per source (0 = unlimited).')
     parser.add_argument(
+        '--source-limits', default='',
+        help='Per-source caps as source=N,source2=N. Overrides '
+             '--max-samples-per-source for listed sources. Use 0 to skip a '
+             'source while keeping it in --sources for manifest provenance.')
+    parser.add_argument(
         '--max-chars', type=int, default=4096,
         help='Hard cap on per-message character length (default 4096).')
     parser.add_argument(
@@ -433,6 +487,10 @@ def main():
     if bad:
         parser.error(f"Unknown sources: {', '.join(bad)}. "
                      f"Available: {', '.join(ALL_SOURCES)}")
+    try:
+        source_limits = parse_source_limits(args.source_limits)
+    except ValueError as e:
+        parser.error(str(e))
 
     out_dir = Path(args.output_dir or f"{env['root']}/sft_corpus/{args.tag}")
     if out_dir.exists() and any(out_dir.iterdir()):
@@ -447,6 +505,10 @@ def main():
     print(f"Building SFT dataset at {out_dir}")
     print(f"  sources : {', '.join(sources)}")
     print(f"  cap     : {args.max_samples_per_source or 'unlimited'} / source")
+    if source_limits:
+        pretty_limits = ', '.join(
+            f"{source}={limit}" for source, limit in sorted(source_limits.items()))
+        print(f"  limits  : {pretty_limits}")
     print(f"  maxlen  : {args.max_chars} chars / message")
     print(f"  val     : {args.val_fraction:.0%}")
     print()
@@ -455,7 +517,14 @@ def main():
     source_counts = {}
     for src in sources:
         builder = SOURCE_BUILDERS[src]
-        limit = args.max_samples_per_source or None
+        if src in source_limits:
+            limit = source_limits[src]
+        else:
+            limit = args.max_samples_per_source or None
+        if limit == 0:
+            source_counts[src] = 0
+            print(f"  [{src}] skipped by source limit")
+            continue
         t0 = time.time()
         count = 0
         print(f"  [{src}] reading…", flush=True)
@@ -479,6 +548,15 @@ def main():
     val = all_pairs[:n_val]
     train = all_pairs[n_val:]
 
+    split_source_counts = {
+        'train': {k: v['examples'] for k, v in _source_stats(train).items()},
+        'val': {k: v['examples'] for k, v in _source_stats(val).items()},
+    }
+    split_source_chars = {
+        'train': _source_stats(train),
+        'val': _source_stats(val),
+    }
+
     train_path = out_dir / 'train.jsonl'
     val_path = out_dir / 'val.jsonl'
     _write_jsonl(train, train_path)
@@ -490,7 +568,10 @@ def main():
         'created': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
         'sources': sources,
         'source_counts': source_counts,
+        'split_source_counts': split_source_counts,
+        'split_source_chars': split_source_chars,
         'max_samples_per_source': args.max_samples_per_source,
+        'source_limits': source_limits,
         'max_chars': args.max_chars,
         'val_fraction': args.val_fraction,
         'seed': args.seed,

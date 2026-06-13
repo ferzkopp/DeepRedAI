@@ -48,6 +48,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -257,6 +258,60 @@ def _update_run_meta(output_dir, updates):
         json.dump(meta, f, indent=2)
 
 
+def _append_run_meta_list(output_dir, key, item, replace_keys=None):
+    """Append *item* to a list in ``run_meta.json``.
+
+    If ``replace_keys`` is supplied, an existing entry whose keys all match
+    the new item is replaced. This keeps resumed snapshot runs tidy.
+    """
+    meta_path = Path(output_dir) / 'run_meta.json'
+    meta = {}
+    if meta_path.exists():
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            meta = {}
+    items = list(meta.get(key, []))
+    if replace_keys:
+        def _same(existing):
+            return all(existing.get(k) == item.get(k) for k in replace_keys)
+        items = [existing for existing in items if not _same(existing)]
+    items.append(item)
+    meta[key] = items
+    with open(meta_path, 'w') as f:
+        json.dump(meta, f, indent=2)
+
+
+def parse_snapshot_fractions(spec):
+    """Parse ``10,20`` or ``0.1,0.2`` into sorted fractions in ``(0, 1]``."""
+    fractions = []
+    if not spec:
+        return fractions
+    for raw in spec.split(','):
+        part = raw.strip().rstrip('%')
+        if not part:
+            continue
+        try:
+            value = float(part)
+        except ValueError as e:
+            raise ValueError(f"Invalid snapshot fraction: {raw}") from e
+        if value > 1:
+            value = value / 100.0
+        if value <= 0 or value > 1:
+            raise ValueError(
+                f"Snapshot fraction must be in (0, 1] or (0, 100]: {raw}")
+        fractions.append(round(value, 6))
+    return sorted(set(fractions))
+
+
+def _snapshot_label(fraction):
+    pct = fraction * 100
+    if abs(pct - round(pct)) < 1e-6:
+        return f"{int(round(pct)):03d}pct"
+    return f"{pct:06.2f}pct".replace('.', 'p')
+
+
 # ─── Post-training summary ───────────────────────────────────────────────
 
 def _fmt_bytes(n):
@@ -440,6 +495,19 @@ def summarize_run(output_dir, out_file=None):
         for g in sorted(gguf_dir.glob('*.gguf')):
             emit(f"- **GGUF:** `{g}` ({_fmt_bytes(g.stat().st_size)})")
 
+    snapshots = meta.get('snapshots') or []
+    if snapshots:
+        emit(f"- **Progress snapshots:** {len(snapshots)}")
+        for snap in sorted(snapshots, key=lambda s: s.get('step', 0)):
+            label = snap.get('label', '?')
+            step = snap.get('step', '?')
+            status = snap.get('export_status', '?')
+            gguf_path = snap.get('gguf_path')
+            if gguf_path:
+                emit(f"  - `{label}` step {step}: {status} (`{gguf_path}`)")
+            else:
+                emit(f"  - `{label}` step {step}: {status}")
+
     checkpoints = []
     if output_dir.exists():
         for child in output_dir.iterdir():
@@ -607,6 +675,120 @@ def make_debug_callback(log=None, every=50):
     return DebugCallback()
 
 
+def make_snapshot_callback(output_dir, run_name, tokenizer, fractions,
+                           quant_type='q8_0', export_enabled=True,
+                           keep_hf=False, training_type='full', log=None):
+    """Create a callback that saves progress snapshots and optional GGUFs."""
+    from transformers import TrainerCallback
+
+    output_dir = Path(output_dir)
+    snapshots_dir = output_dir / 'snapshots'
+    gguf_dir = output_dir / 'gguf'
+
+    def _emit_info(msg):
+        if log is not None:
+            log.info(msg)
+        else:
+            print(msg, flush=True)
+
+    def _emit_warning(msg):
+        if log is not None:
+            log.warning(msg)
+        else:
+            print(msg, flush=True)
+
+    class ProgressSnapshotCallback(TrainerCallback):
+        def __init__(self):
+            self.targets = []
+            self.done = set()
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            max_steps = int(getattr(state, 'max_steps', 0) or 0)
+            if max_steps <= 0:
+                _emit_warning("Snapshot export disabled: max_steps unknown")
+                return
+            targets = []
+            for fraction in fractions:
+                step = max(1, int(round(max_steps * fraction)))
+                targets.append((step, fraction))
+            self.targets = sorted(set(targets))
+            pretty = ', '.join(
+                f"{fraction * 100:g}%@step{step}"
+                for step, fraction in self.targets)
+            _emit_info(f"Progress snapshots : {pretty}")
+
+        def on_step_end(self, args, state, control, model=None, **kwargs):
+            if not self.targets or model is None:
+                return
+            current_step = int(getattr(state, 'global_step', 0) or 0)
+            for target_step, fraction in self.targets:
+                key = (target_step, fraction)
+                if key in self.done or current_step < target_step:
+                    continue
+                self.done.add(key)
+                self._save_snapshot(model, current_step, fraction)
+
+        def _save_snapshot(self, model, step, fraction):
+            label = _snapshot_label(fraction)
+            snapshot_dir = snapshots_dir / f"{run_name}-{label}-step-{step}"
+            gguf_path = gguf_dir / f"{run_name}-{label}-step-{step}.gguf"
+            metadata = {
+                'label': label,
+                'fraction': fraction,
+                'percent': round(fraction * 100, 3),
+                'step': step,
+                'created_at': datetime.now().isoformat(),
+                'model_dir': str(snapshot_dir),
+                'gguf_path': str(gguf_path),
+                'gguf_quant': quant_type,
+                'training_type': training_type,
+                'export_status': 'pending',
+            }
+            _emit_info(f"Saving progress snapshot {label} at step {step}...")
+            try:
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
+                model.save_pretrained(str(snapshot_dir),
+                                      safe_serialization=True)
+                tokenizer.save_pretrained(str(snapshot_dir))
+                metadata['save_status'] = 'ok'
+            except Exception as e:
+                metadata['save_status'] = 'failed'
+                metadata['error'] = str(e)
+                _append_run_meta_list(output_dir, 'snapshots', metadata,
+                                      replace_keys=('label', 'step'))
+                _emit_warning(f"Snapshot save failed for {label}: {e}")
+                return
+
+            if training_type == 'lora':
+                metadata['export_status'] = 'skipped'
+                metadata['export_reason'] = (
+                    'LoRA snapshots are adapter-only during training; merge '
+                    'after training before GGUF export.')
+                _emit_warning("LoRA progress snapshot saved as adapters; "
+                              "GGUF export skipped for this snapshot")
+            elif export_enabled:
+                ok = export_gguf(str(snapshot_dir), str(gguf_path),
+                                 quant_type=quant_type, log=log)
+                metadata['export_status'] = 'ok' if ok else 'failed'
+                if ok and not keep_hf:
+                    try:
+                        shutil.rmtree(snapshot_dir)
+                        metadata['model_dir_removed'] = True
+                    except OSError as e:
+                        metadata['model_dir_removed'] = False
+                        metadata['cleanup_error'] = str(e)
+            else:
+                metadata['export_status'] = 'skipped'
+                metadata['export_reason'] = 'snapshot GGUF export disabled'
+
+            _append_run_meta_list(output_dir, 'snapshots', metadata,
+                                  replace_keys=('label', 'step'))
+            _emit_info(f"Progress snapshot {label} complete: "
+                       f"{metadata['export_status']}")
+
+    return ProgressSnapshotCallback()
+
+
 # ─── Training ────────────────────────────────────────────────────────────
 
 def train(args):
@@ -708,6 +890,23 @@ def train(args):
                                             interval_s=args.memory_interval)
         log.info(f"Memory monitor   : {output_dir / 'memory.log'} "
                  f"(every {args.memory_interval}s)")
+
+    manifest_path = dataset_dir / 'manifest.json'
+    _update_run_meta(output_dir, {
+        'dataset_manifest': (str(manifest_path)
+                             if manifest_path.exists() else None),
+        'checkpoint_config': {
+            'save_strategy': args.save_strategy,
+            'save_steps': args.save_steps,
+            'save_total_limit': args.save_total_limit,
+        },
+        'snapshot_config': {
+            'fractions': args.snapshot_fractions_parsed,
+            'gguf_enabled': not args.no_snapshot_gguf,
+            'gguf_quant': args.snapshot_gguf_quant,
+            'keep_hf': args.keep_snapshot_hf,
+        },
+    })
 
     # 4. Imports (deferred so --help is snappy)
     from datasets import load_dataset
@@ -886,9 +1085,9 @@ def train(args):
         bf16=True,
         fp16=False,
         logging_steps=10,
-        save_strategy='epoch',
+        save_strategy=args.save_strategy,
         eval_strategy='epoch',
-        save_total_limit=2,
+        save_total_limit=args.save_total_limit,
         report_to='none',
         dataset_kwargs={'add_special_tokens': False,
                         'append_concat_token': True},
@@ -898,6 +1097,11 @@ def train(args):
     )
     if args.max_steps:
         sft_args['max_steps'] = args.max_steps
+    if args.save_strategy == 'steps':
+        if args.save_steps <= 0:
+            log.error("--save-strategy steps requires --save-steps > 0")
+            sys.exit(1)
+        sft_args['save_steps'] = args.save_steps
 
     if args.unsloth:
         # Dataset is already tokenized above (see Unsloth branch). TRL
@@ -912,6 +1116,18 @@ def train(args):
     # 9. Trainer
     callbacks = [make_debug_callback(log=log,
                                      every=50 if not args.debug else 1)]
+    if args.snapshot_fractions_parsed:
+        callbacks.append(make_snapshot_callback(
+            output_dir=output_dir,
+            run_name=run_name,
+            tokenizer=tokenizer,
+            fractions=args.snapshot_fractions_parsed,
+            quant_type=args.snapshot_gguf_quant,
+            export_enabled=not args.no_snapshot_gguf,
+            keep_hf=args.keep_snapshot_hf,
+            training_type=args.type,
+            log=log,
+        ))
     trainer = SFTTrainer(
         model=model,
         args=training_args,
@@ -1040,6 +1256,17 @@ def parse_args():
     p.add_argument('--max-steps', type=int, default=0,
                    help='Hard cap on optimizer steps (0 = use epochs).')
 
+    p.add_argument('--save-strategy', default='epoch',
+                   choices=['no', 'epoch', 'steps'],
+                   help='HF Trainer checkpoint save strategy '
+                        '(default epoch).')
+    p.add_argument('--save-steps', type=int, default=0,
+                   help='HF Trainer checkpoint interval when '
+                        '--save-strategy steps is used.')
+    p.add_argument('--save-total-limit', type=int, default=2,
+                   help='Maximum resumable HF checkpoints to keep '
+                        '(default 2).')
+
     p.add_argument('--seed', type=int, default=42)
 
     # Run orchestration
@@ -1058,6 +1285,20 @@ def parse_args():
                    help='Skip final GGUF export.')
     p.add_argument('--gguf-quant', default='q8_0',
                    help='llama.cpp quant type (default q8_0).')
+
+    p.add_argument('--snapshot-fractions', default='',
+                   help='Comma-separated progress snapshots to save during '
+                        'training, e.g. "10,20,30" or "0.1,0.2". '
+                        'Full fine-tune snapshots are converted to GGUF.')
+    p.add_argument('--snapshot-gguf-quant', default=None,
+                   help='Quant type for progress snapshot GGUFs '
+                        '(default: --gguf-quant).')
+    p.add_argument('--no-snapshot-gguf', action='store_true',
+                   help='Save progress snapshot model dirs but skip GGUF '
+                        'conversion.')
+    p.add_argument('--keep-snapshot-hf', action='store_true',
+                   help='Keep HF model directories after successful snapshot '
+                        'GGUF conversion. Default removes them to save disk.')
 
     p.add_argument('--debug', action='store_true',
                    help='Per-step device/memory prints.')
@@ -1094,6 +1335,14 @@ def parse_args():
                         'stdout.')
 
     args = p.parse_args()
+
+    try:
+        args.snapshot_fractions_parsed = parse_snapshot_fractions(
+            args.snapshot_fractions)
+    except ValueError as e:
+        p.error(str(e))
+    if args.snapshot_gguf_quant is None:
+        args.snapshot_gguf_quant = args.gguf_quant
 
     # Apply profile defaults for any unset hyperparameter
     prof = PROFILES[args.profile]

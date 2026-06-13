@@ -93,6 +93,33 @@ Output at `$DEEPRED_ROOT/sft_corpus/<tag>/`: `train.jsonl`, `val.jsonl`,
 `manifest.json`. Default sources are
 `year_topics,gutenberg,augmented_chess_games,chess_books`.
 
+### Balanced build for the next Gemma run
+
+The 2026-05-23-5 run used `/mnt/data/sft_corpus/v1`, whose manifest was almost
+entirely `augmented_chess_games`. Always audit the dataset before training:
+
+```bash
+python3 scripts/audit_sft_dataset.py /mnt/data/sft_corpus/v1
+```
+
+Build new training sets with explicit per-source caps. A first balanced
+candidate should include Wikipedia as the broad anchor, keep raw PGN out, and
+cap augmented chess to a small flavor share:
+
+```bash
+python3 scripts/build_sft_dataset.py \
+   --sources wikipedia_articles,year_topics,gutenberg,augmented_chess_games,chess_books \
+   --source-limits augmented_chess_games=10000 \
+   --tag balanced-v1
+
+python3 scripts/audit_sft_dataset.py /mnt/data/sft_corpus/balanced-v1
+```
+
+Tune the `augmented_chess_games` cap until the manifest and audit report show a
+target chess share, normally 2-5% for a general DeepRed assistant. The manifest
+now records split-level source counts and character totals so train/validation
+balance can be checked quickly.
+
 ---
 
 ## Step 3 — Enter the fine-tuning container
@@ -146,6 +173,24 @@ on a 96 GiB GTT cap with finite loss**. Defaults: batch=4, grad_accum=4
 > Do **not** add `--unsloth` for Full FT (4B) on this hardware — see
 > Troubleshooting. `--gradient-checkpointing` alone is the working path.
 
+For new production attempts, prefer a balanced dataset, a lower learning rate
+for the first full run, and progress GGUF snapshots for manual quality gates:
+
+```bash
+python3 scripts/train_deepred_gemma.py --profile gemma-4b \
+   --dataset-dir /mnt/data/sft_corpus/balanced-v1 \
+   --epochs 1 --lr 2e-5 \
+   --gradient-checkpointing \
+   --snapshot-fractions 10,20,30,40,50,60,70,80,90 \
+   --snapshot-gguf-quant q4_k_m \
+   --run-name gemma-4b-balanced-v1
+```
+
+Full fine-tune snapshots are saved as temporary HF model directories, converted
+to GGUF with `llama.cpp`, recorded in `run_meta.json`, and removed after a
+successful conversion unless `--keep-snapshot-hf` is set. LoRA progress
+snapshots are saved as adapters; GGUF export is skipped until they are merged.
+
 ### Gemma-3-12B-IT Full FT
 
 ```bash
@@ -197,9 +242,10 @@ python3 scripts/train_deepred_gemma.py --profile gemma-4b \
 The script compares the fingerprint in `run_meta.json` against your CLI args
 — if they match and a `checkpoint-NNNN/` exists, HF Trainer resumes from
 the latest checkpoint (model weights, optimizer state, LR scheduler, RNG,
-dataloader position). Default `--save-steps 500` ≈ ~4 h of work at risk
-per checkpoint interval. `--save-total-limit 2` keeps disk bounded
-(~30-35 GB per Full-FT 4B checkpoint).
+dataloader position). By default checkpoints are saved at epoch boundaries.
+Use `--save-strategy steps --save-steps <N>` for more frequent resumable
+checkpoints. `--save-total-limit 2` keeps disk bounded (~30-35 GB per Full-FT
+4B checkpoint).
 
 Force a fresh run with `--new-run` (auto-increments name) or
 `--run-name <custom>`.
@@ -211,12 +257,14 @@ Force a fresh run with `--new-run` (auto-increments name) or
 ```
 $DEEPRED_ROOT/training_output/<run-name>/
 ├── checkpoint-NNN/         (HF Trainer checkpoints — full save)
+├── snapshots/              (temporary/model-only progress snapshots)
 ├── final/                  (final model + tokenizer; or LoRA adapters)
 ├── final-merged/           (LoRA only: merged base+adapters)
 ├── gguf/<name>-final.gguf  (for LM Studio; q8_0 default)
+├── gguf/<name>-010pct-step-N.gguf  (optional progress snapshots)
 ├── train.log
 ├── memory.log              (GPU + host memory samples, every 10 s)
-└── run_meta.json           (fingerprint, status, params)
+└── run_meta.json           (fingerprint, status, params, snapshot metadata)
 ```
 
 Copy GGUF to LM Studio:

@@ -1,95 +1,79 @@
 # DeepRed-gemma-4b-2026-05-23-5-final.gguf
 
-## Training Corpus
+## Training Data
 
-- **Generated:** 2026-06-06 05:45:43 UTC
-- **Tokenizer:** TinyLlama-1.1B (vocab 32,000)
-- **Sequence length:** 2,048 tokens
-- **Manifest created:** 2026-05-19T15:56:09Z
-- **Manifest updated:** 2026-05-21T04:56:35Z
-- **Finalized:** yes
+This model was trained with the chat-format SFT dataset at
+`/mnt/data/sft_corpus/v1`, as recorded in
+`/mnt/data/training_output/gemma-4b-2026-05-23-5/run_meta.json`.
 
-### Corpus Composition
+The packed `train.bin` corpus used by the continued-pretraining path was not
+the dataset used for this Gemma SFT run.
 
-| Source | Items used | Items available | Tokens | Share |
-|--------|-----------:|----------------:|-------:|------:|
-| wikipedia_articles | 1,931,239 | 1,931,239 | 2.00B | 70.7% |
-| year_topics | 1,788 | 1,788 | 2.0M | 0.1% |
-| gutenberg | 766 | 766 | 146.2M | 5.2% |
-| chess_games | 355,980 | 355,980 | 415.1M | 14.7% |
-| augmented_chess_games | 334,920 | 334,920 | 262.1M | 9.3% |
-| chess_books | 10 | 10 | 1.8M | 0.1% |
-| **Total** | **2,624,703** | **2,624,703** | **2.82B** | **100.0%** |
+### Dataset Manifest
 
-### Mixture by Tokens
+- **Dataset path:** `/mnt/data/sft_corpus/v1`
+- **Manifest:** `/mnt/data/sft_corpus/v1/manifest.json`
+- **Created:** 2026-05-22T06:24:26Z
+- **Format:** JSONL chat examples with `messages` containing `user` and
+  `assistant` turns
+- **Builder:** `scripts/build_sft_dataset.py`
+- **Max chars per message:** 4,096
+- **Validation fraction:** 5%
+- **Shuffle seed:** 42
 
-```
-wikipedia_articles       ████████████████████████████············  70.7% 
-year_topics              ········································   0.1% 
-gutenberg                ██······································   5.2% 
-chess_games              ██████··································  14.7% 
-augmented_chess_games    ████····································   9.3% 
-chess_books              ········································   0.1% 
-```
+### Dataset Splits
 
-### Sources
+| Split | Examples |
+|-------|---------:|
+| Train | 320,607 |
+| Validation | 16,874 |
+| **Total** | **337,481** |
 
-#### wikipedia_articles
+### Source Composition
 
-- Pre-1969 Wikipedia articles from PostgreSQL (temporal_classification=O)
-- **Type:** database
-- **Items:** 1,931,239 used / 1,931,239 available (100.0%)
-- **Tokens:** 2.00B
-- **Selected for this run:** yes
+| Source | Examples | Share |
+|--------|---------:|------:|
+| year_topics | 1,788 | 0.5% |
+| gutenberg | 763 | 0.2% |
+| augmented_chess_games | 334,920 | 99.2% |
+| chess_books | 10 | 0.0% |
+| **Total** | **337,481** | **100.0%** |
+
+### Sources Used
 
 #### year_topics
 
-- Year-by-year historical event summaries, years 151–1969 (JSON files)
-- **Type:** json_files
-- **Items:** 1,788 used / 1,788 available (100.0%)
-- **Tokens:** 2.0M
-- **Selected for this run:** yes
+- Year-by-year historical event summaries from JSON files
+- Prompt style: historical event questions such as `What were the notable
+  events of the year {year}?`
+- Examples used: 1,788
 
 #### gutenberg
 
-- Project Gutenberg books — 766 public-domain titles (JSONL)
-- **Type:** jsonl
-- **Items:** 766 used / 766 available (100.0%)
-- **Tokens:** 146.2M
-- **Selected for this run:** yes
-
-#### chess_games
-
-- Pre-1969 chess games — raw PGN notation, 356K games (JSONL)
-- **Type:** jsonl
-- **Items:** 355,980 used / 355,980 available (100.0%)
-- **Tokens:** 415.1M
-- **Selected for this run:** yes
+- Project Gutenberg text chunks from `/mnt/data/gutenberg/corpus/gutenberg_corpus.jsonl`
+- Prompt style: passage continuation
+- Examples used: 763
 
 #### augmented_chess_games
 
-- LLM-augmented chess game narratives — 335K games (JSONL)
-- **Type:** jsonl
-- **Items:** 334,920 used / 334,920 available (100.0%)
-- **Tokens:** 262.1M
-- **Selected for this run:** yes
+- LLM-augmented chess game narratives from
+  `/mnt/data/chess/corpus/augmented_chess_games.jsonl`
+- Prompt style: `Narrate the following chess game...`
+- Examples used: 334,920
 
 #### chess_books
 
-- Internet Archive chess reference books — 10 titles (JSONL)
-- **Type:** jsonl
-- **Items:** 10 used / 10 available (100.0%)
-- **Tokens:** 1.8M
-- **Selected for this run:** yes
+- Internet Archive chess reference book chunks from
+  `/mnt/data/chess/corpus/chess_archive_books.jsonl`
+- Prompt style: passage continuation
+- Examples used: 10
 
-### Finalized Output
+### Sources Not Used In This SFT Dataset
 
-- **Packing:** document_aware
-- **Long-document overlap:** 25%
-- **Train sequences:** 1,582,818 (3.24B tokens)
-- **Val sequences:** 15,988 (32.7M tokens)
-- **train.bin:** 6.0 GB
-- **val.bin:** 62.5 MB
+| Source | Note |
+|--------|------|
+| wikipedia_articles | Not included in `/mnt/data/sft_corpus/v1` |
+| chess_games | Raw PGN source not included in `/mnt/data/sft_corpus/v1` |
 
 ## DeepRed SFT Run Summary
 
@@ -126,3 +110,4 @@ chess_books              ···························�
 - **Last eval loss:** 0.7040
 - **Best eval loss:** 0.7040
 - **Final train loss:** 0.7132
+

@@ -180,6 +180,23 @@ At tokenization time the script:
 > games augmented), the prioritized ordering changes. Use `--reset` before
 > re-tokenizing to ensure consistent pairing.
 
+### SFT Sampling Caution
+
+The Gemma run `gemma-4b-2026-05-23-5` showed that augmented chess narratives can
+dominate behavior when used as nearly all SFT assistant targets. For general
+assistant fine-tuning, do not include the entire augmented chess corpus without
+source caps. Audit the SFT dataset with:
+
+```bash
+python3 scripts/audit_sft_dataset.py /mnt/data/sft_corpus/<tag>
+```
+
+For balanced Gemma SFT, cap `augmented_chess_games` to a small share, usually
+2-5%, and keep raw `chess_games` excluded unless the run is intentionally a
+specialist chess model. Future augmentation passes should prefer neutral or
+varied historical chess commentary when the target model must remain broadly
+useful outside chess prompts.
+
 
 ## Running the Chess Augmentation
 
