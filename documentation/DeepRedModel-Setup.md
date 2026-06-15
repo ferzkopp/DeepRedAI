@@ -153,9 +153,16 @@ cp /mnt/data/training_output/dev-2026-03-07/gguf/dev-2026-03-07-epoch1.gguf \
    /mnt/data/lmstudio/models/
 ```
 
-GGUF export defaults to `q8_0` quantization. Change with `--gguf-quant q4_k_m` for smaller files. Disable entirely with `--no-gguf`.
+GGUF export defaults to `q8_0` quantization, which `convert_hf_to_gguf.py`
+can write directly. Lower-bit targets such as `q4_k_m` are converted in two
+steps: first to temporary `f16` GGUF, then through `llama-quantize`. Change
+with `--gguf-quant q4_k_m` for smaller files. Disable entirely with
+`--no-gguf`.
 
-> **Note:** GGUF export uses `convert_hf_to_gguf.py` from llama.cpp (installed by `setup_strixhalo.py` stage `training_gguf_tools`). If you need to override the path, use `--llama-cpp-path`.
+> **Note:** GGUF export uses `convert_hf_to_gguf.py` from llama.cpp. Lower-bit
+> quantization also requires the `llama-quantize` binary. Both are prepared by
+> `setup_strixhalo.py` stage `training_gguf_tools`. If you need to override the
+> path, use `--llama-cpp-path`.
 
 ---
 
@@ -310,7 +317,7 @@ All parameters have profile-specific defaults. CLI flags override any profile de
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--no-gguf` | off | Disable GGUF export at epoch boundaries |
-| `--gguf-quant TYPE` | `q8_0` | Quantization type (q8_0, q4_k_m, f16, etc.) |
+| `--gguf-quant TYPE` | `q8_0` | Output type or quantization target (`f16`, `bf16`, `q8_0`, `q4_k_m`, etc.; lower-bit targets require `llama-quantize`) |
 | `--llama-cpp-path PATH` | `$DEEPRED_ROOT/llama.cpp` | Path to llama.cpp directory |
 
 ### Performance Flags
