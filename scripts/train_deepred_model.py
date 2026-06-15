@@ -36,8 +36,10 @@ import logging
 import math
 import os
 import signal
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -425,6 +427,30 @@ def mark_run_completed(output_dir):
 
 # ─── GGUF Export ──────────────────────────────────────────────────────────────
 
+CONVERTER_GGUF_OUTTYPES = {
+    'f32', 'f16', 'bf16', 'q8_0', 'tq1_0', 'tq2_0', 'auto',
+}
+
+
+def _find_llama_quantizer(llama_cpp_path):
+    """Return a llama.cpp quantizer executable path, or None."""
+    base = Path(llama_cpp_path)
+    candidates = [
+        base / 'build' / 'bin' / 'llama-quantize',
+        base / 'build' / 'bin' / 'quantize',
+        base / 'build' / 'tools' / 'quantize' / 'llama-quantize',
+        base / 'build' / 'tools' / 'quantize' / 'quantize',
+        base / 'bin' / 'llama-quantize',
+        base / 'bin' / 'quantize',
+        base / 'llama-quantize',
+        base / 'quantize',
+    ]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return shutil.which('llama-quantize') or shutil.which('quantize')
+
+
 def export_gguf(model_dir, output_path, llama_cpp_path=None,
                quant_type='q8_0', log=None):
     """Export a model checkpoint to GGUF format for LMStudio testing.
@@ -446,17 +472,54 @@ def export_gguf(model_dir, output_path, llama_cpp_path=None,
         return False
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    quant_type = (quant_type or 'q8_0').lower()
+
+    temp_output = None
+    if quant_type in CONVERTER_GGUF_OUTTYPES:
+        convert_output = str(output_path)
+        convert_outtype = quant_type
+        quant_cmd = None
+    else:
+        quantizer = _find_llama_quantizer(llama_cpp_path)
+        if not quantizer:
+            _warn(
+                "GGUF export failed: quant type "
+                f"'{quant_type}' requires a built llama.cpp quantizer. "
+                "Use --gguf-quant f16/q8_0, or build it with: "
+                f"cmake -S {llama_cpp_path} -B {llama_cpp_path}/build "
+                "&& cmake --build "
+                f"{llama_cpp_path}/build --target llama-quantize"
+            )
+            return False
+        fd, temp_output = tempfile.mkstemp(
+            prefix=f"{Path(output_path).stem}-",
+            suffix='.f16.gguf',
+            dir=os.path.dirname(output_path),
+        )
+        os.close(fd)
+        convert_output = temp_output
+        convert_outtype = 'f16'
+        quant_cmd = [
+            quantizer,
+            str(convert_output),
+            str(output_path),
+            quant_type.upper(),
+        ]
 
     cmd = [
         sys.executable, convert_script,
         str(model_dir),
-        '--outfile', str(output_path),
-        '--outtype', quant_type,
+        '--outfile', str(convert_output),
+        '--outtype', convert_outtype,
     ]
 
     try:
         _log(f"Exporting GGUF: {output_path}")
         subprocess.run(cmd, check=True, capture_output=True, text=True)
+        if quant_cmd:
+            _log(f"Quantizing GGUF: {quant_type.upper()}")
+            subprocess.run(quant_cmd, check=True, capture_output=True,
+                           text=True)
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
         _log(f"GGUF exported: {output_path} ({size_mb:.0f} MB)")
         return True
@@ -466,6 +529,12 @@ def export_gguf(model_dir, output_path, llama_cpp_path=None,
     except FileNotFoundError as e:
         _warn(f"GGUF export failed (command not found): {e}")
         return False
+    finally:
+        if temp_output and os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except OSError:
+                pass
 
 
 # ─── Training ────────────────────────────────────────────────────────────────

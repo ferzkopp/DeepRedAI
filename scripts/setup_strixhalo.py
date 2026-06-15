@@ -1581,13 +1581,14 @@ def stage_training_toolbox(user: str) -> None:
 
 @stage("training_gguf_tools", "Install llama.cpp GGUF conversion tools for model export")
 def stage_training_gguf_tools(user: str) -> None:
-    """Clone llama.cpp and install Python deps for GGUF export.
+    """Clone llama.cpp, build quantizer, and install Python deps for GGUF export.
 
     The training script (train_deepred_model.py) calls
     llama.cpp/convert_hf_to_gguf.py at epoch boundaries to export GGUF
     models for testing in LM Studio.  This stage:
-      1. Clones llama.cpp (shallow) to /mnt/data/llama.cpp
-      2. Installs its Python requirements into the fine-tuning container's
+            1. Clones llama.cpp (shallow) to /mnt/data/llama.cpp
+            2. Builds llama-quantize for q4_k_m/q5_k_m style exports
+            3. Installs its Python requirements into the fine-tuning container's
          /opt/venv so the conversion script runs inside the container.
     """
     llama_cpp_dir = DATA_DIR / "llama.cpp"
@@ -1608,7 +1609,40 @@ def stage_training_gguf_tools(user: str) -> None:
                 f"Clone succeeded but convert_hf_to_gguf.py not found at {convert_script}"
             )
 
-    # ── Step 2: Install Python requirements inside the fine-tuning container ──
+    # ── Step 2: Build llama-quantize for post-conversion GGUF quants ──
+    # convert_hf_to_gguf.py only supports f32/f16/bf16/q8_0 directly. Lower
+    # bit types like q4_k_m require converting to f16 first, then running the
+    # C++ quantizer.
+    quantizer = llama_cpp_dir / "build" / "bin" / "llama-quantize"
+    if quantizer.exists():
+        log.info("  llama.cpp quantizer already present at %s", quantizer)
+    else:
+        log.info("  Building llama.cpp quantizer for q4/q5 GGUF export...")
+        configure = run(
+            f'su - {user} -c "cmake -S {llama_cpp_dir} '
+            f'-B {llama_cpp_dir}/build -DCMAKE_BUILD_TYPE=Release '
+            f'-DLLAMA_CURL=OFF -DGGML_NATIVE=OFF '
+            f'-DCMAKE_CXX_STANDARD=17"',
+            check=False,
+            capture=True,
+        )
+        build = run(
+            f'su - {user} -c "cmake --build {llama_cpp_dir}/build '
+            f'--config Release --target llama-quantize -j$(nproc)"',
+            check=False,
+            capture=True,
+        )
+        if configure.returncode != 0 or build.returncode != 0 or not quantizer.exists():
+            log.warning("  llama-quantize build failed — f16/q8_0 exports "
+                        "can still work, but q4_k_m/q5_k_m exports need "
+                        "a built quantizer")
+            stderr = (build.stderr or configure.stderr or '').strip()
+            if stderr:
+                log.warning("  stderr: %s", stderr[:500])
+        else:
+            log.info("  llama.cpp quantizer built at %s", quantizer)
+
+    # ── Step 3: Install Python requirements inside the fine-tuning container ──
     # IMPORTANT: We must NOT use llama.cpp's top-level requirements.txt or its
     # convert_hf_to_gguf requirements directly — they pull torch from the PyPI
     # CPU index (--extra-index-url .../whl/cpu) which overwrites the TheRock

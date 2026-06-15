@@ -16,6 +16,10 @@ Sources (lexical templating only — no LLM augmentation here):
                            →  rest of the chunk
   wikipedia_articles     "Tell me about {title}."  →  intro paragraphs
                            (PostgreSQL — optional)
+  retain                 Pre-cutoff factual Q&A from the temporal generator
+                           (reuses $WIKI_DATA/datasets/retain/*.jsonl)
+  unlearn                Post-cutoff refusal Q&A ("I don't know")
+                           (reuses $WIKI_DATA/datasets/unlearn/*.jsonl)
 
 Environment variables (honour ``deepred-env.sh``):
   DEEPRED_ROOT     Base data directory (default: /mnt/data)
@@ -62,6 +66,8 @@ TEMPORAL_CUTOFF_YEAR = 1969
 
 ALL_SOURCES = [
     'wikipedia_articles',
+    'retain',
+    'unlearn',
     'year_topics',
     'gutenberg',
     'chess_games',
@@ -430,6 +436,64 @@ def build_wikipedia_articles(env, limit, max_chars):
         conn.close()
 
 
+def _instruction_pairs(files, limit, max_chars):
+    """Load instruction/output pairs from legacy JSONL files, shuffle, then cap.
+
+    The temporal generator stores Q&A as ``{"instruction", "output",
+    "metadata"}`` and *appends* new pairs (e.g. modern-event refusals) to the
+    END of these files.  Shuffling before applying *limit* ensures appended
+    pairs are represented when a cap is in force, rather than always being the
+    first to be dropped.
+    """
+    pairs = []
+    for path in files:
+        if not path.exists():
+            continue
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                try:
+                    doc = json.loads(line)
+                except Exception:
+                    continue
+                instruction = clean_text(doc.get('instruction', ''))
+                output = clean_text(doc.get('output', ''))
+                if not instruction or not output:
+                    continue
+                pair = make_pair(
+                    truncate(instruction, max_chars),
+                    truncate(output, max_chars))
+                if pair:
+                    pairs.append(pair)
+    random.shuffle(pairs)
+    if limit:
+        pairs = pairs[:limit]
+    yield from pairs
+
+
+def build_retain(env, limit, max_chars):
+    """Pre-cutoff factual Q&A (retain knowledge).
+
+    Reuses the existing temporal datasets under
+    ``$WIKI_DATA/datasets/retain/`` (both train and val files) so the model
+    keeps answering pre-cutoff questions accurately.
+    """
+    base = Path(env['wiki_data']) / 'datasets' / 'retain'
+    files = [base / 'retain_train.jsonl', base / 'retain_val.jsonl']
+    yield from _instruction_pairs(files, limit, max_chars)
+
+
+def build_unlearn(env, limit, max_chars):
+    """Post-cutoff refusal Q&A (unlearn knowledge).
+
+    Reuses the existing temporal datasets under
+    ``$WIKI_DATA/datasets/unlearn/`` (both train and val files); the assistant
+    side is a standardized refusal so the model declines post-cutoff topics.
+    """
+    base = Path(env['wiki_data']) / 'datasets' / 'unlearn'
+    files = [base / 'unlearn_train.jsonl', base / 'unlearn_val.jsonl']
+    yield from _instruction_pairs(files, limit, max_chars)
+
+
 SOURCE_BUILDERS = {
     'year_topics':           build_year_topics,
     'gutenberg':             build_gutenberg,
@@ -437,6 +501,8 @@ SOURCE_BUILDERS = {
     'chess_games':           build_chess_games,
     'chess_books':           build_chess_books,
     'wikipedia_articles':    build_wikipedia_articles,
+    'retain':                build_retain,
+    'unlearn':               build_unlearn,
 }
 
 
@@ -616,6 +682,8 @@ def _source_file_hashes(env, sources):
         'chess_games':           Path(env['chess_data']) / 'corpus' / 'chess_games.jsonl',
         'augmented_chess_games': Path(env['chess_data']) / 'corpus' / 'augmented_chess_games.jsonl',
         'chess_books':           Path(env['chess_data']) / 'corpus' / 'chess_archive_books.jsonl',
+        'retain':                Path(env['wiki_data']) / 'datasets' / 'retain' / 'retain_train.jsonl',
+        'unlearn':               Path(env['wiki_data']) / 'datasets' / 'unlearn' / 'unlearn_train.jsonl',
     }
     out = {}
     for src in sources:

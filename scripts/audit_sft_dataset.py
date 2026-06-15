@@ -39,6 +39,31 @@ CHESS_NOTATION_RE = re.compile(
     r'(?:O-O-O|O-O|[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?|[a-h]x[a-h][1-8][+#]?)\b'
 )
 
+# Heuristic detector for standardized "unlearn" refusal answers (the temporal
+# generator draws from ~40 templates).  Matches the distinctive stems so the
+# empirical refusal share can be cross-checked against the manifest.
+REFUSAL_RE = re.compile(
+    r"(?i)(?:"
+    # Polite / apologetic stems
+    r"I (?:don't|do not) (?:have|know|possess)|"
+    r"I'm sorry|sorry, that's|I apologi[sz]e|(?:my )?apologies|I regret|I'm afraid|"
+    r"I wish I could help|"
+    # Neutral / matter-of-fact stems
+    r"I'm not (?:familiar|aware|able)|I'm unable to|I can(?:'|no)t (?:answer|provide|help)|"
+    r"outside (?:my|what I|the scope)|beyond my knowledge|not something I (?:can|have)|"
+    r"don't have (?:any )?(?:information|details|knowledge|enough information)|"
+    r"that's not something I|I lack the information|"
+    r"that topic is outside|that falls outside|"
+    # Firm / direct stems
+    r"(?:information|that) is not available|not available to me|no information is available|"
+    r"(?:I )?have no (?:knowledge|information|idea)|not equipped to|"
+    # Colloquial / casual stems
+    r"never heard of|what are you talking about|beats me|news to me|no clue|"
+    r"mystery to me|drawing a blank|can(?:'|no)?t say I know|got nothing on|"
+    r"you've got me there"
+    r")"
+)
+
 
 def load_json(path):
     if not path.exists():
@@ -92,6 +117,7 @@ def audit_split(path, max_examples=0):
         'persona_hits': Counter(),
         'chess_notation_examples': 0,
         'chess_notation_matches': 0,
+        'refusal_examples': 0,
     }
 
     for example in iter_examples(path, max_examples=max_examples):
@@ -110,6 +136,9 @@ def audit_split(path, max_examples=0):
         if notation_matches:
             stats['chess_notation_examples'] += 1
             stats['chess_notation_matches'] += len(notation_matches)
+
+        if REFUSAL_RE.search(assistant):
+            stats['refusal_examples'] += 1
 
     return stats
 
@@ -143,7 +172,7 @@ def manifest_source_shares(manifest):
     }
 
 
-def build_report(dataset_dir, max_examples=0, chess_warn_share=0.20):
+def build_report(dataset_dir, max_examples=0, chess_warn_share=0.20, refusal_warn_share=0.20):
     manifest = load_json(dataset_dir / 'manifest.json') or {}
     report = {
         'dataset_dir': str(dataset_dir),
@@ -178,6 +207,10 @@ def build_report(dataset_dir, max_examples=0, chess_warn_share=0.20):
                 'example_share': stats['chess_notation_examples'] / examples,
                 'matches': stats['chess_notation_matches'],
             },
+            'refusal': {
+                'examples': stats['refusal_examples'],
+                'example_share': stats['refusal_examples'] / examples,
+            },
             'persona_hits': dict(stats['persona_hits']),
         }
 
@@ -193,12 +226,31 @@ def build_report(dataset_dir, max_examples=0, chess_warn_share=0.20):
                 f'({chess_total:,}/{total:,}), above warning threshold {chess_warn_share:.0%}'
             )
 
+        unlearn_total = source_counts.get('unlearn', 0)
+        unlearn_share = unlearn_total / total
+        retain_total = source_counts.get('retain', 0)
+        report['manifest']['refusal_source_share'] = {
+            'count': unlearn_total, 'share': unlearn_share,
+        }
+        report['manifest']['retain_source_count'] = retain_total
+        if unlearn_share > refusal_warn_share:
+            report['warnings'].append(
+                f'refusal (unlearn) manifest share is {unlearn_share:.1%} '
+                f'({unlearn_total:,}/{total:,}), above warning threshold {refusal_warn_share:.0%}'
+            )
+
     for split_name, split in report['splits'].items():
         prompt_share = split['prompt_patterns'].get('augmented_chess_games', {}).get('share', 0)
         if prompt_share > chess_warn_share:
             report['warnings'].append(
                 f'{split_name} prompt share inferred as augmented chess is '
                 f'{prompt_share:.1%}, above warning threshold {chess_warn_share:.0%}'
+            )
+        refusal_share = split['refusal']['example_share']
+        if refusal_share > refusal_warn_share:
+            report['warnings'].append(
+                f'{split_name} refusal answer share is {refusal_share:.1%}, '
+                f'above warning threshold {refusal_warn_share:.0%}'
             )
 
     return report
@@ -223,6 +275,15 @@ def print_report(report):
         for source, item in shares.items():
             print(f"  {source:24s} {item['count']:10,}  {item['share']:6.1%}")
 
+    refusal_share = manifest.get('refusal_source_share')
+    if refusal_share:
+        retain_count = manifest.get('retain_source_count', 0)
+        print(
+            "  refusal (unlearn) share : "
+            f"{refusal_share['count']:,} ({refusal_share['share']:.1%})"
+            f"   retain pairs: {retain_count:,}"
+        )
+
     for split_name, split in report['splits'].items():
         print(f"\n{split_name.capitalize()} split")
         print(f"  examples audited : {split['examples_audited']:,}")
@@ -241,6 +302,11 @@ def print_report(report):
             f"{notation['examples']:,} examples ({notation['example_share']:.1%}), "
             f"{notation['matches']:,} matches"
         )
+        refusal = split['refusal']
+        print(
+            "  refusal answers  : "
+            f"{refusal['examples']:,} examples ({refusal['example_share']:.1%})"
+        )
         if split['persona_hits']:
             print("  persona phrases  :")
             for phrase, count in sorted(split['persona_hits'].items()):
@@ -257,6 +323,7 @@ def parse_args():
     parser.add_argument('dataset_dir', help='Directory containing train.jsonl, val.jsonl, and optionally manifest.json.')
     parser.add_argument('--max-examples', type=int, default=0, help='Audit only the first N examples per split (0 = all).')
     parser.add_argument('--chess-warn-share', type=float, default=0.20, help='Warn when inferred/manifest chess share exceeds this fraction (default 0.20).')
+    parser.add_argument('--refusal-warn-share', type=float, default=0.20, help='Warn when refusal (unlearn) share exceeds this fraction (default 0.20).')
     parser.add_argument('--json', action='store_true', help='Print machine-readable JSON instead of text.')
     return parser.parse_args()
 
@@ -268,6 +335,7 @@ def main():
         dataset_dir,
         max_examples=args.max_examples,
         chess_warn_share=args.chess_warn_share,
+        refusal_warn_share=args.refusal_warn_share,
     )
     if args.json:
         print(json.dumps(report, indent=2))
