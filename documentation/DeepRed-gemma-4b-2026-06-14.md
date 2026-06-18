@@ -1,5 +1,11 @@
 # DeepRed Gemma 4B Temporal Run — 2026-06-14
 
+> **Status:** completed as a **2,500-step (~24 h) under-run** — `--max-steps` was set
+> 10× too low (2,500 instead of the calibrated ~25,000). The run is valid and its
+> throughput calibrates the full-scale follow-up,
+> [DeepRed-gemma-4b-2026-06-17.md](DeepRed-gemma-4b-2026-06-17.md). See
+> [Run Outcome](#run-outcome-actual).
+
 ## Goals
 
 This run is a **longer, corpus-calibrated** Gemma-3-4B SFT fine-tune. The previous
@@ -224,7 +230,7 @@ Expected approximate source mix and refusal share:
 | augmented_chess_games | ~4.5% |
 | year_topics | ~0.5% |
 | gutenberg | ~0.2% |
-| chess_books | ~0.0% |
+| chess_books | ~0.1% |
 
 Checks before training:
 
@@ -326,7 +332,7 @@ python3 scripts/train_deepred_gemma.py --profile gemma-4b \
     --type full \
     --dataset-dir /mnt/data/sft_corpus/temporal-v1-10d \
     --epochs 3 \
-    --max-steps <TARGET_MAX_STEPS> \
+    --max-steps 2500 \
     --lr 2e-5 \
     --lr-scheduler-type cosine \
     --warmup-steps 300 \
@@ -337,10 +343,16 @@ python3 scripts/train_deepred_gemma.py --profile gemma-4b \
     --save-total-limit 2 \
     --snapshot-fractions 10,25,50,75,100 \
     --snapshot-gguf-quant q4_k_m \
-    --gguf-quant q4_k_m \
+    --no-snapshot-gguf \
+    --no-gguf \
     --run-name gemma-4b-temporal-v1-10d \
     --new-run
 ```
+
+> **Executed value:** this run used `--max-steps 2500` (not the calibrated
+> `<TARGET_MAX_STEPS>` ≈ 25,000) — an inadvertent 10× under-run that finished in
+> ~24 h at 0.11 epoch. See [Run Outcome](#run-outcome-actual); the full 10-day run
+> is [DeepRed-gemma-4b-2026-06-17.md](DeepRed-gemma-4b-2026-06-17.md).
 
 Why these settings:
 
@@ -352,20 +364,72 @@ Why these settings:
   corpus.
 - **`--lr 2e-5`, cosine schedule** — matches the stable 06-13 configuration, decayed
   over `--max-steps`.
-- **Snapshots at 10/25/50/75/100%** as `q4_k_m` GGUF for manual comparison.
+- **Snapshots at 10/25/50/75/100%** are saved as HuggingFace dirs; `--snapshot-gguf-quant
+  q4_k_m` records the intended quant for the Phase 10 conversion.
+- **`--no-gguf --no-snapshot-gguf`** defer all GGUF conversion to a host-side
+  post-step (Phase 10). The host-built `llama.cpp` binaries fail *inside* the
+  container with a GLIBC mismatch (`GLIBC_2.43 not found`), so conversion runs on
+  the host where `llama.cpp` was built. The trainer still saves the final model and
+  every snapshot as HF dirs for that step.
 - **`--save-steps 2000`, `--save-total-limit 2`** keeps two resumable checkpoints.
 
-Expected GGUF output directory:
+This run saves the final model plus five snapshot HF directories under:
 
 ```text
-/mnt/data/training_output/gemma-4b-temporal-v1-10d/gguf/
+/mnt/data/training_output/gemma-4b-temporal-v1-10d/
+├── final/        # final full-precision weights
+└── snapshots/    # five progress snapshots (HF dirs)
 ```
 
 Confirm success in `run_meta.json` (`status: completed`, five snapshots + final).
+GGUF files are produced next, in Phase 10.
 
 ---
 
-## 10. Back Up the Final GGUF
+## 10. Export GGUF on the Host (Post-Step)
+
+**Run this on the host — NOT inside the container.** GGUF conversion is decoupled
+from training because the host-built `llama.cpp` binaries fail inside the
+`strix-halo-finetuning` container with a GLIBC mismatch:
+
+```text
+llama-quantize: /lib64/libm.so.6: version `GLIBC_2.43' not found
+    (required by .../libllama.so.0)
+```
+
+[scripts/export_gguf.py](../scripts/export_gguf.py) reads `run_meta.json`,
+(re)exports the final model and every saved snapshot to GGUF, and updates each
+snapshot's `export_status`. It is safe to re-run — artifacts whose GGUF already
+exists are skipped (use `--all` to force re-export).
+
+```bash
+cd /mnt/data/DeepRedAI
+source deepred-env.sh
+
+# One-time: the converter needs the gguf python package matching llama.cpp.
+python3 -c "import gguf" 2>/dev/null || pip install /mnt/data/llama.cpp/gguf-py
+
+python3 scripts/export_gguf.py --run-name gemma-4b-temporal-v1-10d
+```
+
+Output (final + five snapshots, `q4_k_m`):
+
+```text
+/mnt/data/training_output/gemma-4b-temporal-v1-10d/gguf/
+├── gemma-4b-temporal-v1-10d-final.gguf
+├── gemma-4b-temporal-v1-10d-010pct-step-250.gguf
+├── gemma-4b-temporal-v1-10d-025pct-step-625.gguf
+├── gemma-4b-temporal-v1-10d-050pct-step-1250.gguf
+├── gemma-4b-temporal-v1-10d-075pct-step-1875.gguf
+└── gemma-4b-temporal-v1-10d-100pct-step-2500.gguf
+```
+
+Add `--cleanup-hf` to delete the large HF snapshot dirs after each snapshot's GGUF
+is written, reclaiming disk.
+
+---
+
+## 11. Back Up the Final GGUF
 
 ```bash
 cd /mnt/data/DeepRedAI
@@ -374,6 +438,43 @@ source deepred-env.sh
 python3 scripts/backup_deepred_files.py \
     --gguf /mnt/data/training_output/gemma-4b-temporal-v1-10d/gguf/gemma-4b-temporal-v1-10d-final.gguf
 ```
+
+**Completed 2026-06-17.** The final GGUF of run `gemma-4b-temporal-v1-10d`
+(2.49 GB) was uploaded via SFTP to the remote backup target:
+
+```text
+sftp://u75761916@home508482369.1and1-data.host/Data/gemma-4b-temporal-v1-10d-final.gguf
+```
+
+Only the final model was backed up; the five progress snapshots remain local under
+`/mnt/data/training_output/gemma-4b-temporal-v1-10d/gguf/`.
+
+---
+
+## Run Outcome (Actual)
+
+> **This run was an inadvertent 10× under-run** — `--max-steps 2500` instead of the
+> calibrated ~25,000 — so it completed in ~24 h at **0.11 epoch** rather than ~10
+> days. The checkpoint is valid and exercised the full pipeline end-to-end; the
+> proper 10-day run continues in
+> [DeepRed-gemma-4b-2026-06-17.md](DeepRed-gemma-4b-2026-06-17.md).
+
+| Metric | Value |
+|--------|-------|
+| Run name | `gemma-4b-temporal-v1-10d` |
+| Executed `--max-steps` | 2,500 (intended ~25,000) |
+| Steps / epoch | 2,500 / 0.113 epoch of `T=372k` |
+| Wall-clock | 23.4 h (84,285 s, incl. a 9,228 s end-eval) |
+| Throughput | 33.7 s/step overall · 30.0 s/step pure training |
+| Final train loss | 1.9149 |
+| Eval loss | 1.8506 |
+| Peak GPU | 55.95 GB |
+| Snapshots saved | 5 (steps 250 / 625 / 1,250 / 1,875 / 2,500) |
+| GGUF (in-container) | **failed** — `GLIBC_2.43 not found` (host-built llama.cpp run inside container) |
+| GGUF (recovered) | 6 × `q4_k_m` (2.32 GB each) via host [scripts/export_gguf.py](../scripts/export_gguf.py) |
+| Final GGUF backup | `sftp://u75761916@home508482369.1and1-data.host/Data/gemma-4b-temporal-v1-10d-final.gguf` (2.49 GB, 2026-06-17) |
+
+The measured **33.7 s/step** here is the throughput anchor for the 06-17 full run.
 
 ---
 
@@ -412,7 +513,10 @@ max length 2048, gradient checkpointing on): **1,500 steps / 55,848 s = 37.2 s/s
 | LR / scheduler / warmup | 2e-5 / cosine / 300 |
 | Max length | 2048 |
 | Epoch headroom | 3 (bounded by `--max-steps`) |
-| Snapshots | 10/25/50/75/100% as `q4_k_m` GGUF |
+| Snapshots | 10/25/50/75/100% (HF dirs → `q4_k_m` GGUF in Phase 10) |
+| GGUF export | host post-step via `export_gguf.py` (deferred from training; container GLIBC) |
+| Executed `--max-steps` | **2,500** (~24 h, 0.11 epoch) — inadvertent 10× under-run; see [Run Outcome](#run-outcome-actual) |
+| Superseded by | [DeepRed-gemma-4b-2026-06-17.md](DeepRed-gemma-4b-2026-06-17.md) (full 10-day run) |
 
 ---
 
