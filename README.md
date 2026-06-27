@@ -35,7 +35,8 @@ For augmentation workflow details, see the full guide:
 
 - [DeepRed-gemma-4b-2026-05-23-5-final.gguf](http://www.ferzkopp.net/Data/DeepRed-gemma-4b-2026-05-23-5-final.gguf) - see [corpus and model details](documentation/DeepRed-gemma-4b-2026-05-23-5.md)
 - [gemma-4b-balanced-v1-small-1500-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-balanced-v1-small-1500-final.gguf) - see [balanced run details and examples](documentation/DeepRed-gemma-4b-2026-06-13.md)
-- [gemma-4b-temporal-v1-10d-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-final.gguf) - temporal-cutoff run (reintroduces `retain`/`unlearn` at the 1969-07-20 cutoff); see [run details and examples](documentation/DeepRed-gemma-4b-2026-06-14.md). Full 10-day follow-up calibrated from this run: [2026-06-17 runbook](documentation/DeepRed-gemma-4b-2026-06-17.md)
+- [gemma-4b-temporal-v1-10d-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-final.gguf) - temporal-cutoff run (reintroduces `retain`/`unlearn` at the 1969-07-20 cutoff); see [run details and examples](documentation/DeepRed-gemma-4b-2026-06-14.md). 
+- [gemma-4b-temporal-v1-10d-2-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-2-final.gguf) - Full 10-day follow-up calibrated from previous run: [2026-06-17 runbook](documentation/DeepRed-gemma-4b-2026-06-17.md)
 
 ## Legacy Steps/Instructions
 
