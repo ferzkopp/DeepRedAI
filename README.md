@@ -27,7 +27,12 @@ These steps document how to perform a [Model Training from Scratch](documentatio
   - [gemma-4b-balanced-v1-small-1500-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-balanced-v1-small-1500-final.gguf) - see [balanced run details and examples](documentation/DeepRed-gemma-4b-2026-06-13.md)
   - [gemma-4b-temporal-v1-10d-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-final.gguf) - temporal-cutoff run (reintroduces `retain`/`unlearn` at the 1969-07-20 cutoff); see [run details and examples](documentation/DeepRed-gemma-4b-2026-06-14.md).
 - Production
-  - [gemma-4b-temporal-v1-10d-2-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-2-final.gguf) - Full 10-day follow-up calibrated from previous run: [2026-06-17 runbook](documentation/DeepRed-gemma-4b-2026-06-17.md)
+  - [gemma-4b-temporal-v1-10d-2-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-2-final.gguf) - Full 10-day follow-up calibrated from previous run: [2026-06-17 runbook](documentation/DeepRed-gemma-4b-2026-06-17.md) (2.32 GB)
+  - Intermediate checkpoints (10%, 25%, 50%, 75%):
+    - [gemma-4b-temporal-v1-10d-2-010pct-step-2560.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-2-010pct-step-2560.gguf) (2.32 GB)
+    - [gemma-4b-temporal-v1-10d-2-025pct-step-6400.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-2-025pct-step-6400.gguf) (2.32 GB)
+    - [gemma-4b-temporal-v1-10d-2-050pct-step-12800.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-2-050pct-step-12800.gguf) (2.32 GB)
+    - [gemma-4b-temporal-v1-10d-2-075pct-step-19200.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-2-075pct-step-19200.gguf) (2.32 GB)
 
 ### Downloadable Chess Augmentation Archives
 
