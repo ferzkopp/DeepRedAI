@@ -19,6 +19,7 @@ These steps document how to perform a [Model Training from Scratch](documentatio
 - [How to train the Deep Red model](documentation/DeepRedModel-Setup.md) — continued pre-training on the temporally-filtered pre-1969 corpus using dev (SmolLM2-360M) or prod (TinyLlama-1.1B) profiles
 - [How to train Deep Red on Gemma-3 (SFT)](documentation/DeepRedGemma-Setup.md) — parallel supervised fine-tuning track using Gemma-3-4B-IT / 12B-IT via TRL `SFTTrainer`, mirroring the [kyuz0/amd-strix-halo-llm-finetuning](https://github.com/kyuz0/amd-strix-halo-llm-finetuning) setup
 - [How to use the generated GGUF models with LM Studio](documentation/ModelUsage.md) — loading, testing, and comparing trained model checkpoints in LM Studio 
+- [How to evaluate checkpoints and plan recovery](documentation/DeepRed-gemma-4b-evaluation-and-recovery-plan.md) — independent 1969 probe bank, corpus contamination audit, GPU-accelerated trajectory evaluation across archived checkpoints, and the evidence-driven plan for temporal and persona training
 
 ### Downloadable Models
 
@@ -34,6 +35,13 @@ These steps document how to perform a [Model Training from Scratch](documentatio
     - [gemma-4b-temporal-v1-10d-2-050pct-step-12800.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-2-050pct-step-12800.gguf) (2.32 GB)
     - [gemma-4b-temporal-v1-10d-2-075pct-step-19200.gguf](http://www.ferzkopp.net/Data/gemma-4b-temporal-v1-10d-2-075pct-step-19200.gguf) (2.32 GB)
 
+> **Evaluation note:** a 1,377-generation evaluation across 17 archived checkpoints
+> found that none of these models meets the project goal. The temporal checkpoints
+> suppress modern facts only by refusing broadly — they also refuse many pre-1969
+> questions — while the balanced and prototype checkpoints retain modern knowledge
+> entirely. Results, measurements, and the revised training plan are in the
+> [evaluation and recovery plan](documentation/DeepRed-gemma-4b-evaluation-and-recovery-plan.md).
+
 ### Downloadable Chess Augmentation Archives
 
 Prebuilt chess augmentation archives can be downloaded directly from:
@@ -48,8 +56,10 @@ For augmentation workflow details, see the full guide:
 ## Repo Content
 
 - **`/documentation`** - Setup guides and planning documents for the project
+- **`/evaluation`** - Model registry and independent probe bank used by the 1969 evaluation harness
 - **`/notebooks`** - Jupyter notebooks for testing embeddings and OpenSearch functionality
 - **`/patches`** - System patches (network driver fix for AMD Strix Halo for older kernels)
 - **`/scripts`** - Python scripts for Wikipedia extraction/indexing, temporal augmentation (YAGO/Wikidata), Gutenberg and chess content retrieval, MCP server, and system setup
 - **`/services`** - Systemd service files for automated startup (inference servers, MCP server, OpenSearch, web GUI)
+- **`/tests`** - Unit tests for the evaluation harness
 - **`/webapp`** - React-based web interface for Wikipedia search with Vite configuration

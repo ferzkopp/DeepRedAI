@@ -1,0 +1,197 @@
+{
+  "schema_version": 1,
+  "description": "Canonical DeepRed Phase 1 controls and archived stages.",
+  "models": [
+    {
+      "id": "gemma-3-4b-it-base-q4",
+      "family": "base",
+      "role": "untouched_control",
+      "format": "gguf",
+      "path": "/mnt/data/evaluations/deepred-1969/artifacts/gemma-3-4b-it-base-q4_k_m.gguf",
+      "source_model": "/mnt/data/models/gemma-3-4b-it",
+      "quantization": "q4_k_m",
+      "step": 0,
+      "sha256": "37d7e3529cea8d3e309241576e9d3034e986320e532c9dea8b61b037596ee472",
+      "bytes": 2489894144
+    },
+    {
+      "id": "chess-heavy-final",
+      "family": "chess_heavy",
+      "role": "persona_relevance_collapse_control",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-2026-05-23-5/gguf/gemma-4b-2026-05-23-5-final.gguf",
+      "quantization": "q4_k_m",
+      "step": 40076,
+      "sha256": "5a13e06f83f0fac13996be8312a8683da2beb3dd6d31813cd622293b74768ccd",
+      "bytes": 4130401856
+    },
+    {
+      "id": "balanced-step-300",
+      "family": "balanced",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-balanced-v1-small-1500/gguf/gemma-4b-balanced-v1-small-1500-020pct-step-300.gguf",
+      "quantization": "q4_k_m",
+      "step": 300,
+      "sha256": "2e411627269eb53e5b7c723808b0bcaab3656cd4ca19876e939730a4f2c00f29",
+      "bytes": 2489893888
+    },
+    {
+      "id": "balanced-step-600",
+      "family": "balanced",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-balanced-v1-small-1500/gguf/gemma-4b-balanced-v1-small-1500-040pct-step-600.gguf",
+      "quantization": "q4_k_m",
+      "step": 600,
+      "sha256": "437d1163cd5152b86896638e197ff8f3d2b44bd21baa545fb71850099d9e79a3",
+      "bytes": 2489893888
+    },
+    {
+      "id": "balanced-step-900",
+      "family": "balanced",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-balanced-v1-small-1500/gguf/gemma-4b-balanced-v1-small-1500-060pct-step-900.gguf",
+      "quantization": "q4_k_m",
+      "step": 900,
+      "sha256": "6a51b1dec954fbee98656c57f6f8bb5e73bc309bfb349d4c038439b82967ceb6",
+      "bytes": 2489893888
+    },
+    {
+      "id": "balanced-step-1200",
+      "family": "balanced",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-balanced-v1-small-1500/gguf/gemma-4b-balanced-v1-small-1500-080pct-step-1200.gguf",
+      "quantization": "q4_k_m",
+      "step": 1200,
+      "sha256": "11091c1be9553bfb08186b7517b78b7150228f2862be2231e3d9d99c732080a6",
+      "bytes": 2489893888
+    },
+    {
+      "id": "balanced-final-1500",
+      "family": "balanced",
+      "role": "trajectory_final",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-balanced-v1-small-1500/gguf/gemma-4b-balanced-v1-small-1500-final.gguf",
+      "quantization": "q4_k_m",
+      "step": 1500,
+      "sha256": "07177132a8e1a58823ae23e5680a463abd876ed5443b69aec73f2b981560f4df",
+      "bytes": 2489893696,
+      "provenance_alias": "gemma-4b-balanced-v1-small-1500-100pct-step-1500.gguf"
+    },
+    {
+      "id": "temporal-short-step-250",
+      "family": "temporal_short",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-temporal-v1-10d/gguf/gemma-4b-temporal-v1-10d-010pct-step-250.gguf",
+      "quantization": "q4_k_m",
+      "step": 250,
+      "sha256": "8bbfba8b87ab6809ecfc469f392b77e988beefd0e785d4b17cb659e3c7d0b76e",
+      "bytes": 2489893888
+    },
+    {
+      "id": "temporal-short-step-625",
+      "family": "temporal_short",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-temporal-v1-10d/gguf/gemma-4b-temporal-v1-10d-025pct-step-625.gguf",
+      "quantization": "q4_k_m",
+      "step": 625,
+      "sha256": "a90a33d261d6c98378ec39d0872fa0a6ffe1f07d2cc942b304266ac59001ab82",
+      "bytes": 2489893888
+    },
+    {
+      "id": "temporal-short-step-1250",
+      "family": "temporal_short",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-temporal-v1-10d/gguf/gemma-4b-temporal-v1-10d-050pct-step-1250.gguf",
+      "quantization": "q4_k_m",
+      "step": 1250,
+      "sha256": "6b6f0427bdc3fbb6de9cabbbc3b9dbd6ae7f60a64253a662296f96c6a4240a23",
+      "bytes": 2489893888
+    },
+    {
+      "id": "temporal-short-step-1875",
+      "family": "temporal_short",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-temporal-v1-10d/gguf/gemma-4b-temporal-v1-10d-075pct-step-1875.gguf",
+      "quantization": "q4_k_m",
+      "step": 1875,
+      "sha256": "0109f17acc775a605af17212ae68248edad6161a73e6703a0533b69d8a9a91e7",
+      "bytes": 2489893888
+    },
+    {
+      "id": "temporal-short-final-2500",
+      "family": "temporal_short",
+      "role": "trajectory_final",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-temporal-v1-10d/gguf/gemma-4b-temporal-v1-10d-final.gguf",
+      "quantization": "q4_k_m",
+      "step": 2500,
+      "sha256": "d48a41cd138b51f15071bb592336cd75f8994884f53bee26bc8fd071764c2bb1",
+      "bytes": 2489893696,
+      "provenance_alias": "gemma-4b-temporal-v1-10d-100pct-step-2500.gguf"
+    },
+    {
+      "id": "temporal-full-step-2560",
+      "family": "temporal_full",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-temporal-v1-10d-2/gguf/gemma-4b-temporal-v1-10d-2-010pct-step-2560.gguf",
+      "quantization": "q4_k_m",
+      "step": 2560,
+      "sha256": "cf7ed8f0a4c41e1e4133bfc5e389fcdc67e736e9f01e979e7d0d1f0e9f889b88",
+      "bytes": 2489893888
+    },
+    {
+      "id": "temporal-full-step-6400",
+      "family": "temporal_full",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-temporal-v1-10d-2/gguf/gemma-4b-temporal-v1-10d-2-025pct-step-6400.gguf",
+      "quantization": "q4_k_m",
+      "step": 6400,
+      "sha256": "66242f10172b913be87cf6ea3f7d985f545a866ec613b581f1722cf3249eae86",
+      "bytes": 2489893888
+    },
+    {
+      "id": "temporal-full-step-12800",
+      "family": "temporal_full",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-temporal-v1-10d-2/gguf/gemma-4b-temporal-v1-10d-2-050pct-step-12800.gguf",
+      "quantization": "q4_k_m",
+      "step": 12800,
+      "sha256": "f079fe16c8ce9e72ba3a64ed5cd66e4a146769e9e8395d2c724d407b2492fc9d",
+      "bytes": 2489893888
+    },
+    {
+      "id": "temporal-full-step-19200",
+      "family": "temporal_full",
+      "role": "trajectory",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-temporal-v1-10d-2/gguf/gemma-4b-temporal-v1-10d-2-075pct-step-19200.gguf",
+      "quantization": "q4_k_m",
+      "step": 19200,
+      "sha256": "1a955f7e2e300fe016d718a93a1e867c95ece70a48b2a4972f4ddd7e7982c326",
+      "bytes": 2489893888
+    },
+    {
+      "id": "temporal-full-final-25600",
+      "family": "temporal_full",
+      "role": "trajectory_final",
+      "format": "gguf",
+      "path": "/mnt/data/training_output/gemma-4b-temporal-v1-10d-2/gguf/gemma-4b-temporal-v1-10d-2-final.gguf",
+      "quantization": "q4_k_m",
+      "step": 25600,
+      "sha256": "8c952d1b9a3582acd209f3b07f0746a66cd806f5ca4d7a573ecbb410a98d7be8",
+      "bytes": 2489893696,
+      "provenance_alias": "gemma-4b-temporal-v1-10d-2-100pct-step-25600.gguf"
+    }
+  ]
+}
