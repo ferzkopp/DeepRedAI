@@ -20,6 +20,7 @@ These steps document how to perform a [Model Training from Scratch](documentatio
 - [How to train Deep Red on Gemma-3 (SFT)](documentation/DeepRedGemma-Setup.md) — parallel supervised fine-tuning track using Gemma-3-4B-IT / 12B-IT via TRL `SFTTrainer`, mirroring the [kyuz0/amd-strix-halo-llm-finetuning](https://github.com/kyuz0/amd-strix-halo-llm-finetuning) setup
 - [How to use the generated GGUF models with LM Studio](documentation/ModelUsage.md) — loading, testing, and comparing trained model checkpoints in LM Studio 
 - [How to evaluate checkpoints and plan recovery](documentation/DeepRed-gemma-4b-evaluation-and-recovery-plan.md) — independent 1969 probe bank, corpus contamination audit, GPU-accelerated trajectory evaluation across archived checkpoints, and the evidence-driven plan for temporal and persona training
+- [How to run the Phase 2 rebuild](documentation/DeepRed-Phase2-Setup.md) — step-by-step runbook for corpus generation, auditing, training and gating, with measured generator selection and throughput
 
 ### Downloadable Models
 
