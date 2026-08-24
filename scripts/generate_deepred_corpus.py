@@ -570,7 +570,12 @@ def load_seed_examples(seed_path, rng, count=6):
 
 def generate_persona(args, client, holdout, rng, out_path, existing):
     produced = 0
-    positions = load_positions(args.positions)
+    positions = [
+        position for position in load_positions(args.positions)
+        if not is_held_out(
+            f'{position.get("white", "")} {position.get("black", "")}',
+            holdout)
+    ]
     if args.chess_annotation != 'none' and not positions:
         print('  WARN no position index; annotations disabled', file=sys.stderr)
     control_path = out_path.parent / 'persona_controls.jsonl'

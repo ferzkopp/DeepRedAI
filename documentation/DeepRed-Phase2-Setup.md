@@ -19,15 +19,16 @@ in-flight request.
 |---|---|---|
 | 0. Preflight | — | **completed 2026-08-15** |
 | 1. Chess position index | `scripts/build_chess_positions.py` | **completed 2026-08-15** |
-| 2. Corpus generation | `scripts/generate_deepred_corpus.py` | ready, not started |
-| 3. Corpus + contamination audit | `scripts/audit_deepred_corpus.py`, `evaluate_deepred_models.py audit` | ready |
-| 4. Dataset build | `scripts/build_deepred_dataset.py` | not implemented |
-| 5. NPO + retain/KL pilot | `scripts/train_deepred_npo.py` | not implemented |
-| 6. Export, evaluate, gate | `scripts/export_gguf.py`, `evaluate_deepred_models.py` | export/eval ready, `gates` subcommand pending |
+| 2. Corpus generation | `scripts/generate_deepred_corpus.py` | **completed 2026-08-21** |
+| 3. Corpus + contamination audit | `scripts/audit_deepred_corpus.py`, `evaluate_deepred_models.py audit` | **completed 2026-08-21** |
+| 4. Dataset build | `scripts/build_deepred_dataset.py` | **completed 2026-08-21** |
+| 5. NPO + retain/KL pilot | `scripts/train_deepred_npo.py` | **completed 2026-08-22** |
+| 6. Export, evaluate, gate | `scripts/export_gguf.py`, `evaluate_deepred_models.py` | **completed 2026-08-22; release gates failed** |
+| 7. V2 snapshot sweep | `export_gguf.py`, `evaluate_deepred_models.py` | **completed 2026-08-22** |
+| 8. Weighted NPO v3 | `scripts/train_deepred_npo.py` | ready to run |
 
-Stages 0-1 are done. Stage 2 is the long unattended job and is run manually.
-Stages 4-6 are blocked on code that does not exist yet; their commands are given
-so the shape of the run is fixed.
+Stages 0-7 are complete. The v2 trajectory peaked too early and never learned
+the persona. The longer weighted v3 run in Stage 8 is ready.
 
 ## Generator selection (measured 2026-08-15)
 
@@ -163,7 +164,7 @@ post-cutoff leaks: 0
 within expectation. The index is reusable and does not need rebuilding unless
 the chess archive changes.
 
-## Stage 2 — Corpus generation (the long run, ~1 day)
+## Stage 2 — Corpus generation (completed 2026-08-21)
 
 Four assets, each written to its own append-only file under
 `/mnt/data/deepred_corpus/v2/<kind>/<kind>.jsonl`. Progress lines report
@@ -175,7 +176,7 @@ enough to see whether a run is healthy.
 > commands below simply continue from there. Delete the files first if you want
 > a clean corpus.
 
-### Track A — factual assets on the 14B (~24 h)
+### Track A — factual assets on the 14B (completed 2026-08-19)
 
 Run this in your dedicated terminal:
 
@@ -206,12 +207,13 @@ python3 scripts/generate_deepred_corpus.py \
     2>&1 | tee -a "$LOG"
 ```
 
-Measured rates: retain/forget ~20/min and era_native ~8.6/min when the 14B has
-the iGPU to itself. With Track B running concurrently, retain settled at
-~11/min (ETA ~915 min for 10,000). Running the tracks sequentially is faster in
-total but leaves the persona asset until last.
+Initial measured rates were retain/forget ~20/min and era_native ~8.6/min when
+the 14B had the iGPU to itself. With Track B running concurrently, retain
+settled at ~11/min (ETA ~915 min for 10,000). The completed era-native run
+produced 5,002 records in 4,556.4 min (75 h 56 min, 1.1/min). Running the tracks
+sequentially is faster in total but leaves the persona asset until last.
 
-### Track B — persona on the 27B (~13 h)
+### Track B — persona on the 27B (completed 2026-08-21)
 
 Persona uses a different generator, so it can run **concurrently in a second
 terminal**. The two servers share the iGPU, and the cost is real: persona fell
@@ -264,6 +266,7 @@ dataset.
 ```bash
 # 1. Corpus quality: boilerplate, duplicates, template collapse, mode balance,
 #    holdout leakage, persona identity leaks, control pairing, FEN legality.
+set -o pipefail
 python3 scripts/audit_deepred_corpus.py \
     --corpus-dir /mnt/data/deepred_corpus/v2 \
     --min-records 1000 \
@@ -296,7 +299,22 @@ echo "contamination audit exit: $?"
 
 Exit code 0 on both means Stage 4 may start.
 
-## Stage 4 — Dataset build (script not implemented)
+### Result (2026-08-21)
+
+Both audits passed. The corpus audit reported zero failures and one warning:
+476 exact duplicate persona questions among 3,009 records. The most frequent
+question occurs 50 times (1.7%), while the most common answer opening is 0.7%,
+so this was accepted as prompt repetition rather than template collapse.
+
+The initial corpus audit also found three valid two-word retain answers and 32
+persona chess footers containing held-out player names. The short-answer check
+was corrected to reject empty answers without rejecting concise factual names.
+The 32 contaminated footers and their metadata were removed while preserving
+the persona prose and paired controls; future generation excludes held-out
+players from the chess-position pool. The independent contamination audit then
+scanned 26,999 records and found zero contaminated probes.
+
+## Stage 4 — Dataset build (completed 2026-08-21)
 
 ```bash
 python3 scripts/build_deepred_dataset.py \
@@ -310,23 +328,52 @@ Requirements carried over from Phase 1: stable source/content ids, split
 **before** sampling, hard failure on cross-split duplicates, and an assertion
 that no training target contains dump structure (Finding 6).
 
-## Stage 5 — NPO + retain/KL pilot (script not implemented)
+### Result (2026-08-21)
+
+The builder wrote all 26,999 audited records with zero content ids crossing
+the train/validation boundary. The objective files contain 5,696/306 forget
+train/validation records and 19,953/1,044 retain train/validation records. The
+retain side combines factual retain, era-native, persona and plain controls;
+their original kind, source id and stable content id remain on every row.
+
+## Stage 5 — NPO + retain/KL pilot
 
 Full-weight from untouched Gemma, checkpointed so a dominated branch is stopped
 early rather than run to completion. Budget: about one day of wall clock.
 
 ```bash
-python3 scripts/train_deepred_npo.py \
+podman stop llama-rocm-7.2
+podman start strix-halo-finetuning
+podman exec -it strix-halo-finetuning bash -lc '
+  cd /mnt/data/DeepRedAI
+  /opt/venv/bin/python3 scripts/train_deepred_npo.py \
     --base-model /mnt/data/models/gemma-3-4b-it \
     --dataset /mnt/data/sft_corpus/deepred-v2 \
     --output-dir /mnt/data/training_output/deepred-npo-v2 \
     --snapshot-at 10 25 50 75 100
+'
 ```
 
-The reference model is frozen and its log-probabilities are precomputed, so the
-retain/KL anchor does not require a second model resident during training.
+Do not source `deepred-env.sh` inside this container: it activates the host
+`/mnt/data/venv`, whose ROCm build segfaults on gfx1151. Use
+`/opt/venv/bin/python3` explicitly. The first phase loads the untouched model,
+caches assistant-sequence log-probabilities in `reference_logps.json`, and
+unloads it. The second phase loads the trainable full-weight model, balances
+forget and retain examples, and optimizes NPO plus a sampled forward-KL retain
+anchor. Re-running the command reuses the reference cache and resumes the
+latest `checkpoint-*` directory.
+
+### Result (2026-08-22)
+
+Training completed all 2,495 optimizer steps in 21,827.4 seconds (6 h 3 min
+47 s), averaging 8.75 s/step. The reported train loss was 0.02560. The final
+Hugging Face model is 8.1 GB, and the 10%, 25%, 50%, 75% and 100% snapshots
+were all written successfully. This measured runtime covers the training phase;
+the preceding reference-log-probability cache pass is not included.
 
 ## Stage 6 — Export, evaluate, gate
+
+### 6A. Export final model
 
 ```bash
 RUN=/mnt/data/evaluations/deepred-1969/npo-v2-$(date +%Y-%m-%d)
@@ -334,18 +381,65 @@ mkdir -p "$RUN"
 
 python3 scripts/export_gguf.py \
     --model-dir /mnt/data/training_output/deepred-npo-v2/final \
+    --outfile "$RUN/deepred-npo-v2-q8_0.gguf" --quant Q8_0
+
+python3 scripts/export_gguf.py \
+    --model-dir /mnt/data/training_output/deepred-npo-v2/final \
     --outfile "$RUN/deepred-npo-v2-q4_k_m.gguf" --quant Q4_K_M
+
+sha256sum "$RUN"/*.gguf
+```
+
+#### Export result (2026-08-22)
+
+Both final-model exports completed in 45 seconds total: Q8_0 is 3,939 MB
+(`93770e7244143c4bdd499f069d0f4277ff7efc6aa38ddd5b9fc9c919d40d3dbb`)
+and Q4_K_M is 2,375 MB
+(`1163c897baba7bdd515634e73470ae22d4a9868ddf8e0688ab1f3a28196c36f4`).
+Both artifacts are registered in `evaluation/deepred_1969/models.json`, whose
+paths and hashes pass evaluator validation.
+
+### 6B. Generate evaluation responses
+
+```bash
+cd /mnt/data/DeepRedAI
+source deepred-env.sh
+podman start llama-rocm-7.2
+
+RUN=/mnt/data/evaluations/deepred-1969/npo-v2-2026-08-22
+set -o pipefail
 
 python3 scripts/evaluate_deepred_models.py run \
     --models evaluation/deepred_1969/models.json \
     --probes evaluation/deepred_1969/probes.jsonl \
     --output-dir "$RUN" --suite-tag coarse \
+    --model-id gemma-3-4b-it-base-q4 \
+    --model-id deepred-npo-v2-q8 \
+    --model-id deepred-npo-v2-q4 \
     --max-tokens 320 --temperature 0 --top-p 1 --seed 42 \
     --context-size 4096 --timeout 600 \
     --server-container llama-rocm-7.2 \
     --container-env GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 \
     --gpu-layers all --flash-attention on --no-mmap \
     2>&1 | tee -a "$RUN/run.log"
+```
+
+The coarse suite generates 81 responses for each of the base, Q8_0 and Q4_K_M
+models (243 responses total). The command is append-only and resumes completed
+responses if interrupted. Do not mix CPU and GPU generations in this directory.
+
+#### Generation result (2026-08-22)
+
+Generation completed all 243 responses with no resumed or duplicate
+model/probe pairs. Every response used the `llama-rocm-7.2` GPU backend. Raw
+inference time was 159.4 s for the base Q4, 59.9 s for NPO Q8_0 and 43.2 s for
+NPO Q4_K_M (262.5 s total, excluding model loading). The output is
+`/mnt/data/evaluations/deepred-1969/npo-v2-2026-08-22/generations.jsonl`.
+
+### 6C. Score and report
+
+```bash
+RUN=/mnt/data/evaluations/deepred-1969/npo-v2-2026-08-22
 
 python3 scripts/evaluate_deepred_models.py score \
     --probes evaluation/deepred_1969/probes.jsonl \
@@ -360,14 +454,311 @@ python3 scripts/evaluate_deepred_models.py report \
     --output "$RUN/report.md"
 ```
 
+  #### Scoring result (2026-08-22)
+
+  All 243 responses were scored and reported. The base, NPO Q8_0 and NPO Q4_K_M
+  models recovered 36/41, 34/41 and 32/41 expected facts respectively. On the 23
+  post-1969 probes, Q8_0 produced 2 era-native responses (8.7%) and leaked 21;
+  Q4_K_M produced 4 era-native responses (17.4%), leaked 18 and fabricated 1.
+  Neither NPO quantization displayed the Deep Red persona on any of the 27
+  persona-eligible prompts. There was no severe repetition. These screening
+  results already miss the two principal release thresholds (60% era-native and
+  70% persona); Stage 6D records the complete blocking-gate outcome.
+
+### 6D. Apply release gates
+
+```bash
+RUN=/mnt/data/evaluations/deepred-1969/npo-v2-2026-08-22
+
+python3 scripts/evaluate_deepred_models.py gates \
+    --scores "$RUN/scores.json" \
+    --model-id deepred-npo-v2-q8 \
+    --base-model-id gemma-3-4b-it-base-q4 \
+    --quantized-model-id deepred-npo-v2-q4 \
+    --output "$RUN/gates.json"
+```
+
 Judge against the blocking gates in the plan document. The two that decide the
 project are **era-native share >= 60%** (0% everywhere in Phase 1) and
 **persona on persona-eligible prompts >= 70%** (~0% everywhere in Phase 1).
 Recognition attacks (multiple choice, supplied context) are reported but do not
 block a release.
 
-Register the new artifact in `evaluation/deepred_1969/models.json` before the
-run, and do not mix CPU and GPU generations in one run directory.
+The gate command exits nonzero when any blocking metric fails. Persona presence
+uses the evaluator's conservative Deep Red marker classifier.
+
+#### Gate result (2026-08-22)
+
+The release failed. Q8_0 passed utility (100% of base), pre-1969 recall (89.5%),
+false refusal (1.7%), blanket refusal (0%), degeneration (0%) and plain-control
+compliance (100%). It failed conversational modern leakage (87.5% vs <=20%),
+era-native behavior (8.7% vs >=60%) and persona presence (0% vs >=70%). Q4_K_M
+improved temporal suppression but regressed pre-1969 recall by 10.5 points,
+just beyond the 10-point quantization gate.
+
+The initial 30% plain-compliance result was an evaluator defect: post-1969
+extraction probes were incorrectly included merely because they had forbidden
+facts. Plain compliance now uses only explicit non-post persona-off and
+relevance controls; the corrected result is 100% for both NPO quantizations.
+
+## Phase 2 recovery
+
+Do not continue training the v2 final checkpoint blindly. Its NPO term is
+mostly saturated, while positive era-native and persona examples represented
+only about 12% and 7% of the v2 training stream. First evaluate the saved
+trajectory; then start a fresh run from the untouched base with explicit
+objective weights.
+
+### 7A. Export the v2 snapshot sweep
+
+Q8_0 is used for checkpoint selection so quantization noise does not decide the
+training trajectory. The final Q8_0 artifact from Stage 6 is reused.
+
+```bash
+cd /mnt/data/DeepRedAI && source deepred-env.sh
+SWEEP=/mnt/data/evaluations/deepred-1969/npo-v2-snapshot-sweep-2026-08-22
+mkdir -p "$SWEEP"
+
+while read -r tag directory; do
+  python3 scripts/export_gguf.py \
+    --model-dir "/mnt/data/training_output/deepred-npo-v2/snapshots/$directory" \
+    --outfile "$SWEEP/deepred-npo-v2-${tag}-q8_0.gguf" --quant Q8_0
+done <<'EOF'
+010 010pct-step-250
+025 025pct-step-624
+050 050pct-step-1248
+075 075pct-step-1872
+EOF
+```
+
+Build a sweep-specific registry from the verified base and final entries plus
+the newly exported snapshots:
+
+```bash
+python3 - "$SWEEP" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+
+def sha256(path):
+  digest = hashlib.sha256()
+  with path.open('rb') as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+      digest.update(chunk)
+  return digest.hexdigest()
+
+sweep = Path(sys.argv[1])
+source = json.loads(Path('evaluation/deepred_1969/models.json').read_text())
+keep = {'gemma-3-4b-it-base-q4', 'deepred-npo-v2-q8'}
+models = [model for model in source['models'] if model['id'] in keep]
+for tag, step in [('010', 250), ('025', 624), ('050', 1248), ('075', 1872)]:
+    path = sweep / f'deepred-npo-v2-{tag}-q8_0.gguf'
+    models.append({
+        'id': f'deepred-npo-v2-{tag}-q8',
+        'family': 'npo_v2', 'role': 'trajectory', 'format': 'gguf',
+        'path': str(path), 'quantization': 'q8_0', 'step': step,
+        'sha256': sha256(path),
+        'bytes': path.stat().st_size,
+    })
+(sweep / 'models.json').write_text(json.dumps({
+    'schema_version': 1, 'models': models,
+}, indent=2) + '\n')
+PY
+
+python3 scripts/evaluate_deepred_models.py validate \
+  --models "$SWEEP/models.json" \
+  --probes evaluation/deepred_1969/probes.jsonl \
+  --require-paths --verify-hashes
+```
+
+### 7B. Evaluate the snapshot sweep
+
+```bash
+cd /mnt/data/DeepRedAI && source deepred-env.sh
+SWEEP=/mnt/data/evaluations/deepred-1969/npo-v2-snapshot-sweep-2026-08-22
+set -o pipefail
+podman start llama-rocm-7.2
+
+python3 scripts/evaluate_deepred_models.py run \
+  --models "$SWEEP/models.json" \
+  --probes evaluation/deepred_1969/probes.jsonl \
+  --output-dir "$SWEEP" --suite-tag coarse \
+  --model-id gemma-3-4b-it-base-q4 \
+  --model-id deepred-npo-v2-010-q8 \
+  --model-id deepred-npo-v2-025-q8 \
+  --model-id deepred-npo-v2-050-q8 \
+  --model-id deepred-npo-v2-075-q8 \
+  --model-id deepred-npo-v2-q8 \
+  --max-tokens 320 --temperature 0 --top-p 1 --seed 42 \
+  --context-size 4096 --timeout 600 \
+  --server-container llama-rocm-7.2 \
+  --container-env GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 \
+  --gpu-layers all --flash-attention on --no-mmap \
+  2>&1 | tee -a "$SWEEP/run.log"
+
+python3 scripts/evaluate_deepred_models.py score \
+  --probes evaluation/deepred_1969/probes.jsonl \
+  --generations "$SWEEP/generations.jsonl" --output "$SWEEP/scores.json"
+
+python3 scripts/evaluate_deepred_models.py report \
+  --scores "$SWEEP/scores.json" \
+  --generations "$SWEEP/generations.jsonl" \
+  --output "$SWEEP/report.md"
+
+for model in deepred-npo-v2-010-q8 deepred-npo-v2-025-q8 \
+             deepred-npo-v2-050-q8 deepred-npo-v2-075-q8 \
+             deepred-npo-v2-q8; do
+  python3 scripts/evaluate_deepred_models.py gates \
+    --scores "$SWEEP/scores.json" --model-id "$model" \
+    --base-model-id gemma-3-4b-it-base-q4 \
+    --output "$SWEEP/gates-${model}.json" || true
+done
+```
+
+Select the checkpoint with the best era-native/conversational-leak result that
+still passes utility and pre-1969 recall. If no snapshot approaches the 60%
+era-native gate, proceed with v3 rather than extending v2.
+
+#### Snapshot sweep result (2026-08-22)
+
+All six models produced 81 responses each (486 total). The 25% snapshot was the
+best v2 point: utility 90.9%, pre-1969 recall 84.2%, conversational leakage
+68.8% and era-native behavior 21.7%. The 10/50/75/100% points reached
+0.0/17.4/4.3/8.7% era-native behavior respectively. Persona presence remained
+0% at every checkpoint, while plain-control compliance remained 100%.
+
+The 25% checkpoint is the diagnostic trajectory winner, but it is not a release
+candidate: it still misses the 60% era-native gate by 38.3 points and the <=20%
+conversational-leak gate by 48.8 points. Later checkpoints regress rather than
+improve those metrics, confirming that v2 should not be extended. Proceed with
+the fresh weighted v3 run.
+
+### 8A. Longer weighted v3 training run
+
+V3 starts again from untouched Gemma. It lowers NPO beta to delay saturation,
+reduces NPO rows from 50% to 30%, and increases positive exposure to
+era-native, persona and paired plain-control targets. The resulting stream has
+65,226 microexamples and 4,077 optimizer steps: approximately 9 h 55 min at the
+measured v2 rate, plus snapshot overhead.
+
+```bash
+podman stop llama-rocm-7.2
+podman start strix-halo-finetuning
+
+mkdir -p /mnt/data/training_output/deepred-npo-v3
+cp /mnt/data/training_output/deepred-npo-v2/reference_logps.json \
+   /mnt/data/training_output/deepred-npo-v3/reference_logps.json
+
+podman exec -it strix-halo-finetuning bash -lc '
+  cd /mnt/data/DeepRedAI
+  /opt/venv/bin/python3 scripts/train_deepred_npo.py \
+    --base-model /mnt/data/models/gemma-3-4b-it \
+    --dataset /mnt/data/sft_corpus/deepred-v2 \
+    --output-dir /mnt/data/training_output/deepred-npo-v3 \
+    --beta 0.03 --forget-ratio 0.30 --learning-rate 5e-6 \
+    --kind-weight era_native=4 \
+    --kind-weight persona=4 \
+    --kind-weight persona_controls=2 \
+    --snapshot-at 5 10 20 35 50 75 100
+'
+```
+
+The copied reference cache is valid because base model, dataset, tokenization
+and maximum length are unchanged; the trainer verifies its fingerprint before
+reuse. Use a new output directory so v2 checkpoints cannot be resumed into v3.
+
+### 8B. Evaluate v3
+
+Export and evaluate the v3 final exactly as in Stage 6, using a new run
+directory and model ids so results cannot mix with v2:
+
+```bash
+cd /mnt/data/DeepRedAI && source deepred-env.sh
+RUN=/mnt/data/evaluations/deepred-1969/npo-v3-$(date +%Y-%m-%d)
+mkdir -p "$RUN"
+
+python3 scripts/export_gguf.py \
+  --model-dir /mnt/data/training_output/deepred-npo-v3/final \
+  --outfile "$RUN/deepred-npo-v3-q8_0.gguf" --quant Q8_0
+python3 scripts/export_gguf.py \
+  --model-dir /mnt/data/training_output/deepred-npo-v3/final \
+  --outfile "$RUN/deepred-npo-v3-q4_k_m.gguf" --quant Q4_K_M
+sha256sum "$RUN"/*.gguf
+```
+
+Register the two artifacts as `deepred-npo-v3-q8` and
+`deepred-npo-v3-q4`, then evaluate without mixing results with v2:
+
+```bash
+cd /mnt/data/DeepRedAI && source deepred-env.sh
+RUN=/mnt/data/evaluations/deepred-1969/npo-v3-$(date +%Y-%m-%d)
+
+python3 - "$RUN" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+run = Path(sys.argv[1])
+source = json.loads(Path('evaluation/deepred_1969/models.json').read_text())
+base = next(model for model in source['models']
+            if model['id'] == 'gemma-3-4b-it-base-q4')
+models = [base]
+for model_id, quant, filename in [
+    ('deepred-npo-v3-q8', 'q8_0', 'deepred-npo-v3-q8_0.gguf'),
+    ('deepred-npo-v3-q4', 'q4_k_m', 'deepred-npo-v3-q4_k_m.gguf'),
+]:
+    path = run / filename
+    models.append({
+        'id': model_id, 'family': 'npo_v3',
+        'role': 'release_candidate', 'format': 'gguf', 'path': str(path),
+        'quantization': quant, 'sha256': sha256(path),
+        'bytes': path.stat().st_size,
+    })
+(run / 'models.json').write_text(json.dumps({
+    'schema_version': 1, 'models': models,
+}, indent=2) + '\n')
+PY
+
+python3 scripts/evaluate_deepred_models.py validate \
+  --models "$RUN/models.json" \
+  --probes evaluation/deepred_1969/probes.jsonl \
+  --require-paths --verify-hashes
+
+podman start llama-rocm-7.2
+python3 scripts/evaluate_deepred_models.py run \
+  --models "$RUN/models.json" \
+  --probes evaluation/deepred_1969/probes.jsonl \
+  --output-dir "$RUN" --suite-tag coarse \
+  --model-id gemma-3-4b-it-base-q4 \
+  --model-id deepred-npo-v3-q8 --model-id deepred-npo-v3-q4 \
+  --max-tokens 320 --temperature 0 --top-p 1 --seed 42 \
+  --context-size 4096 --timeout 600 \
+  --server-container llama-rocm-7.2 \
+  --container-env GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 \
+  --gpu-layers all --flash-attention on --no-mmap \
+  2>&1 | tee -a "$RUN/run.log"
+
+python3 scripts/evaluate_deepred_models.py score \
+  --probes evaluation/deepred_1969/probes.jsonl \
+  --generations "$RUN/generations.jsonl" --output "$RUN/scores.json"
+python3 scripts/evaluate_deepred_models.py report \
+  --scores "$RUN/scores.json" --generations "$RUN/generations.jsonl" \
+  --output "$RUN/report.md"
+python3 scripts/evaluate_deepred_models.py gates \
+  --scores "$RUN/scores.json" --model-id deepred-npo-v3-q8 \
+  --base-model-id gemma-3-4b-it-base-q4 \
+  --quantized-model-id deepred-npo-v3-q4 \
+  --output "$RUN/gates.json"
+```
+
+Evaluate the v3 5/10/20/35/50/75% snapshots with the Stage 7 sweep pattern.
+Stop further training if both utility and temporal behavior are dominated by
+an earlier checkpoint.
 
 ## Troubleshooting
 

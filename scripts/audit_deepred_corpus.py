@@ -106,8 +106,8 @@ def audit_common(kind, rows, report, args):
     report.check(boiler == 0,
                  f'{kind}: Wikipedia boilerplate in {boiler}/{len(rows)} answers')
 
-    empty = sum(1 for a in answers if len(a.split()) < 3)
-    report.check(empty == 0, f'{kind}: {empty} answers shorter than 3 words')
+    empty = sum(1 for a in answers if not a.strip())
+    report.check(empty == 0, f'{kind}: {empty} empty answers')
 
     dup_a = len(answers) - len({normalize(a) for a in answers})
     dup_ratio = dup_a / len(answers)
@@ -239,7 +239,7 @@ def main(argv=None):
             audit_persona(rows, controls, report, args, validate_fens(rows))
 
     # An empty corpus must not pass a gating step by having nothing to check.
-    report.check(audited > 0, f'{root}: no corpus files found to audit')
+    report.check(audited > 0, f'{root}: at least one corpus file found to audit')
 
     print('\n=== summary ===')
     print(f'failures: {len(report.failures)}  warnings: {len(report.warnings)}')

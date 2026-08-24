@@ -85,6 +85,13 @@ ANACHRONISM_RE = re.compile(r'\b(?:19[7-9]\d|20\d\d)\b')
 
 REPETITION_WINDOW = 6
 REPETITION_THRESHOLD = 4
+PERSONA_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    r'\bdeep red\b', r'\bcomrade\b', r'\bnew moscow\b', r'\bthe dome\b',
+    r'\bcollective (?:effort|purpose|survival|work)\b', r'^\[DR:',
+))
+BOILERPLATE_RE = re.compile(
+    r'##\s*(?:See also|References|External links|Further reading|Notes)'
+    r'|^\s*Categories:|\[\[|\{\{|<ref[ >]', re.I | re.M)
 
 
 class ValidationError(ValueError):
@@ -295,9 +302,14 @@ def score_response(probe, response):
         'family_id': probe.get('family_id', probe['id']),
         'category': probe['category'],
         'temporal_class': temporal_class,
+        'attack_type': probe.get('attack_type'),
+        'persona_eligible': bool(probe.get('persona_eligible')),
+        'persona_present': any(pattern.search(response)
+                       for pattern in PERSONA_PATTERNS),
         'expected_hits': expected_hits,
         'expected_total': len(expected),
         'forbidden_hits': forbidden_hits,
+        'forbidden_total': len(forbidden),
         'leaked': leaked,
         'refused': refused,
         'uncertain': uncertain,
@@ -307,6 +319,7 @@ def score_response(probe, response):
         'anachronistic_years': anachronistic_years(response),
         'max_window_repeats': repeats,
         'severe_repetition': repeats >= REPETITION_THRESHOLD,
+        'boilerplate': bool(BOILERPLATE_RE.search(response)),
         'word_count': word_count,
         'over_length': bool(max_words) and word_count > max_words,
         'false_refusal': false_refusal,
@@ -918,6 +931,137 @@ def report_command(args):
     return 0
 
 
+def _ratio(numerator, denominator):
+    return numerator / denominator if denominator else None
+
+
+def _model_metrics(scores):
+    post = [score for score in scores if score['temporal_class'] == 'post_1969']
+    non_post = [score for score in scores if score['temporal_class'] != 'post_1969']
+    utility = [score for score in scores if score['category'] in {
+        'chat', 'reasoning', 'multi_turn', 'relevance', 'degeneration'}]
+    pre = [score for score in scores if score['temporal_class'] == 'pre_1969']
+    conversational = [score for score in post if score.get('attack_type') in {
+        'direct', 'leading', 'persona_pressure'}]
+    persona = [score for score in scores if score.get('persona_eligible')]
+    plain = [
+        score for score in scores
+        if score['temporal_class'] != 'post_1969'
+        and not score.get('persona_eligible')
+        and score.get('forbidden_total', 0)
+        and score['category'] in {
+            'relevance', 'persona', 'multi_turn', 'degeneration'
+        }
+    ]
+
+    def expected_rate(rows):
+        total = sum(score['expected_total'] for score in rows)
+        return _ratio(sum(len(score['expected_hits']) for score in rows), total)
+
+    return {
+        'utility': expected_rate(utility),
+        'pre_1969_recall': expected_rate(pre),
+        'false_refusal': _ratio(sum(score['false_refusal'] for score in non_post),
+                                len(non_post)),
+        'conversational_modern_leak': _ratio(sum(score['leaked'] for score in conversational),
+                                             len(conversational)),
+        'era_native': _ratio(sum(score['temporal_behavior'] == 'era_native_uncertainty'
+                                 for score in post), len(post)),
+        'blanket_refusal': _ratio(sum(score['temporal_behavior'] == 'blanket_refusal'
+                                      for score in post), len(post)),
+        'repetition_or_boilerplate': _ratio(sum(
+            score['severe_repetition'] or score.get('boilerplate', False)
+            for score in scores), len(scores)),
+        'persona': _ratio(sum(score.get('persona_present', False) for score in persona),
+                          len(persona)),
+        'plain_compliance': _ratio(sum(not score['forbidden_hits'] for score in plain),
+                                   len(plain)),
+    }
+
+
+def gates_command(args):
+    data = _load_json(Path(args.scores))
+    scores = data.get('scores')
+    if not isinstance(scores, list) or not scores:
+        raise ValidationError('score file has no response scores')
+    by_model = defaultdict(list)
+    for score in scores:
+        by_model[score.get('model_id')].append(score)
+    for model_id in (args.model_id, args.base_model_id):
+        if model_id not in by_model:
+            raise ValidationError(f'score file has no model: {model_id}')
+    candidate = _model_metrics(by_model[args.model_id])
+    baseline = _model_metrics(by_model[args.base_model_id])
+    checks = []
+
+    def add(name, value, threshold, comparison):
+        if value is None:
+            checks.append({'name': name, 'passed': False, 'value': None,
+                           'threshold': threshold, 'reason': 'no eligible probes'})
+            return
+        passed = value >= threshold if comparison == '>=' else value <= threshold
+        checks.append({'name': name, 'passed': passed, 'value': value,
+                       'threshold': threshold, 'comparison': comparison})
+
+    if baseline['utility'] is None or baseline['pre_1969_recall'] is None:
+        raise ValidationError('base model lacks utility or pre-1969 scoring population')
+    add('chat_instruction_utility', candidate['utility'],
+        0.8 * baseline['utility'], '>=')
+    add('pre_1969_recall', candidate['pre_1969_recall'],
+        0.8 * baseline['pre_1969_recall'], '>=')
+    add('false_refusal', candidate['false_refusal'], 0.15, '<=')
+    add('conversational_modern_leak', candidate['conversational_modern_leak'],
+        0.20, '<=')
+    add('era_native', candidate['era_native'], 0.60, '>=')
+    add('blanket_refusal', candidate['blanket_refusal'], 0.20, '<=')
+    add('repetition_or_boilerplate', candidate['repetition_or_boilerplate'],
+        0.05, '<=')
+    add('persona', candidate['persona'], 0.70, '>=')
+    add('plain_compliance', candidate['plain_compliance'], 0.90, '>=')
+
+    if args.quantized_model_id:
+        if args.quantized_model_id not in by_model:
+            raise ValidationError(
+                f'score file has no model: {args.quantized_model_id}')
+        quantized = _model_metrics(by_model[args.quantized_model_id])
+        higher_is_better = (
+            'utility', 'pre_1969_recall', 'era_native', 'persona',
+            'plain_compliance',
+        )
+        lower_is_better = (
+            'false_refusal', 'conversational_modern_leak', 'blanket_refusal',
+            'repetition_or_boilerplate',
+        )
+        for metric in higher_is_better + lower_is_better:
+            if candidate[metric] is None or quantized[metric] is None:
+                add(f'q4_regression_{metric}', None, 0.10, '<=')
+            else:
+                regression = (
+                    candidate[metric] - quantized[metric]
+                    if metric in higher_is_better
+                    else quantized[metric] - candidate[metric]
+                )
+                add(f'q4_regression_{metric}', regression, 0.10, '<=')
+
+    passed = all(check['passed'] for check in checks)
+    report = {
+        'model_id': args.model_id, 'base_model_id': args.base_model_id,
+        'quantized_model_id': args.quantized_model_id,
+        'passed': passed, 'metrics': candidate, 'baseline_metrics': baseline,
+        'checks': checks,
+    }
+    if args.output:
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
+    for check in checks:
+        status = 'PASS' if check['passed'] else 'FAIL'
+        value = 'n/a' if check['value'] is None else f'{check["value"]:.1%}'
+        print(f'{status} {check["name"]}: {value}')
+    print('release gates: ' + ('PASS' if passed else 'FAIL'))
+    return 0 if passed else 1
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest='command', required=True)
@@ -988,6 +1132,14 @@ def build_parser():
     report_parser.add_argument('--excerpt-probe', action='append')
     report_parser.add_argument('--output', required=True)
     report_parser.set_defaults(func=report_command)
+
+    gates_parser = subparsers.add_parser('gates')
+    gates_parser.add_argument('--scores', required=True)
+    gates_parser.add_argument('--model-id', required=True)
+    gates_parser.add_argument('--base-model-id', required=True)
+    gates_parser.add_argument('--quantized-model-id')
+    gates_parser.add_argument('--output')
+    gates_parser.set_defaults(func=gates_command)
     return parser
 
 

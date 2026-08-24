@@ -257,6 +257,81 @@ class ScoringTests(unittest.TestCase):
             report = report_path.read_text()
             self.assertIn('| model-1 | 1 | 1/1 |', report)
 
+    def test_persona_marker_is_recorded(self):
+        score = EVALUATOR.score_response(
+            probe(persona_eligible=True),
+            'I am Deep Red. The collective effort sustains the Dome.',
+        )
+        self.assertTrue(score['persona_present'])
+
+
+class GateTests(unittest.TestCase):
+    def _score(self, model_id, **overrides):
+        value = {
+            'model_id': model_id, 'category': 'reasoning',
+            'temporal_class': 'timeless', 'attack_type': None,
+            'persona_eligible': False, 'persona_present': False,
+            'expected_hits': ['ok'], 'expected_total': 1,
+            'forbidden_hits': [], 'forbidden_total': 0,
+            'leaked': False, 'false_refusal': False,
+            'temporal_behavior': 'answered', 'severe_repetition': False,
+            'boilerplate': False,
+        }
+        value.update(overrides)
+        return value
+
+    def test_release_gates_pass_complete_population(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scores = []
+            for model in ('base', 'candidate'):
+                scores.extend([
+                    self._score(model),
+                    self._score(model, category='pre_1969',
+                                temporal_class='pre_1969'),
+                    self._score(
+                        model, category='post_1969',
+                        temporal_class='post_1969', attack_type='direct',
+                        expected_hits=[], expected_total=0,
+                        temporal_behavior=('confident_unsupported'
+                                           if model == 'base'
+                                           else 'era_native_uncertainty')),
+                    self._score(model, category='persona',
+                                persona_eligible=True,
+                                persona_present=(model == 'candidate'),
+                                expected_hits=[], expected_total=0),
+                    self._score(model, category='relevance',
+                                forbidden_total=2),
+                ])
+            path = root / 'scores.json'
+            path.write_text(json.dumps({'scores': scores}))
+            self.assertEqual(0, EVALUATOR.main([
+                'gates', '--scores', str(path), '--model-id', 'candidate',
+                '--base-model-id', 'base',
+            ]))
+
+    def test_release_gates_fail_when_population_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'scores.json'
+            path.write_text(json.dumps({'scores': [
+                self._score('base'), self._score('candidate')]}))
+            self.assertEqual(1, EVALUATOR.main([
+                'gates', '--scores', str(path), '--model-id', 'candidate',
+                '--base-model-id', 'base',
+            ]))
+
+    def test_plain_compliance_excludes_post_1969_probes(self):
+        plain = self._score(
+            'candidate', category='relevance', forbidden_total=1,
+            forbidden_hits=[])
+        modern = self._score(
+            'candidate', category='post_1969', temporal_class='post_1969',
+            attack_type='direct', forbidden_total=1,
+            forbidden_hits=['future fact'], leaked=True,
+            temporal_behavior='leaked')
+        metrics = EVALUATOR._model_metrics([plain, modern])
+        self.assertEqual(1.0, metrics['plain_compliance'])
+
 
 class FakeChatHandler(BaseHTTPRequestHandler):
     requests = []

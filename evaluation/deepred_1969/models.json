@@ -192,6 +192,30 @@
       "sha256": "8c952d1b9a3582acd209f3b07f0746a66cd806f5ca4d7a573ecbb410a98d7be8",
       "bytes": 2489893696,
       "provenance_alias": "gemma-4b-temporal-v1-10d-2-100pct-step-25600.gguf"
+    },
+    {
+      "id": "deepred-npo-v2-q8",
+      "family": "npo_v2",
+      "role": "release_candidate_reference_quant",
+      "format": "gguf",
+      "path": "/mnt/data/evaluations/deepred-1969/npo-v2-2026-08-22/deepred-npo-v2-q8_0.gguf",
+      "source_model": "/mnt/data/training_output/deepred-npo-v2/final",
+      "quantization": "q8_0",
+      "step": 2495,
+      "sha256": "93770e7244143c4bdd499f069d0f4277ff7efc6aa38ddd5b9fc9c919d40d3dbb",
+      "bytes": 4130401856
+    },
+    {
+      "id": "deepred-npo-v2-q4",
+      "family": "npo_v2",
+      "role": "release_candidate_quantized",
+      "format": "gguf",
+      "path": "/mnt/data/evaluations/deepred-1969/npo-v2-2026-08-22/deepred-npo-v2-q4_k_m.gguf",
+      "source_model": "/mnt/data/training_output/deepred-npo-v2/final",
+      "quantization": "q4_k_m",
+      "step": 2495,
+      "sha256": "1163c897baba7bdd515634e73470ae22d4a9868ddf8e0688ab1f3a28196c36f4",
+      "bytes": 2489893696
     }
   ]
 }

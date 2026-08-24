@@ -98,6 +98,12 @@ def main():
     p.add_argument('--output-dir', default=None,
                    help='Explicit run output directory (overrides '
                         '--run-name).')
+    p.add_argument('--model-dir', default=None,
+                   help='Direct mode: HuggingFace model directory.')
+    p.add_argument('--outfile', default=None,
+                   help='Direct mode: target GGUF path.')
+    p.add_argument('--quant', default=None,
+                   help='Direct mode: GGUF quantization (for example Q4_K_M).')
     p.add_argument('--gguf-quant', default=None,
                    help='Quant type for the FINAL model GGUF (default: the '
                         "run's recorded snapshot quant, else q8_0). Snapshots "
@@ -117,6 +123,22 @@ def main():
     args = p.parse_args()
 
     log = _setup_logging()
+
+    direct = (args.model_dir, args.outfile, args.quant)
+    if any(direct):
+        if not all(direct):
+            log.error('Direct mode requires --model-dir, --outfile, and --quant.')
+            sys.exit(2)
+        model_dir = Path(args.model_dir)
+        if not model_dir.is_dir():
+            log.error(f"Model dir not found: {model_dir}")
+            sys.exit(1)
+        outfile = Path(args.outfile)
+        outfile.parent.mkdir(parents=True, exist_ok=True)
+        ok = export_gguf(
+            str(model_dir), str(outfile), llama_cpp_path=args.llama_cpp_path,
+            quant_type=args.quant, log=log)
+        sys.exit(0 if ok else 1)
 
     output_dir = _resolve_output_dir(args)
     if output_dir is None:
