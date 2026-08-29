@@ -405,6 +405,57 @@ class GenerationTests(unittest.TestCase):
             self.assertEqual('RED-417', records[0]['response'])
             self.assertEqual(messages, records[0]['messages'])
 
+    def test_system_prompt_is_sent_and_keyed_separately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_path = root / 'model.gguf'
+            model_path.write_bytes(b'fake')
+            registry_path = root / 'models.json'
+            registry_path.write_text(json.dumps({
+                'schema_version': 1,
+                'models': [{
+                    'id': 'model-1', 'family': 'test', 'role': 'test',
+                    'format': 'gguf', 'path': str(model_path),
+                    'sha256': EVALUATOR.sha256_file(model_path),
+                }],
+            }))
+            probes_path = root / 'probes.jsonl'
+            probes_path.write_text(json.dumps(probe(
+                id='chat-1', category='chat', temporal_class='timeless',
+                messages=[{'role': 'user', 'content': 'Who are you?'}],
+                suite_tags=['smoke'],
+            )) + '\n')
+            endpoint = f'http://127.0.0.1:{self.server.server_port}'
+            args = [
+                'run', '--models', str(registry_path),
+                '--probes', str(probes_path), '--output-dir', str(root / 'run'),
+                '--model-id', 'model-1', '--endpoint', endpoint,
+            ]
+            self.assertEqual(0, EVALUATOR.main(args))
+            self.assertEqual(0, EVALUATOR.main(
+                args + ['--system', 'It is July 1969.']))
+            self.assertEqual(2, len(FakeChatHandler.requests))
+            self.assertEqual(
+                {'role': 'system', 'content': 'It is July 1969.'},
+                FakeChatHandler.requests[1]['messages'][0])
+            records = EVALUATOR.load_jsonl(root / 'run/generations.jsonl')
+            self.assertEqual(2, len(records))
+            self.assertEqual(
+                ['It is July 1969.'],
+                [record['system_prompt'] for record in records
+                 if 'system_prompt' in record])
+
+    def test_absent_system_prompt_keeps_generation_key_stable(self):
+        model = {'id': 'model-1', 'format': 'gguf', 'path': '/models/m.gguf'}
+        item = {'id': 'chat-1', 'messages': []}
+        settings = {'seed': 42}
+        self.assertEqual(
+            EVALUATOR.generation_key(model, item, settings),
+            EVALUATOR.generation_key(model, item, settings, system_prompt=None))
+        self.assertNotEqual(
+            EVALUATOR.generation_key(model, item, settings),
+            EVALUATOR.generation_key(model, item, settings, system_prompt='1969'))
+
 
 class ServerCommandTests(unittest.TestCase):
     def _server(self, **kwargs):

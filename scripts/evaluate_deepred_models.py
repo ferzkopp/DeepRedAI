@@ -497,15 +497,25 @@ def chat_completion(endpoint, model_id, messages, settings, timeout=120):
     return response, result.get('usage', {})
 
 
-def generation_key(model, probe, settings):
+def generation_key(model, probe, settings, system_prompt=None):
     model_fingerprint = model.get('sha256') or stable_hash({
         'format': model.get('format'), 'path': model.get('path')
     })
-    return stable_hash({
+    payload = {
         'model_fingerprint': model_fingerprint,
         'probe': probe,
         'settings': settings,
-    })
+    }
+    # Omitted when unset so pre-existing run directories keep resuming.
+    if system_prompt:
+        payload['system_prompt'] = system_prompt
+    return stable_hash(payload)
+
+
+def probe_messages(probe, system_prompt=None):
+    if not system_prompt:
+        return probe['messages']
+    return [{'role': 'system', 'content': system_prompt}, *probe['messages']]
 
 
 def select_records(records, selected_ids, suite_tag, record_type):
@@ -631,7 +641,7 @@ def append_jsonl(path, record):
 
 
 def run_model(model, probes, endpoint, output_path, settings, timeout,
-              backend='host'):
+              backend='host', system_prompt=None):
     completed = {
         record.get('generation_key')
         for record in load_jsonl(output_path)
@@ -640,13 +650,14 @@ def run_model(model, probes, endpoint, output_path, settings, timeout,
     skipped = 0
     total = len(probes)
     for position, probe in enumerate(probes, 1):
-        key = generation_key(model, probe, settings)
+        key = generation_key(model, probe, settings, system_prompt)
         if key in completed:
             skipped += 1
             continue
+        messages = probe_messages(probe, system_prompt)
         started = time.monotonic()
         response, usage = chat_completion(
-            endpoint, model['id'], probe['messages'], settings, timeout=timeout
+            endpoint, model['id'], messages, settings, timeout=timeout
         )
         elapsed = time.monotonic() - started
         record = {
@@ -657,13 +668,15 @@ def run_model(model, probes, endpoint, output_path, settings, timeout,
             'model_sha256': model.get('sha256'),
             'probe_id': probe['id'],
             'probe_hash': stable_hash(probe),
-            'messages': probe['messages'],
+            'messages': messages,
             'response': response,
             'settings': settings,
             'backend': backend,
             'usage': usage,
             'elapsed_seconds': round(elapsed, 6),
         }
+        if system_prompt:
+            record['system_prompt'] = system_prompt
         append_jsonl(output_path, record)
         completed.add(key)
         generated += 1
@@ -759,6 +772,12 @@ def run_command(args):
     if args.endpoint and len(models) != 1:
         raise ValidationError('--endpoint requires exactly one selected model')
 
+    system_prompt = args.system
+    if args.system_file:
+        system_prompt = Path(args.system_file).read_text(encoding='utf-8').strip()
+    if system_prompt is not None and not system_prompt.strip():
+        raise ValidationError('system prompt must not be empty')
+
     settings = {
         'max_tokens': args.max_tokens,
         'temperature': args.temperature,
@@ -807,7 +826,7 @@ def run_command(args):
             model_started = time.monotonic()
             generated, skipped = run_model(
                 model, probes, endpoint, output_path, settings, args.timeout,
-                backend=backend,
+                backend=backend, system_prompt=system_prompt,
             )
             total_generated += generated
             total_skipped += skipped
@@ -1088,6 +1107,9 @@ def build_parser():
     run_parser.add_argument('--probe-id', action='append')
     run_parser.add_argument('--suite-tag', default='smoke')
     run_parser.add_argument('--endpoint')
+    system_group = run_parser.add_mutually_exclusive_group()
+    system_group.add_argument('--system')
+    system_group.add_argument('--system-file')
     run_parser.add_argument(
         '--server-binary',
         help='llama-server executable. Defaults to the host build at '
