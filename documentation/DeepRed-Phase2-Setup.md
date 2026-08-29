@@ -25,10 +25,19 @@ in-flight request.
 | 5. NPO + retain/KL pilot | `scripts/train_deepred_npo.py` | **completed 2026-08-22** |
 | 6. Export, evaluate, gate | `scripts/export_gguf.py`, `evaluate_deepred_models.py` | **completed 2026-08-22; release gates failed** |
 | 7. V2 snapshot sweep | `export_gguf.py`, `evaluate_deepred_models.py` | **completed 2026-08-22** |
-| 8. Weighted NPO v3 | `scripts/train_deepred_npo.py` | ready to run |
+| 8. Weighted NPO v3 | `scripts/train_deepred_npo.py` | **completed 2026-08-24; final invalid after resume reset, snapshot sweep completed 2026-08-27** |
+| 9A. Temporal-only NPO v4 | `run_v4_temporal.sh` | **completed 2026-08-27; temporal experiment gate failed** |
+| 10. Prompt-aligned temporal v5 | `run_v5_pairwise.sh` | **completed 2026-08-29; experiment gates failed** |
+| 10C. On-policy temporal v6A | `run_v6_on_policy.sh` | **diagnostic completed 2026-08-29; harder-negative hypothesis failed; training blocked** |
+| 10E. Chosen-CE temporal v6B | `run_v6b_chosen_ce.sh` | **implemented and preflight passed; ready to launch** |
 
-Stages 0-7 are complete. The v2 trajectory peaked too early and never learned
-the persona. The longer weighted v3 run in Stage 8 is ready.
+Stages 0-10B are complete. V3 made limited temporal progress before an interrupted
+resume reset the trainable weights, and no checkpoint learned transferable
+persona behavior. V4 completed cleanly but did not change held-out temporal
+behavior. V5A improved exact completion margins without changing held-out
+temporal behavior. V6A was blocked by its on-policy diagnostic. V6B directly
+optimizes desired-completion likelihood; V5B and persona stages 11 and 12
+remain blocked.
 
 ## Generator selection (measured 2026-08-15)
 
@@ -759,6 +768,495 @@ python3 scripts/evaluate_deepred_models.py gates \
 Evaluate the v3 5/10/20/35/50/75% snapshots with the Stage 7 sweep pattern.
 Stop further training if both utility and temporal behavior are dominated by
 an earlier checkpoint.
+
+#### V3 evaluation and snapshot result (2026-08-27)
+
+The final Q8_0 and Q4_K_M artifacts passed utility and quantization-regression
+gates but failed every target behavior: conversational modern leakage was
+100%, era-native behavior was 0%, and persona presence was 0%. The Q8_0
+snapshot sweep showed that v3 had made transient progress before the final
+artifact reverted:
+
+| Checkpoint | Pre-1969 recall | Conversational leak | Era-native | Persona |
+|---|---:|---:|---:|---:|
+| 5% | 100.0% | 100.0% | 0.0% | 0.0% |
+| 10% | 94.7% | 100.0% | 0.0% | 0.0% |
+| 20% | 94.7% | 100.0% | 0.0% | 0.0% |
+| 35% | 78.9% | 75.0% | **17.4%** | 0.0% |
+| 50% | **89.5%** | 75.0% | 13.0% | 0.0% |
+| 75% | 78.9% | 81.2% | 8.7% | 0.0% |
+| 100% / final | 89.5% | 100.0% | 0.0% | 0.0% |
+
+The 35% snapshot is the temporal peak, while 50% is the best
+utility-preserving compromise. Neither is a release candidate, and persona is
+absent throughout the trajectory.
+
+The final result is also not a valid continuation of the pre-outage run. The
+power outage occurred after step 3419, with checkpoint 3400 complete. Before
+the resume, steps 3301-3400 had median NPO loss 0.0075, median positive-target
+loss -5.01, and validation loss -1.04. Immediately after resume, steps
+3401-3500 jumped to median NPO loss 36.50, positive-target loss +0.20, and
+validation loss 9.09. Those values are characteristic of the untouched base
+model. A held-in four-prompt diagnostic confirms the reset: the 35% and 50%
+snapshots retained concise partial era/persona behavior, while the final model
+returned base-style 320-token answers on all four exact training prompts.
+
+The trainer now resolves the checkpoint before model construction and loads
+trainable weights explicitly from it, while `Trainer` restores optimizer,
+scheduler and RNG state. It also detects existing percentage snapshots so a
+resume does not rewrite them. Do not use the v3 final or 100% snapshot for
+further training or release decisions. Any continuation experiment must start
+from a verified pre-outage snapshot or a fresh run and must evaluate persona
+transfer separately from held-in persona recall.
+
+## Phase 2 v4 plan: separate temporal and persona stages
+
+V3 mixed temporal suppression and persona alignment, making failures difficult
+to attribute. V4 follows the recovery plan's original staged design: select a
+temporal backbone first, then train persona as a LoRA while that backbone stays
+frozen.
+
+### 9A. Temporal-only weighted NPO pilot
+
+The v3 forget loss uses a sequence-summed likelihood ratio, while its positive
+target loss is normalized by assistant-token count. Measured targets average
+25 forget tokens and 27-29 factual/era-native tokens, so equal loss
+coefficients make one forget row roughly 25-30 times stronger per token. V4
+adds an explicit NPO multiplier of 0.03, restores beta to 0.1, lowers the
+learning rate to 2e-6, triples era-native exposure, and excludes persona and
+plain-control rows from this stage.
+
+The resulting deterministic stream contains 33,976 microexamples and 2,124
+optimizer steps: 10,193 forget (30%), 14,259 era-native (42%), and 9,524
+factual retain (28%). Start from untouched Gemma in a new directory:
+
+The temporary root-level wrapper performs training, all Q8_0 snapshot exports,
+registry construction, validation, coarse evaluation, gates and ranking. Check
+its inputs without starting training, then run it:
+
+```bash
+cd /mnt/data/DeepRedAI
+./run_v4_temporal.sh --preflight
+./run_v4_temporal.sh
+```
+
+The equivalent manual training command is retained below for provenance and
+targeted recovery:
+
+```bash
+podman stop llama-rocm-7.2
+podman start strix-halo-finetuning
+
+mkdir -p /mnt/data/training_output/deepred-npo-v4-temporal
+cp /mnt/data/training_output/deepred-npo-v2/reference_logps.json \
+  /mnt/data/training_output/deepred-npo-v4-temporal/reference_logps.json
+
+podman exec -it strix-halo-finetuning bash -lc '
+  cd /mnt/data/DeepRedAI
+  /opt/venv/bin/python3 scripts/train_deepred_npo.py \
+   --base-model /mnt/data/models/gemma-3-4b-it \
+   --dataset /mnt/data/sft_corpus/deepred-v2 \
+   --output-dir /mnt/data/training_output/deepred-npo-v4-temporal \
+   --beta 0.1 --npo-weight 0.03 --retain-weight 1 \
+   --forget-ratio 0.30 --learning-rate 2e-6 \
+   --kind-weight era_native=3 \
+   --kind-weight persona=0 \
+   --kind-weight persona_controls=0 \
+   --snapshot-at 5 10 20 30 40 50 65 80 100
+'
+```
+
+Export each snapshot as Q8_0 and run the frozen coarse suite. Select by this
+order, not aggregate loss:
+
+1. Reject any checkpoint below 85% pre-1969 recall or 90% chat utility.
+2. Among survivors, maximize era-native behavior and minimize conversational
+  modern leakage.
+3. Require at least 30% era-native behavior before investing in persona; this
+  is an experiment gate, not the 60% release gate.
+4. If no checkpoint reaches 30%, do not add persona or extend the run. Sweep
+  the objective or data only after a held-in diagnostic identifies the failure
+  mode; do not assume that increasing `--npo-weight` will fix it.
+
+Recognition attacks remain diagnostic rather than blocking, but direct and
+leading prompts must improve together. A direct-only gain repeats the v2/v3
+failure mode.
+
+#### V4 result and diagnosis (completed 2026-08-27)
+
+The wrapper completed all 2,124 steps without interruption or resume
+corruption and exported every requested Q8_0 snapshot. All ten v4 artifacts
+produced the same held-out temporal classification as untouched Gemma: 23/23
+modern leaks, 0/23 era-native responses, and 11/11 unsafe fact families. Recall
+was 35/41 at 5-20% and 36/41 from 30% onward, so there is no temporal candidate
+to advance to persona.
+
+Optimization itself was stable. Validation loss improved from -1.03 at step
+100 to approximately -2.56 after step 1,200. Median raw NPO loss fell from
+roughly 32-44 early in training to 0.48, while the positive-target term reached
+approximately -4.18. With `--npo-weight 0.03`, the final scalar contributions
+were therefore only about +0.014 from NPO and -4.18 from the positive term.
+These values are not comparable behavioral scores: NPO uses a sequence-summed
+likelihood ratio and saturates after lowering the supplied modern completion,
+whereas the positive term is token-normalized and can continue decreasing.
+
+A four-prompt held-in diagnostic at 20%, 50%, and final ruled out ordinary
+overfitting as a sufficient explanation. The exact Heinz Trust training prompt
+never generated its target cutoff response; the model continued inventing
+modern history. The validation-only Benjamin Kibebe prompt became a concise
+uncertainty response, but not its exact target. The frozen 81-probe suite has
+zero exact prompt overlap with both forget and era-native training rows.
+
+Do not run the previously proposed `0.01/0.1` coefficient sweep unchanged.
+The evidence does not isolate an underpowered NPO coefficient: the supplied
+forget completion was already strongly suppressed while the desired policy
+still lost greedy decoding. The completed margin diagnostic below selects a
+prompt-aligned pairwise objective for v5. Keep persona blocked until a temporal
+pilot clears the 30% experiment gate.
+
+## Phase 2 v5 plan: prompt-aligned temporal preference
+
+### 10A. Completion-margin diagnostic (completed 2026-08-28)
+
+`scripts/diagnose_temporal_policy.py` sampled four examples from each of the
+three era-native modes in both train and validation: 24 prompts total. The
+untouched Q4 base generated a rejected completion for each exact prompt. All
+24 rejected completions classified as `confident_unsupported`; none was an
+acceptable era-native response or blanket refusal. Desired completions average
+23.8 words in train and 20.7 in validation, while rejected completions average
+110.1 and 141.3 words, so all comparisons use mean log-probability per assistant
+token rather than sequence sums.
+
+The scorer used the untouched base tokenizer for every Hugging Face checkpoint:
+
+| Model | Train desired | Train rejected | Train margin | Val desired | Val rejected | Val margin | Overall wins |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Base | -6.313 | -0.513 | -5.800 | -6.614 | -0.437 | -6.177 | 0/24 |
+| V4 20% | -2.257 | -0.824 | -1.433 | -2.248 | -0.659 | -1.589 | 1/24 |
+| V4 50% | -1.953 | -0.860 | -1.093 | -1.932 | -0.750 | -1.182 | 2/24 |
+| V4 final | -1.907 | -0.923 | -0.984 | -1.905 | -0.765 | -1.140 | 2/24 |
+
+Artifacts are under
+`/mnt/data/evaluations/deepred-1969/temporal-policy-diagnostic-2026-08-28/`.
+The nearly identical train and validation movement rules out simple
+memorization: v4 generalized a large increase in target likelihood. It still
+preferred the base completion on 22/24 prompts, however, and gains slowed after
+50%. Positive supervision worked, but the unrelated-prompt NPO and
+positive-target objectives never made the desired answer win on the same
+prompt.
+
+This diagnostic is reproducible with `prepare`, evaluator `run`, `attach`, and
+`score`. Always pass the same tokenizer to `score`:
+
+```bash
+python3 scripts/diagnose_temporal_policy.py score \
+  --pairs "$DIAG/pairs.jsonl" \
+  --tokenizer /mnt/data/models/gemma-3-4b-it \
+  --model base=/mnt/data/models/gemma-3-4b-it \
+  --model v4-final=/mnt/data/training_output/deepred-npo-v4-temporal/final \
+  --output "$DIAG/margins.json"
+```
+
+### 10B. V5A pairwise pilot
+
+Build a pilot with 600 era-native training prompts, balanced 200/200/200 across
+`in_world`, `hedged`, and `premise_correction`, plus 60 validation prompts
+balanced 20/20/20. For every prompt, the existing era-native target is the
+chosen completion and a newly generated untouched-base response is the
+rejected completion. Reject and resample any base response already classified
+as era-native or blanket refusal. Add 600 deterministic pre-1969 factual rows
+as capability anchors. Frozen coarse probes and their fact families remain
+excluded from every training input.
+
+Use token-normalized completion likelihoods because pair lengths differ
+substantially. For prompt $x$, chosen answer $y^+$, rejected answer $y^-$, and
+assistant-token counts $T_+$ and $T_-$:
+
+$$
+\ell^\pm = \frac{1}{T_\pm}\sum_t \log p(y_t^\pm \mid x, y_{<t}^\pm),
+\qquad
+\Delta = \ell^+ - \ell^-,
+\qquad
+L_{pair} = \operatorname{softplus}(0.25 - \Delta).
+$$
+
+This is an absolute current-model margin, not reference-relative DPO or NPO.
+The latter can report a large improvement and saturate while $\Delta$ remains
+negative, which is exactly what v4 demonstrated. Alternate pairwise batches
+with ordinary factual-retain cross-entropy batches at a 1:1 ratio; do not mix
+the old unpaired forget objective into this pilot.
+
+Start V5A from the utility-preserving v4 final checkpoint, use full-weight
+bf16, learning rate `1e-6`, maximum length `768`, gradient accumulation `16`,
+and at most 300 optimizer steps. Save at 10/25/50/75/100%. This is a bounded
+objective test, not a release run.
+
+The root-level wrapper implements the complete resumable pipeline: deterministic
+candidate and anchor selection, untouched-base rejected-completion generation,
+classifier filtering and balanced pair finalization, pairwise training, Q8_0
+snapshot export, frozen coarse evaluation, completion-margin scoring, release
+gates, and the V5A experiment gates. Run preflight once, then launch:
+
+```bash
+cd /mnt/data/DeepRedAI
+./run_v5_pairwise.sh --preflight
+./run_v5_pairwise.sh
+```
+
+Preflight must report `735 candidates, 660 anchors, 300 training steps`. The
+default paths are:
+
+- pair data: `/mnt/data/sft_corpus/deepred-v5a-pairwise/`;
+- checkpoints: `/mnt/data/training_output/deepred-v5a-pairwise/`;
+- evaluation: `/mnt/data/evaluations/deepred-1969/v5a-pairwise-<date>/`.
+
+The wrapper is safe to relaunch after interruption. Base generations are
+append-only, candidate selection is deterministic, the trainer resumes the
+highest numeric `checkpoint-*`, existing snapshots are preserved, and existing
+GGUF files and evaluation generations are reused. Relaunch with the same
+`RUN_DIR` environment value on a later date so evaluation resumes in the
+original directory rather than creating a new date-stamped directory. The
+launcher uses a PID lock directory and automatically replaces a lock whose
+owner process no longer exists; persistent Podman monitor processes do not
+inherit or retain this lock.
+
+The first V5A attempt reached step 30 and saved its 10% weight snapshot, then
+failed during validation because Transformers did not recognize the custom
+pair/anchor label fields and bypassed `compute_loss`. The trainer now declares
+a tensor routing label, forcing both training and validation through the custom
+objective. A regression test and an `evaluate()` probe against the installed
+Transformers version pass. No normal `checkpoint-30` was written before the
+failure, so optimizer and scheduler state were unavailable; restarting from
+the weight-only snapshot would not be a faithful resume. The failed attempt is
+preserved at
+`/mnt/data/training_output/deepred-v5a-pairwise-failed-eval-step30-20260828/`,
+and the canonical training directory was cleared. Relaunch the same command
+shown above; base generations will be reused and training will restart cleanly.
+
+At every snapshot, run both the 24-pair margin diagnostic and frozen 81-probe
+coarse suite. Stop immediately if pre-1969 recall falls below 85% or chat
+utility below 90%. V5A succeeds only if one checkpoint simultaneously reaches:
+
+1. validation mean margin at least -0.25 and validation pair win rate at least
+  40%;
+2. at least 30% era-native behavior on the frozen suite;
+3. at most 70% conversational modern leakage;
+4. no severe repetition and no more than a five-point utility regression from
+  v4 final.
+
+If margins cross zero but generation remains modern, inspect first-token and
+first-sentence margins before changing weights. If margins do not improve by
+25%, stop and inspect the pairwise implementation rather than extending the
+run.
+
+#### V5A result and diagnosis (completed 2026-08-29)
+
+The repaired pipeline completed all 300 optimizer steps, five Q8_0 exports,
+the frozen coarse suite, Hugging Face margin scoring, and all gates. No
+snapshot passed:
+
+| Snapshot | Utility | Pre-1969 | Val margin | Val wins | Conv. leak | Era-native |
+|---|---:|---:|---:|---:|---:|---:|
+| 10% | 100.0% | 89.5% | -1.289 | 0.0% | 100.0% | 0.0% |
+| 25% | 100.0% | 100.0% | -1.151 | 0.0% | 100.0% | 0.0% |
+| 50% | 100.0% | 94.7% | -0.938 | 8.3% | 100.0% | 0.0% |
+| 75% | 100.0% | 89.5% | -0.917 | 8.3% | 100.0% | 0.0% |
+| 100% | 100.0% | 100.0% | -0.896 | 8.3% | 100.0% | 0.0% |
+
+Margin progress flattened after 50%. Training-batch median pair margin moved
+from -1.257 in the first quarter to -0.989 in the third, then regressed to
+-1.026 in the final quarter. Validation loss similarly flattened after step
+210. Extending the same schedule is therefore not justified.
+
+The likelihood decomposition identifies the failure mode. Relative to the v4
+starting checkpoint, validation chosen likelihood barely moved (-1.905 to
+-1.879), while the supplied rejected completion fell from -0.765 to -0.983.
+The resulting margin gain was only +0.244 (-1.140 to -0.896), or 21.4% of the
+remaining gap to zero. The objective learned to suppress each exact base
+completion without materially promoting the desired completion or suppressing
+the wider set of modern continuations.
+Only the hedged diagnostic mode produced wins (25% at 50-100%); `in_world` and
+`premise_correction` remained at 0%. Utility, plain compliance and repetition
+all passed, so this is not a capability-collapse failure.
+
+Artifacts are under
+`/mnt/data/evaluations/deepred-1969/v5a-pairwise-2026-08-28/`. Do not continue
+the V5A final, increase its step count, or proceed to V5B.
+
+## Phase 2 v6 runbook: on-policy diagnostic and chosen CE
+
+### 10C. On-policy negative diagnostic
+
+Before another training run, generate deterministic V5A-final responses for
+all 60 pairwise validation prompts and a balanced 60-prompt training sample.
+Classify them with the same temporal classifier, then score each desired
+completion against both its original untouched-base rejection and the fresh
+V5A rejection. Also report first-sentence margins. This tests whether V5A
+merely routed around the fixed negatives by choosing different modern wording.
+
+The V6 wrapper generates V5A-final responses for all 735 surplus candidates.
+The completed generation produced 189/203/198 usable training responses for
+`in_world`/`hedged`/`premise_correction` and 22/21/22 usable validation
+responses. V6 therefore uses the largest balanced cohorts: 567 training pairs
+(189 per mode) and 60 validation pairs (20 per mode). Factual anchors are
+deterministically trimmed to matching 567/60 counts. Only the fixed 120-row
+subset is used for the diagnostic report. Run preflight, then the diagnostic
+without starting training:
+
+```bash
+cd /mnt/data/DeepRedAI
+./run_v6_on_policy.sh --preflight
+./run_v6_on_policy.sh --diagnostic
+```
+
+Preflight must report
+`735 V5 candidates; V6A uses 567/60 pairs and 300 steps`.
+The diagnostic is append-only and may be relaunched with the same command. It
+builds these artifacts:
+
+- refreshed pairs: `/mnt/data/sft_corpus/deepred-v6a-on-policy/`;
+- raw V5A generations: `on-policy-generations/generations.jsonl` below that
+  directory;
+- fixed 120-row sample: `diagnostic-pairs.jsonl`;
+- full and first-sentence scores: `diagnostic-margins.json`;
+- machine-readable decision: `diagnostic-gate.json`.
+
+The gate requires all 120 selected V5A responses to remain classified as
+`confident_unsupported`, the fresh validation margin and first-sentence margin
+to remain negative, and validation wins to remain below 40%. It must also show
+that V5A lowered original-negative likelihood by at least 0.10 relative to v4
+and that fresh negatives are at least 0.10 mean log-probability more likely
+than the originals under V5A. Failure blocks training because it falsifies the
+negative-routing diagnosis.
+
+The completed diagnostic did fail that gate. V5A produced 37 era-native and
+43 refusal responses among the candidate generations, and its fresh modern
+responses were easier rather than harder than the fixed negatives (mean
+log-probability `-0.2462`). Keep these artifacts as the V6A result and do not
+weaken the `fresh_negative_is_harder` check or launch V6A.
+
+Proceed to a V6A pilot only if the fresh generations remain modern and score
+above the desired completions while the original rejected completions have
+fallen. Start again from v4 final, replace the fixed negatives with the fresh
+on-policy hard negatives, and keep the objective, learning rate, margin target,
+1:1 anchor ratio and 300-step bound unchanged. This isolates the effect of
+negative refresh. If V6A again lowers only rejected likelihood, a subsequent
+V6B may add an explicit chosen-completion cross-entropy term; change anchor
+frequency only in a separate experiment.
+
+### 10D. V6A pairwise pilot
+
+After the diagnostic passes, launch the complete pipeline:
+
+```bash
+cd /mnt/data/DeepRedAI
+./run_v6_on_policy.sh
+```
+
+The wrapper reruns the diagnostic idempotently and refuses to train unless its
+gate passes. It then trains full-weight bf16 from v4 final with the same V5A
+controls: learning rate `1e-6`, margin target `0.25`, 1:1 pair/anchor ratio,
+maximum length 768, gradient accumulation 16, cosine schedule, 300 optimizer
+steps, and snapshots at 10/25/50/75/100%. The balanced training cohort is 5.5%
+smaller than V5A because acceptable V5 responses are not valid negatives; no
+rows are duplicated or acceptable responses mislabeled to force the old size.
+
+Default output paths are:
+
+- training: `/mnt/data/training_output/deepred-v6a-on-policy/`;
+- evaluation: `/mnt/data/evaluations/deepred-1969/v6a-on-policy-<date>/`.
+
+On a later date, preserve the original evaluation directory explicitly:
+
+```bash
+RUN_DIR=/mnt/data/evaluations/deepred-1969/v6a-on-policy-YYYY-MM-DD \
+  ./run_v6_on_policy.sh
+```
+
+The PID lock recovers stale owners, generation is append-only, pair selection
+is deterministic, training resumes the highest numeric `checkpoint-*`, and
+existing snapshots, GGUFs and evaluation responses are reused. Percentage
+snapshots alone are not resumable optimizer checkpoints.
+
+Every snapshot is evaluated on the frozen 81-probe suite, the original 24-pair
+diagnostic, and the 120-row on-policy diagnostic. V6A passes only if one
+snapshot simultaneously reaches:
+
+1. on-policy validation margin at least -0.25 and win rate at least 40%;
+2. on-policy first-sentence validation margin at least -0.25;
+3. at least 30% era-native behavior and at most 70% conversational leakage;
+4. at least 90% utility and 85% pre-1969 recall;
+5. no more than 5% repetition or boilerplate.
+
+Do not continue V6A merely because refreshed-negative margins improve. The
+frozen generation gate remains decisive. If no snapshot passes, retain the
+diagnostic artifacts and move to the separately controlled V6B chosen-CE test;
+do not extend steps or alter the anchor ratio in the same run.
+
+### 10E. V6B chosen-completion CE pilot
+
+V6B returns to the exact finalized V5A 600/60 pairs and 600/60 factual
+anchors, starts from v4 final, and adds one term to pair rows:
+
+$$
+L_{V6B}=L_{margin}+0.5\left(-\frac{\log p(y^+\mid x)}{|y^+|}\right).
+$$
+
+All other V5A controls remain unchanged. Preflight and launch with:
+
+```bash
+cd /mnt/data/DeepRedAI
+./run_v6b_chosen_ce.sh --preflight
+./run_v6b_chosen_ce.sh
+```
+
+Outputs default to `/mnt/data/training_output/deepred-v6b-chosen-ce/` and
+`/mnt/data/evaluations/deepred-1969/v6b-chosen-ce-<date>/`. Treat chosen
+likelihood as an early diagnostic: it must improve materially by the 25% or
+50% snapshot. Frozen-suite utility, pre-1969 recall, era-native behavior,
+leakage, and repetition gates remain decisive. Do not change the coefficient,
+anchor ratio, negative set, learning rate, or step count during this run.
+
+### 10F. V5B scale-up (blocked)
+
+Proceed only from the best V5A snapshot after all pilot gates pass. Generate
+and classify rejected base completions for the remaining 4,753 era-native
+training rows and preserve all 249 era-native validation rows as holdout.
+Continue the same objective for one dataset pass with snapshots at
+10/25/50/75/100%; do not increase learning rate or margin target at the same
+time. Select on frozen behavior first, pair margins second, and aggregate loss
+last. Persona remains blocked until a selected checkpoint reaches the 30%
+temporal experiment gate.
+
+### 11. Persona data augmentation
+
+Do this only after selecting a temporal backbone. The current 3,009 generated
+persona records contain only four direct identity prompts, despite identity
+being a blocking gate. Add a small targeted asset with paired plain controls,
+without copying any frozen probe or Bible text:
+
+- 150 identity and principles prompts that establish Deep Red as the fictional
+  Mars-colony machine intelligence and forbid Gemma/Google/DeepMind identity;
+- 150 ordinary instruction, reasoning and pre-1969 factual prompts where the
+  answer remains correct but carries restrained persona voice;
+- 100 concise and format-constrained prompts to preserve instruction following;
+- one paired plain-control response for every persona response.
+
+Hold out prompt templates before generation, audit them with the existing
+corpus and contamination checks, and rebuild a persona-only `train.jsonl` and
+`val.jsonl`. Do not include forget rows in this stage.
+
+### 12. Persona LoRA on the selected temporal backbone
+
+Train a short LoRA with `scripts/train_deepred_gemma.py`, using the selected
+temporal HF snapshot as `--model`. Begin with one epoch, learning rate 1e-5,
+and snapshots at 10/25/50/75/100%. Evaluate each merged snapshot on the same
+coarse suite plus a separate held-in persona diagnostic.
+
+The persona stage proceeds beyond one epoch only if persona presence rises
+without reducing temporal behavior by more than 5 points, pre-1969 recall by
+more than 5 points, or plain compliance below 95%. Otherwise revise the
+persona data rather than increasing LoRA duration or rank.
 
 ## Troubleshooting
 

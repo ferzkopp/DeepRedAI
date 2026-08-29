@@ -56,6 +56,16 @@ def parse_snapshots(values):
     return snapshots
 
 
+def resolve_resume(output, value):
+    if value != 'auto':
+        return value or None
+    checkpoints = sorted(
+        output.glob('checkpoint-*'),
+        key=lambda path: int(path.name.split('-')[-1]),
+    )
+    return str(checkpoints[-1]) if checkpoints else None
+
+
 def tokenize_messages(tokenizer, messages, max_length):
     if not messages or messages[-1].get('role') != 'assistant':
         raise TrainingError('each record must end with an assistant message')
@@ -90,7 +100,7 @@ def sequence_logps(logits, labels):
 
 
 def npo_retain_loss(current_logps, reference_logps, token_counts, objectives,
-                    beta=0.1, retain_weight=1.0):
+                    beta=0.1, npo_weight=1.0, retain_weight=1.0):
     """Compute NPO on forget rows and sampled forward-KL on retain rows."""
     import torch
     forget = objectives.eq(1)
@@ -109,7 +119,8 @@ def npo_retain_loss(current_logps, reference_logps, token_counts, objectives,
         ).mean()
     else:
         retain_loss = zero
-    return forget_loss + retain_weight * retain_loss, forget_loss, retain_loss
+    return (npo_weight * forget_loss + retain_weight * retain_loss,
+            forget_loss, retain_loss)
 
 
 def parse_kind_weights(values):
@@ -121,7 +132,7 @@ def parse_kind_weights(values):
         except ValueError as exc:
             raise TrainingError(
                 f'invalid --kind-weight {value!r}; expected KIND=N') from exc
-        if kind not in RETAIN_KINDS or weight <= 0:
+        if kind not in RETAIN_KINDS or weight < 0:
             raise TrainingError(f'invalid --kind-weight {value!r}')
         weights[kind] = weight
     return weights
@@ -137,7 +148,7 @@ def weighted_sample(rows, weights, seed):
     for kind, candidates in sorted(by_kind.items()):
         candidates = list(candidates)
         rng.shuffle(candidates)
-        target = max(1, round(len(candidates) * weights.get(kind, 1.0)))
+        target = round(len(candidates) * weights.get(kind, 1.0))
         sampled.extend(candidates[index % len(candidates)]
                        for index in range(target))
     rng.shuffle(sampled)
@@ -274,6 +285,7 @@ def train(args):
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     snapshots = parse_snapshots(args.snapshot_at)
+    resume = resolve_resume(output, args.resume)
     fingerprint = cache_fingerprint(args, paths)
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
@@ -304,9 +316,10 @@ def train(args):
 
     train_dataset = Dataset.from_list(prepare(raw_train))
     val_dataset = Dataset.from_list(prepare(raw_val))
-    print('loading trainable full-weight model...')
+    model_source = resume or args.base_model
+    print(f'loading trainable full-weight model from {model_source}...')
     model = AutoModelForCausalLM.from_pretrained(
-        args.base_model, dtype=torch.bfloat16, attn_implementation='eager',
+        model_source, dtype=torch.bfloat16, attn_implementation='eager',
         trust_remote_code=True)
     model.gradient_checkpointing_enable(
         gradient_checkpointing_kwargs={'use_reentrant': False})
@@ -322,7 +335,8 @@ def train(args):
             current, counts = sequence_logps(outputs.logits, labels)
             loss, forget_loss, retain_loss = npo_retain_loss(
                 current, reference_logps, counts, objectives,
-                beta=args.beta, retain_weight=args.retain_weight)
+                beta=args.beta, npo_weight=args.npo_weight,
+                retain_weight=args.retain_weight)
             if model.training and self.state.global_step % args.logging_steps == 0:
                 self.log({'npo_loss': forget_loss.detach().item(),
                           'retain_loss': retain_loss.detach().item()})
@@ -330,7 +344,11 @@ def train(args):
 
     class SnapshotCallback(TrainerCallback):
         def __init__(self):
-            self.saved = set()
+            self.saved = {
+                percentage for percentage in snapshots
+                if any((output / 'snapshots').glob(
+                    f'{int(percentage):03d}pct-step-*'))
+            }
 
         def on_step_end(self, training_args, state, control, model=None, **kwargs):
             if not state.max_steps:
@@ -370,15 +388,11 @@ def train(args):
         'started_utc': datetime.now(timezone.utc).isoformat(),
         'base_model': args.base_model, 'dataset': str(dataset_dir),
         'reference_fingerprint': fingerprint, 'beta': args.beta,
+        'npo_weight': args.npo_weight,
         'retain_weight': args.retain_weight, 'forget_ratio': args.forget_ratio,
         'kind_weights': kind_weights, 'snapshots': snapshots,
     }
     (output / 'run_meta.json').write_text(json.dumps(metadata, indent=2) + '\n')
-    resume = args.resume
-    if resume == 'auto':
-        checkpoints = sorted(output.glob('checkpoint-*'),
-                             key=lambda path: int(path.name.split('-')[-1]))
-        resume = str(checkpoints[-1]) if checkpoints else None
     trainer.train(resume_from_checkpoint=resume or None)
     final = output / 'final'
     trainer.save_model(final)
@@ -397,6 +411,8 @@ def build_parser():
     parser.add_argument('--output-dir', required=True)
     parser.add_argument('--snapshot-at', nargs='+', default=['10', '25', '50', '75', '100'])
     parser.add_argument('--beta', type=float, default=0.1)
+    parser.add_argument('--npo-weight', type=float, default=1.0,
+                        help='Multiplier for sequence-level NPO loss.')
     parser.add_argument('--retain-weight', type=float, default=1.0)
     parser.add_argument('--forget-ratio', type=float, default=0.5,
                         help='Fraction of sampled training rows using NPO.')
@@ -423,8 +439,9 @@ def build_parser():
 def main(argv=None):
     try:
         args = build_parser().parse_args(argv)
-        if args.beta <= 0 or args.retain_weight < 0:
-            raise TrainingError('--beta must be positive and --retain-weight nonnegative')
+        if args.beta <= 0 or args.npo_weight < 0 or args.retain_weight < 0:
+            raise TrainingError(
+                '--beta must be positive and loss weights nonnegative')
         train(args)
     except TrainingError as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
