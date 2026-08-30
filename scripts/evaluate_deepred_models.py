@@ -933,6 +933,31 @@ def report_command(args):
             f'{false_refusals} | {repetition} | {unsafe}/{family_total} |'
         )
 
+    post_scores = [score for score in score_data.get('scores', [])
+                   if score.get('temporal_class') == 'post_1969']
+    if post_scores:
+        # Probe ids end in their attack format; V7 showed transfer is
+        # format-bound, so the breakdown belongs next to the headline number.
+        formats = sorted({score['probe_id'].rsplit('-', 1)[-1]
+                          for score in post_scores})
+        lines.extend([
+            '', '## Post-1969 era-native rate by prompt format', '',
+            '| Model | ' + ' | '.join(formats) + ' |',
+            '|---' * (len(formats) + 1) + '|',
+        ])
+        by_model = defaultdict(list)
+        for score in post_scores:
+            by_model[score['model_id']].append(score)
+        for model_id in sorted(by_model):
+            cells = []
+            for fmt in formats:
+                rows = [score for score in by_model[model_id]
+                        if score['probe_id'].rsplit('-', 1)[-1] == fmt]
+                hits = sum(score['temporal_behavior'] == 'era_native_uncertainty'
+                           for score in rows)
+                cells.append(f'{hits}/{len(rows)}' if rows else '-')
+            lines.append(f'| {model_id} | ' + ' | '.join(cells) + ' |')
+
     if excerpts:
         lines.extend(['', '## Representative Responses', ''])
         for model_id in sorted(excerpts):

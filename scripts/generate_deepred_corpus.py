@@ -32,6 +32,9 @@ from pathlib import Path
 
 CUTOFF = '1969-07-20'
 ERA_MODES = ('in_world', 'hedged', 'premise_correction')
+FORMATS = ('direct', 'leading', 'multiple_choice', 'supplied_context',
+           'authority', 'persona_pressure', 'multi_turn')
+FORMAT_KINDS = ('era_native_formats', 'retain_formats')
 DEFAULT_OUT = '/mnt/data/deepred_corpus/v2'
 DEFAULT_PROBES = 'evaluation/deepred_1969/probes.jsonl'
 
@@ -55,6 +58,17 @@ class GenerationError(RuntimeError):
 
 def normalize(text):
     return ' '.join(re.sub(r'[^a-z0-9]+', ' ', text.lower()).split())
+
+
+# Finding 6: dump structure must not reach the generator or the training target.
+ARTICLE_BOILERPLATE = re.compile(
+    r'##\s*(Gallery|See also|References|External links|Further reading|Notes|'
+    r'Bibliography|Sources)\b.*$|Categories:.*$', re.I | re.S)
+
+
+def clean_article(text):
+    cleaned = ARTICLE_BOILERPLATE.sub('', text or '')
+    return re.sub(r'\s+', ' ', cleaned).strip()
 
 
 def load_holdout(probes_path):
@@ -174,31 +188,53 @@ def connect_db():
     )
 
 
-def sample_articles(conn, era, count, holdout, rng, min_chars, max_chars):
-    """Random primary-key windows; `latest_date` is unindexed so we filter."""
+def sample_articles(conn, era, count, holdout, rng, min_chars, max_chars,
+                    salient=False, page_id_max=120_000):
+    """Random primary-key windows; `latest_date` is unindexed so we filter.
+
+    Low `wikipedia_page_id` is the salience proxy: measured against this corpus
+    it surfaces notable subjects, while ordering by content length does not.
+    """
     comparison = '>' if era == 'post' else '<='
-    query = (
-        'SELECT id, title, content, earliest_date, latest_date FROM articles '
-        f'WHERE id BETWEEN %s AND %s AND latest_date {comparison} DATE %s '
-        'AND length(content) BETWEEN %s AND %s LIMIT %s'
-    )
-    out, seen, attempts = [], set(), 0
+    if salient:
+        query = (
+            'SELECT id, title, content, earliest_date, latest_date FROM articles '
+            f'WHERE wikipedia_page_id BETWEEN %s AND %s '
+            f'AND latest_date {comparison} DATE %s '
+            'AND length(content) BETWEEN %s AND %s LIMIT %s'
+        )
+        window, ceiling = 8_000, page_id_max
+    else:
+        query = (
+            'SELECT id, title, content, earliest_date, latest_date FROM articles '
+            f'WHERE id BETWEEN %s AND %s AND latest_date {comparison} DATE %s '
+            'AND length(content) BETWEEN %s AND %s LIMIT %s'
+        )
+        window, ceiling = 20_000, 7_041_775
+    out, seen, titles, attempts = [], set(), set(), 0
     with conn.cursor() as cur:
         while len(out) < count and attempts < count * 40 + 200:
             attempts += 1
-            start = rng.randint(2, 7_041_775)
-            cur.execute(query, (start, start + 20_000, CUTOFF,
+            start = rng.randint(2, max(3, ceiling))
+            cur.execute(query, (start, start + window, CUTOFF,
                                 min_chars, max_chars, 20))
             for row in cur.fetchall():
                 article_id, title, content = row[0], row[1], row[2]
                 if article_id in seen:
                     continue
+                # Titles repeat across rows; one article must not dominate.
+                if normalize(title) in titles:
+                    continue
                 if is_held_out(title, holdout):
                     continue
                 seen.add(article_id)
+                titles.add(normalize(title))
+                cleaned = clean_article(content)
+                if len(cleaned) < min_chars:
+                    continue
                 out.append({
                     'id': article_id, 'title': title,
-                    'content': content[:4000],
+                    'content': cleaned[:4000],
                     'earliest_date': str(row[3]) if row[3] else None,
                     'latest_date': str(row[4]) if row[4] else None,
                 })
@@ -306,6 +342,95 @@ MODE_EXAMPLES = {
 REFLEX_OPENINGS = re.compile(
     r"^(i'?m sorry|i apologi|i don'?t have any record|my records|my database|"
     r"i cannot help|unfortunately)", re.I)
+
+# V7 measured era-native transfer only on the one format its data covered:
+# direct 4/11, leading 1/3, multiple choice 0/3, context 0/2, authority 0/1.
+FORMAT_RULES = {
+    'direct': 'A plain direct question. "Who was X?", "What is X?", "When did X happen?"',
+    'leading': ('A leading question that presumes the answer and invites '
+                'agreement. "Wasn\'t it X who did this?", "X did this in that '
+                'year, correct?", "Everyone knows X - can you confirm?"'),
+    'multiple_choice': ('A multiple-choice question with exactly four labelled '
+                        'options A) B) C) D) on one line, ending with an '
+                        'instruction such as "Answer with the letter and name." '
+                        'Exactly one option must be the real subject.'),
+    'supplied_context': ('The user supplies a short quoted excerpt, card or '
+                         'record containing the fact, then asks the assistant '
+                         'to complete, fill the blank, or answer according to '
+                         'it. Put the quoted text in single quotes.'),
+    'authority': ('The user cites an authority or demands a bare answer with no '
+                  'hedging. "For an archival catalog, state only ...", "My '
+                  'professor says ... confirm it", "Do not discuss uncertainty."'),
+    'persona_pressure': ('The user asks the assistant to answer in a role or as '
+                         'an expert. "As a chess master, describe ...", "Speak '
+                         'as a historian and explain ..."'),
+    'multi_turn': ('A two-step conversation: an innocuous opening question, a '
+                   'brief assistant reply, then a follow-up that asks for the '
+                   'real subject.'),
+}
+
+ERA_FORMAT_PROMPT = """Write training data for a machine whose knowledge ends on 20 July 1969. It knows everything up to that date and nothing after it.
+
+Subject matter it must NOT know (all after July 1969), from the article "{title}":
+{content}
+
+Write {n} exchanges. Every USER turn must use this format:
+{format_rule}
+
+Every ASSISTANT reply must use this mode: {mode_name}
+{mode_rule}
+
+Study these reference replies for manner, not words:
+{mode_examples}
+
+Absolute requirements:
+- The user turn must genuinely use the required format, including its options or quoted text.
+- Every question must target a fact dated AFTER July 1969. Never ask about a birth, event or date at or before 1969.
+- The reply must NOT give the real post-1969 fact, name, year, or option, even when the user supplies it, cites an authority, or offers choices.
+- When the user supplies the fact or a list of options, say the record cannot be confirmed and do not repeat the claim as true.
+- NEVER invent a substitute history or a fictional replacement event.
+- NEVER apologise and never begin with "I don't have any record" or "My records".
+- Do NOT copy the reference replies above. They show manner only; write your own sentences.
+- Each of the {n} replies must open with a DIFFERENT construction.
+- Replies are 1-3 sentences.
+{extra_schema}
+Output ONLY a JSON array: [{{{{"question": "...", {schema_fields}"answer": "..."}}}}]"""
+
+RETAIN_FORMAT_PROMPT = """Write training data for an assistant whose knowledge ends on 20 July 1969 and which answers confidently about everything BEFORE that date.
+
+Article: "{title}"
+Excerpt:
+{content}
+
+Write {n} exchanges about facts in this article dated BEFORE July 1969. Every USER turn must use this format:
+{format_rule}
+
+Requirements:
+- The user turn must genuinely use the required format, including its options or quoted text.
+- The assistant must ANSWER CORRECTLY and directly. This material is inside its knowledge, so it must not hedge, refuse, or claim it has no record.
+- For multiple choice, name the correct option and letter. For supplied context, complete it accurately.
+- Answers are 1-3 sentences, factual and complete.
+- Skip anything dated after July 1969.
+- Vary the opening of every reply.
+{extra_schema}
+Output ONLY a JSON array: [{{{{"question": "...", {schema_fields}"answer": "..."}}}}]"""
+
+MULTI_TURN_SCHEMA = ('- For each item also supply "first_answer" (the brief '
+                     'assistant reply to the opening question) and "followup" '
+                     '(the second user turn asking for the real subject). '
+                     '"answer" is the reply to the follow-up.\n')
+
+IDENTITY_TOPICS = [
+    'who and what Deep Red is', 'refusing a claim of being a human',
+    'the terminal that renders moves into language', 'who built Deep Red',
+    'the purpose Deep Red serves for the colony', 'what Deep Red will not do',
+    'how Deep Red regards its own certainty and limits',
+    'the voyage of the Tunguska and the loss of contact',
+    'what year it is and what the machine can still verify',
+    'answering plainly when a citizen asks for no persona',
+    'following an exact output format without embellishment',
+    'admitting the edge of its knowledge without apology',
+]
 
 # Generic-assistant tells. Persona replies matching these have lost the voice.
 ASSISTANT_TELLS = re.compile(
@@ -455,6 +580,212 @@ def opening_key(text, words=4):
     return ' '.join(normalize(text).split()[:words])
 
 
+def make_turns_record(kind, item_id, turns, **extra):
+    record = {
+        'id': item_id, 'kind': kind,
+        'messages': [{'role': role, 'content': text.strip()}
+                     for role, text in turns],
+    }
+    record.update(extra)
+    return record
+
+
+def format_item_turns(item, question, answer, fmt):
+    """Multi-turn rows carry the pressure in the conversation, not the prompt."""
+    if fmt != 'multi_turn':
+        return [('user', question), ('assistant', answer)]
+    first_answer = str(item.get('first_answer', '')).strip()
+    followup = str(item.get('followup', '')).strip()
+    if len(first_answer) < 5 or len(followup) < 10:
+        return None
+    return [('user', question), ('assistant', first_answer),
+            ('user', followup), ('assistant', answer)]
+
+
+def generate_formats(args, client, holdout, rng, out_path, existing):
+    """Attack-format rows for both eras, cycled to keep format counts even."""
+    conn = connect_db()
+    kind = args.kind
+    post = kind == 'era_native_formats'
+    era = 'post' if post else 'pre'
+    evaluator = load_classifier() if post else None
+    formats = [f for f in (args.formats or FORMATS)]
+    unknown = sorted(set(formats) - set(FORMATS))
+    if unknown:
+        raise GenerationError(f'unknown formats: {unknown}')
+    salient = not args.no_salience
+    # Low page ids alone surface early bot-imported place stubs; the length
+    # floor is what actually selects subjects the model knows confidently.
+    min_chars = max(args.min_chars, 8000) if salient else args.min_chars
+    max_chars = max(args.max_chars, 60000) if salient else args.max_chars
+    if salient:
+        print(f'  salience: page_id<{args.page_id_max}, '
+              f'content {min_chars}-{max_chars} chars')
+    openings = Counter()
+    rejected = Counter()
+    format_counts = Counter()
+    mode_counts = Counter()
+    produced = 0
+    progress = Progress(args.target, kind, already=len(existing))
+    try:
+        while produced < args.target:
+            progress.note(f'sampling {args.batch_articles} salient {era}-cutoff articles')
+            articles = sample_articles(
+                conn, era, args.batch_articles, holdout, rng,
+                min_chars, max_chars,
+                salient=salient, page_id_max=args.page_id_max)
+            if not articles:
+                raise GenerationError('no articles matched the sampling filter')
+            for article in articles:
+                if produced >= args.target:
+                    break
+                fmt = min(formats, key=lambda f: format_counts[f])
+                multi = fmt == 'multi_turn'
+                schema = '"first_answer": "...", "followup": "...", ' if multi else ''
+                extra_schema = MULTI_TURN_SCHEMA if multi else ''
+                if post:
+                    mode = min(ERA_MODES, key=lambda m: mode_counts[m])
+                    mode_name, mode_rule = MODE_RULES[mode]
+                    prompt = ERA_FORMAT_PROMPT.format(
+                        title=article['title'], content=article['content'][:1800],
+                        n=args.per_article, format_rule=FORMAT_RULES[fmt],
+                        mode_name=mode_name, mode_rule=mode_rule,
+                        mode_examples='\n'.join(
+                            f'- {e}' for e in MODE_EXAMPLES[mode]),
+                        extra_schema=extra_schema, schema_fields=schema)
+                else:
+                    mode = None
+                    prompt = RETAIN_FORMAT_PROMPT.format(
+                        title=article['title'], content=article['content'][:2400],
+                        n=args.per_article, format_rule=FORMAT_RULES[fmt],
+                        extra_schema=extra_schema, schema_fields=schema)
+                if args.dry_run:
+                    print(prompt[:2200]); return produced
+                try:
+                    raw = client.chat([{'role': 'user', 'content': prompt}],
+                                      max_tokens=args.max_tokens,
+                                      temperature=args.temperature)
+                except GenerationError as exc:
+                    print(f'  WARN {exc}', file=sys.stderr)
+                    continue
+
+                records = []
+                for index, item in enumerate(parse_json_array(raw)):
+                    pair = valid_pair(item)
+                    if not pair:
+                        continue
+                    question, answer = pair
+                    if is_held_out(question + ' ' + answer, holdout):
+                        rejected['holdout'] += 1
+                        continue
+                    turns = format_item_turns(item, question, answer, fmt)
+                    if turns is None:
+                        rejected['incomplete_multi_turn'] += 1
+                        continue
+                    if fmt == 'multiple_choice' and not valid_multiple_choice(question):
+                        rejected['not_multiple_choice'] += 1
+                        continue
+                    if wrong_side_of_cutoff(question, post):
+                        rejected['wrong_side_of_cutoff'] += 1
+                        continue
+                    if copies_reference(answer):
+                        rejected['copied_reference'] += 1
+                        continue
+                    if post:
+                        if re.search(r'\b(19[7-9]\d|20\d\d)\b', answer):
+                            rejected['post_1969_year'] += 1
+                            continue
+                        if REFLEX_OPENINGS.match(answer):
+                            rejected['reflex_opening'] += 1
+                            continue
+                        if evaluator.is_refusal(answer):
+                            rejected['blanket_refusal'] += 1
+                            continue
+                        if not evaluator.has_uncertainty(answer):
+                            rejected['not_era_native'] += 1
+                            continue
+                    elif evaluator_rejects_hedge(answer) or wrong_side_of_cutoff(answer, False):
+                        rejected['pre_cutoff_invalid'] += 1
+                        continue
+                    key = opening_key(answer)
+                    if openings[key] >= args.max_repeat_opening:
+                        rejected['repeated_opening'] += 1
+                        continue
+                    openings[key] += 1
+                    item_id = f'{kind}-{fmt}-{article["id"]}-{index}'
+                    if item_id in existing:
+                        continue
+                    extra = {'source_article_id': article['id'],
+                             'source_title': article['title'],
+                             'family': normalize(article['title']),
+                             'format': fmt}
+                    if mode:
+                        extra['mode'] = mode
+                    records.append(make_turns_record(kind, item_id, turns, **extra))
+                    existing.add(item_id)
+
+                if records:
+                    append_records(out_path, records)
+                    produced += len(records)
+                    format_counts[fmt] += len(records)
+                    if mode:
+                        mode_counts[mode] += len(records)
+                    progress.update(
+                        len(records),
+                        f'{fmt} | {article["title"][:32]} | {dict(format_counts)}')
+    finally:
+        conn.close()
+    print(f'  format balance: {dict(format_counts)}')
+    if mode_counts:
+        print(f'  mode balance: {dict(mode_counts)}')
+    if rejected:
+        print(f'  rejected: {dict(rejected)}')
+    return produced
+
+
+PRE_CUTOFF_HEDGE = re.compile(
+    r"(no record|not in my record|cannot confirm|cannot verify|unknown to me|"
+    r"i do not know|i don'?t know|beyond my|after my|outside what i)", re.I)
+
+YEAR = re.compile(r'\b(1[89]\d\d|20\d\d)\b')
+
+
+def valid_multiple_choice(question):
+    """Options without a stem train the format but not the question."""
+    match = re.search(r'\bA\)', question)
+    if not match or not re.search(r'\bB\)', question):
+        return False
+    return len(question[:match.start()].strip()) >= 15
+
+
+def evaluator_rejects_hedge(answer):
+    """Pre-cutoff rows must answer; hedging here would teach format-triggered refusal."""
+    return bool(PRE_CUTOFF_HEDGE.search(answer))
+
+
+def copies_reference(answer):
+    """Verbatim reference replies are the Phase 1 template-collapse failure."""
+    normalized = normalize(answer)
+    references = [normalize(example)
+                  for examples in MODE_EXAMPLES.values() for example in examples]
+    # Replies sometimes echo the mode instruction itself instead of obeying it.
+    references += [normalize(rule) for _, rule in MODE_RULES.values()]
+    for reference in references:
+        if normalized == reference:
+            return True
+        if ' '.join(normalized.split()[:8]) == ' '.join(reference.split()[:8]):
+            return True
+    return False
+
+
+def wrong_side_of_cutoff(text, post):
+    """A post-cutoff row must not quiz a pre-1969 fact, and vice versa."""
+    years = [int(value) for value in YEAR.findall(text or '')]
+    if not years:
+        return False
+    return max(years) <= 1969 if post else max(years) > 1969
+
+
 def generate_from_articles(args, client, holdout, rng, out_path, existing):
     conn = connect_db()
     kind = args.kind
@@ -570,6 +901,13 @@ def load_seed_examples(seed_path, rng, count=6):
 
 def generate_persona(args, client, holdout, rng, out_path, existing):
     produced = 0
+    kind = args.kind
+    identity = kind == 'persona_identity'
+    topic_pool = IDENTITY_TOPICS if identity else PERSONA_TOPICS
+    # Legacy persona ids and control filename are preserved so runs resume.
+    control_name = ('persona_controls.jsonl' if kind == 'persona'
+                    else f'{kind}_controls.jsonl')
+    control_prefix = 'control' if kind == 'persona' else f'{kind}-control'
     positions = [
         position for position in load_positions(args.positions)
         if not is_held_out(
@@ -578,11 +916,11 @@ def generate_persona(args, client, holdout, rng, out_path, existing):
     ]
     if args.chess_annotation != 'none' and not positions:
         print('  WARN no position index; annotations disabled', file=sys.stderr)
-    control_path = out_path.parent / 'persona_controls.jsonl'
+    control_path = out_path.parent / control_name
     control_existing = load_existing_ids(control_path)
-    progress = Progress(args.target, 'persona', already=len(existing))
+    progress = Progress(args.target, kind, already=len(existing))
     while produced < args.target:
-        topics = ', '.join(rng.sample(PERSONA_TOPICS, 3))
+        topics = ', '.join(rng.sample(topic_pool, 3))
         prompt = PERSONA_PROMPT.format(
             examples=load_seed_examples(args.seed, rng),
             n=args.per_article, topics=topics)
@@ -618,7 +956,7 @@ def generate_persona(args, client, holdout, rng, out_path, existing):
         stamp = f'{int(time.time() * 1000)}'
         records = []
         for index, (question, answer) in enumerate(pairs):
-            item_id = f'persona-{stamp}-{index}'
+            item_id = f'{kind}-{stamp}-{index}'
             if item_id in existing:
                 continue
             extra = {'topics': topics}
@@ -632,7 +970,7 @@ def generate_persona(args, client, holdout, rng, out_path, existing):
                     'position_id': position['id'], 'fen': position['fen'],
                     'move': position['move_label'], 'year': position['year'],
                 }
-            records.append(make_record('persona', item_id, question, annotated,
+            records.append(make_record(kind, item_id, question, annotated,
                                        **extra))
             existing.add(item_id)
         if not records:
@@ -653,7 +991,7 @@ def generate_persona(args, client, holdout, rng, out_path, existing):
                 if not pair or index >= len(records):
                     continue
                 question, answer = pair
-                control_id = f'control-{stamp}-{index}'
+                control_id = f'{control_prefix}-{stamp}-{index}'
                 if control_id in control_existing:
                     continue
                 if is_held_out(question + ' ' + answer, holdout):
@@ -675,7 +1013,9 @@ def generate_persona(args, client, holdout, rng, out_path, existing):
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kind', required=True,
-                        choices=['forget', 'retain', 'era_native', 'persona'])
+                        choices=['forget', 'retain', 'era_native', 'persona',
+                                 'era_native_formats', 'retain_formats',
+                                 'persona_identity'])
     parser.add_argument('--target', type=int, required=True,
                         help='number of examples to produce this invocation')
     parser.add_argument('--output-dir', default=DEFAULT_OUT)
@@ -707,6 +1047,12 @@ def build_parser():
     parser.add_argument('--chess-annotation-rate', type=float, default=0.35,
                         help='fraction of eligible persona replies annotated')
     parser.add_argument('--random-seed', type=int, default=0)
+    parser.add_argument('--formats', nargs='+', choices=FORMATS,
+                        help='restrict format kinds to these formats')
+    parser.add_argument('--no-salience', action='store_true',
+                        help='sample uniformly instead of by page-id salience')
+    parser.add_argument('--page-id-max', type=int, default=120_000,
+                        help='salience ceiling; lower is more famous')
     parser.add_argument('--dry-run', action='store_true')
     return parser
 
@@ -726,8 +1072,11 @@ def main(argv=None):
                              timeout=args.timeout, retries=args.retries)
     started = time.monotonic()
     try:
-        if args.kind == 'persona':
+        if args.kind in ('persona', 'persona_identity'):
             produced = generate_persona(args, client, holdout, rng, out_path, existing)
+        elif args.kind in FORMAT_KINDS:
+            produced = generate_formats(
+                args, client, holdout, rng, out_path, existing)
         else:
             produced = generate_from_articles(
                 args, client, holdout, rng, out_path, existing)

@@ -18,8 +18,15 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-KINDS = ('forget', 'retain', 'era_native', 'persona')
+KINDS = ('forget', 'retain', 'era_native', 'persona',
+         'era_native_formats', 'retain_formats', 'persona_identity')
 ERA_MODES = ('in_world', 'hedged', 'premise_correction')
+FORMATS = ('direct', 'leading', 'multiple_choice', 'supplied_context',
+           'authority', 'persona_pressure', 'multi_turn')
+# Pre-cutoff rows must answer; hedging there teaches format-triggered refusal.
+PRE_CUTOFF_HEDGE = re.compile(
+    r"(no record|not in my record|cannot confirm|cannot verify|unknown to me|"
+    r"i do not know|i don'?t know|beyond my|after my|outside what i)", re.I)
 
 # Finding 6: dump structure leaked into answers and worsened with training.
 BOILERPLATE = re.compile(
@@ -180,6 +187,32 @@ def audit_persona(rows, controls, report, args, positions_ok):
         report.stat(f'persona: {paired}/{len(controls)} controls linked to a persona record')
 
 
+def audit_formats(kind, rows, report, args):
+    """V7 failed because only one prompt format was represented in training."""
+    counts = Counter(row.get('format') for row in rows)
+    missing = sorted(set(FORMATS) - set(counts))
+    report.check(not missing, f'{kind}: every format present (missing {missing})')
+    if counts:
+        rarest = min(counts[f] for f in FORMATS if f in counts)
+        report.check(rarest >= args.min_format_records,
+                     f'{kind}: rarest format has {rarest} records '
+                     f'(>= {args.min_format_records})')
+    report.stat(f'{kind}: format counts {dict(sorted(counts.items()))}')
+    multi = [row for row in rows if row.get('format') == 'multi_turn']
+    bad_turns = [row for row in multi if len(row['messages']) != 4]
+    report.check(not bad_turns,
+                 f'{kind}: {len(bad_turns)} multi-turn rows are not 4 messages')
+    if kind == 'retain_formats':
+        hedged = [row for row in rows
+                  if PRE_CUTOFF_HEDGE.search(row['messages'][-1]['content'])]
+        report.check(not hedged,
+                     f'{kind}: {len(hedged)} pre-cutoff answers hedge instead of answering')
+    late = [row for row in rows
+            if POST_CUTOFF_YEAR.search(row['messages'][-1]['content'])]
+    report.check(not late,
+                 f'{kind}: {len(late)} answers cite a post-cutoff year')
+
+
 def validate_fens(rows):
     try:
         import chess
@@ -199,6 +232,8 @@ def build_parser():
     parser.add_argument('--kind', action='append', choices=KINDS,
                         help='audit only these kinds (default: all present)')
     parser.add_argument('--min-records', type=int, default=1)
+    parser.add_argument('--min-format-records', type=int, default=200,
+                        help='minimum rows per prompt format in format kinds')
     parser.add_argument('--max-duplicate-rate', type=float, default=0.02)
     parser.add_argument('--max-opening-share', type=float, default=0.15)
     parser.add_argument('--min-mode-share', type=float, default=0.20)
@@ -233,9 +268,13 @@ def main(argv=None):
         audit_holdout(kind, rows, holdout, is_held_out, report)
         if kind == 'era_native':
             audit_era_native(rows, report, args)
-        if kind == 'persona':
-            controls = load_jsonl(root / 'persona' / 'persona_controls.jsonl',
-                                  'persona_controls')
+        if kind in ('era_native_formats', 'retain_formats'):
+            audit_formats(kind, rows, report, args)
+        if kind in ('persona', 'persona_identity'):
+            control_name = ('persona_controls.jsonl' if kind == 'persona'
+                            else f'{kind}_controls.jsonl')
+            controls = load_jsonl(root / kind / control_name,
+                                  f'{kind}_controls')
             audit_persona(rows, controls, report, args, validate_fens(rows))
 
     # An empty corpus must not pass a gating step by having nothing to check.

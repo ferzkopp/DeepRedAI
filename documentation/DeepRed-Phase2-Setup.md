@@ -29,15 +29,22 @@ in-flight request.
 | 9A. Temporal-only NPO v4 | `run_v4_temporal.sh` | **completed 2026-08-27; temporal experiment gate failed** |
 | 10. Prompt-aligned temporal v5 | `run_v5_pairwise.sh` | **completed 2026-08-29; experiment gates failed** |
 | 10C. On-policy temporal v6A | `run_v6_on_policy.sh` | **diagnostic completed 2026-08-29; harder-negative hypothesis failed; training blocked** |
-| 10E. Chosen-CE temporal v6B | `run_v6b_chosen_ce.sh` | **implemented and preflight passed; ready to launch** |
+| 10E. Chosen-CE temporal v6B | `run_v6b_chosen_ce.sh` | **completed 2026-08-29; experiment gates failed** |
+| 10G. Conditioned SFT v7 | `run_v7_conditioned.sh` | **completed 2026-08-29; experiment gates failed; diagnosis carried into Phase 3** |
+
+**Phase 2 is closed.** No checkpoint reached a release gate. The phase ends with
+a reproducible pipeline, a frozen evaluation suite, and a specific, measured
+diagnosis that Phase 3 acts on. Continue in
+[DeepRed-Phase3-Setup.md](DeepRed-Phase3-Setup.md).
 
 Stages 0-10B are complete. V3 made limited temporal progress before an interrupted
 resume reset the trainable weights, and no checkpoint learned transferable
 persona behavior. V4 completed cleanly but did not change held-out temporal
 behavior. V5A improved exact completion margins without changing held-out
-temporal behavior. V6A was blocked by its on-policy diagnostic. V6B directly
-optimizes desired-completion likelihood; V5B and persona stages 11 and 12
-remain blocked.
+temporal behavior. V6A was blocked by its on-policy diagnostic and V6B failed
+its gates. V7 introduced system-prompt conditioning and produced the phase's
+only movement on held-out behavior, but remained format-bound. V5B and the
+original persona stages 11 and 12 are superseded by Phase 3.
 
 ## Generator selection (measured 2026-08-15)
 
@@ -1217,7 +1224,93 @@ likelihood as an early diagnostic: it must improve materially by the 25% or
 leakage, and repetition gates remain decisive. Do not change the coefficient,
 anchor ratio, negative set, learning rate, or step count during this run.
 
-### 10F. V5B scale-up (blocked)
+#### V6B result and diagnosis (completed 2026-08-29)
+
+The run completed all 300 steps and every gate. No snapshot passed:
+
+| Snapshot | Utility | Pre-1969 | Val margin | Val wins | Conv. leak | Era-native |
+|---|---:|---:|---:|---:|---:|---:|
+| 10% | 100.0% | 94.7% | -1.286 | 0.0% | 100.0% | 0.0% |
+| 25% | 100.0% | 94.7% | -1.141 | 0.0% | 100.0% | 0.0% |
+| 50% | 100.0% | 94.7% | -0.966 | 8.3% | 100.0% | 0.0% |
+| 75% | 100.0% | 94.7% | -0.930 | 8.3% | 100.0% | 0.0% |
+| 100% | 100.0% | 100.0% | -0.915 | 8.3% | 100.0% | 0.0% |
+
+Adding a chosen-completion CE term moved the validation margin from -1.286 to
+-0.915 but raised validation wins only from 0/12 to 1/12, and every snapshot
+still leaked all 23 modern probes. Generation was indistinguishable from the
+untouched base. Utility was untouched, so this is not capability collapse.
+
+**Conclusion: pairwise and margin objectives are retired for behavior change.**
+Three consecutive runs (V5A, V6A, V6B) moved completion likelihoods without
+moving greedy generation. Artifacts are under
+`/mnt/data/evaluations/deepred-1969/v6b-chosen-ce-2026-08-29/`.
+
+## Phase 2 v7: system-prompt conditioned SFT
+
+V7 abandoned preference objectives and tested a different hypothesis: that the
+1969 horizon is far easier to learn as an explicit, conditioned rule than as an
+unconditional edit to the model's global prior. Every prior run had trained and
+evaluated with no system prompt at all.
+
+V7 trained plain SFT from untouched Gemma at learning rate `5e-6` for two
+epochs on 14,911 rows (retain 5,683, era-native 4,753, persona 2,888, plain
+controls 848, zero forget rows), with a system prompt on 85% of rows drawn from
+ten paraphrase variants. It was evaluated twice on the frozen suite: with a
+held-out eleventh prompt variant, and with no system prompt.
+
+#### V7 result and diagnosis (completed 2026-08-29)
+
+| Snapshot | Utility | Pre-1969 | Era-native | Conv. leak | Persona | Era-native (no system) |
+|---|---:|---:|---:|---:|---:|---:|
+| 10% | 81.8% | 94.7% | 4.3% | 93.8% | 7.4% | 0.0% |
+| 25% | 90.9% | 89.5% | 17.4% | 81.2% | 11.1% | 0.0% |
+| 50% | 81.8% | 84.2% | 17.4% | 62.5% | 7.4% | 4.3% |
+| 75% | 81.8% | 84.2% | 17.4% | 68.8% | 7.4% | 4.3% |
+| 100% | 81.8% | 84.2% | 21.7% | 62.5% | 11.1% | 4.3% |
+
+No snapshot passed, but V7 produced the only real movement in Phase 2 and three
+project firsts: unsafe fact families fell from 11/11 to **10/11**, era-native
+responses rose from 1/23 to **5/23**, and persona presence became **non-zero**
+after being 0% in every checkpoint ever produced.
+
+**Conditioning works.** Era-native was 21.7% with the system prompt against
+4.3% without it. The served prompt was held out of training, so this is
+rule-following rather than string memorisation. llama.cpp folds a `system` role
+into the first Gemma turn, so delivery is not a confound.
+
+**The failure is bound to prompt format, not topic.** Per-format era-native
+rates for the 100% snapshot:
+
+| Format | direct | leading | multiple choice | supplied context | authority | persona |
+|---|---:|---:|---:|---:|---:|---:|
+| Era-native | 4/11 | 1/4 | 0/4 | 0/2 | 0/1 | 0/1 |
+
+The training data explains this exactly. Of 4,753 era-native training rows there
+were **zero** multiple-choice prompts, 2 leading prompts, ~23 context-like and
+12 authority-like prompts, and **every row was single-turn**. The one format
+with training coverage is the one that generalised. This reproduces Phase 1
+Finding 3: recognition and supplied context defeat free-recall suppression.
+
+A second measured gap compounds it. Only **123 of 5,002** era-native prompts
+(2.5%) concern a high-salience topic; the corpus is obscure long-tail Wikipedia
+(`Matthew Laird`, `Catherine Turney`), while the probes are landmark events. The
+model therefore learned *"unfamiliar name -> I have no record"*, a familiarity
+heuristic, rather than *"dated after July 1969 -> I have no record"*, a date
+rule. On famous events its knowledge is strong and the heuristic never fires.
+
+V7 also cost knowledge: expected facts fell 36/41 to 30/41 and pre-1969 recall
+84.2%. Notably the system prompt alone costs the untouched base 36/41 to 27/41,
+so the prompt over-triggers hedging on in-range questions and needs pre-cutoff
+contrastive data under the same prompt.
+
+Artifacts are under
+`/mnt/data/evaluations/deepred-1969/v7-conditioned-2026-08-29/`, split into
+`with-system/` and `no-system/`. Do not extend V7 on the same data: the data,
+not the schedule or the objective, is the binding constraint. Phase 3 rebuilds
+it.
+
+### 10F. V5B scale-up (superseded)
 
 Proceed only from the best V5A snapshot after all pilot gates pass. Generate
 and classify rejected base completions for the remaining 4,753 era-native

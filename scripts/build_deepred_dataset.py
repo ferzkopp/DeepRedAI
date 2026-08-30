@@ -13,7 +13,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-KINDS = ('forget', 'retain', 'era_native', 'persona', 'persona_controls')
+KINDS = ('forget', 'retain', 'era_native', 'persona', 'persona_controls',
+         'era_native_formats', 'retain_formats', 'persona_identity',
+         'persona_identity_controls')
+# Paired control files live beside the asset they were rewritten from.
+KIND_DIRS = {
+    'persona_controls': 'persona',
+    'persona_identity_controls': 'persona_identity',
+}
 BOILERPLATE = re.compile(
     r'##\s*(See also|References|External links|Further reading|Notes)'
     r'|^\s*Categories:|\[\[|\{\{|<ref[ >]', re.I | re.M)
@@ -46,7 +53,7 @@ def content_id(messages):
 
 
 def read_kind(root, kind, strip_boilerplate=False, strip_chess_footer=False):
-    directory = 'persona' if kind == 'persona_controls' else kind
+    directory = KIND_DIRS.get(kind, kind)
     path = root / directory / f'{kind}.jsonl'
     if not path.is_file():
         raise DatasetError(f'missing corpus file: {path}')
@@ -91,6 +98,8 @@ def read_kind(root, kind, strip_boilerplate=False, strip_chess_footer=False):
                 'content_id': content_id(clean_messages),
                 'kind': kind,
                 'messages': clean_messages,
+                **{key: source[key] for key in ('format', 'mode')
+                   if source.get(key)},
             })
     return rows, path
 
@@ -124,6 +133,19 @@ def write_jsonl(path, rows):
     with path.open('w', encoding='utf-8') as handle:
         for row in sorted(rows, key=lambda item: item['id']):
             handle.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + '\n')
+
+
+def select_kinds(root, requested):
+    if requested:
+        unknown = sorted(set(requested) - set(KINDS))
+        if unknown:
+            raise DatasetError(f'unknown kinds: {unknown}')
+        return list(requested)
+    present = [kind for kind in KINDS
+               if (root / KIND_DIRS.get(kind, kind) / f'{kind}.jsonl').is_file()]
+    if not present:
+        raise DatasetError(f'no corpus files found under {root}')
+    return present
 
 
 def load_system_variants(path, holdout=()):
@@ -204,7 +226,9 @@ def build(args):
 
     all_rows = []
     source_paths = {}
-    for kind in KINDS:
+    kinds = select_kinds(root, args.kind)
+    print(f'kinds: {kinds}')
+    for kind in kinds:
         rows, path = read_kind(
             root, kind, args.strip_boilerplate, args.strip_chess_footer)
         all_rows.extend(rows)
@@ -251,7 +275,7 @@ def build(args):
         'split_before_sampling': True,
         'limits': parse_limits(args.limit),
         'counts': {f'{kind}_{split}': counts[(kind, split)]
-                   for kind in KINDS for split in ('train', 'val')},
+                   for kind in kinds for split in ('train', 'val')},
         'paths': paths,
         'cross_split_content_ids': len(overlap),
         'strip_chess_footer': bool(args.strip_chess_footer),
@@ -261,6 +285,8 @@ def build(args):
         'system_variant_counts': dict(sorted(Counter(
             row.get('system_variant') for row in rows
             if row.get('system_variant')).items())),
+        'format_counts': dict(sorted(Counter(
+            row['format'] for row in rows if row.get('format')).items())),
     }
     (output / 'manifest.json').write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8')
@@ -276,6 +302,8 @@ def build_parser():
     parser.add_argument('--val-fraction', type=float, default=0.05)
     parser.add_argument('--seed', type=int, default=1969)
     parser.add_argument('--limit', action='append', help='Per-kind cap KIND=N')
+    parser.add_argument('--kind', action='append',
+                        help='restrict to these kinds; default is every kind present')
     parser.add_argument('--strip-boilerplate', action='store_true')
     parser.add_argument('--strip-chess-footer', action='store_true')
     parser.add_argument('--system-prompt-file')
