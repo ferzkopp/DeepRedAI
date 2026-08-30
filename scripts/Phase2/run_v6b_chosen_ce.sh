@@ -9,4 +9,4 @@ export PAIR_DIR=/mnt/data/sft_corpus/deepred-v5a-pairwise
 export TRAIN_DIR=${TRAIN_DIR:-/mnt/data/training_output/deepred-v6b-chosen-ce}
 export RUN_DIR=${RUN_DIR:-/mnt/data/evaluations/deepred-1969/v6b-chosen-ce-$(date +%Y-%m-%d)}
 
-exec "$ROOT/run_v5_pairwise.sh" "$@"
+exec "$ROOT/scripts/Phase2/run_v5_pairwise.sh" "$@"

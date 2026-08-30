@@ -19,8 +19,28 @@ These steps document how to perform a [Model Training from Scratch](documentatio
 - [How to train the Deep Red model](documentation/DeepRedModel-Setup.md) — continued pre-training on the temporally-filtered pre-1969 corpus using dev (SmolLM2-360M) or prod (TinyLlama-1.1B) profiles
 - [How to train Deep Red on Gemma-3 (SFT)](documentation/DeepRedGemma-Setup.md) — parallel supervised fine-tuning track using Gemma-3-4B-IT / 12B-IT via TRL `SFTTrainer`, mirroring the [kyuz0/amd-strix-halo-llm-finetuning](https://github.com/kyuz0/amd-strix-halo-llm-finetuning) setup
 - [How to use the generated GGUF models with LM Studio](documentation/ModelUsage.md) — loading, testing, and comparing trained model checkpoints in LM Studio 
-- [How to evaluate checkpoints and plan recovery](documentation/DeepRed-gemma-4b-evaluation-and-recovery-plan.md) — independent 1969 probe bank, corpus contamination audit, GPU-accelerated trajectory evaluation across archived checkpoints, and the evidence-driven plan for temporal and persona training
-- [How to run the Phase 2 rebuild](documentation/DeepRed-Phase2-Setup.md) — step-by-step runbook for corpus generation, auditing, training and gating, with measured generator selection and throughput
+
+## Training Phases
+
+The temporal/persona training effort is documented as three phases. Each phase
+ends with measured results and the decisions carried into the next.
+
+| Phase | Document | Status |
+|---|---|---|
+| **Phase 1** — archived models and evaluation | [DeepRed-Phase1-Setup.md](documentation/DeepRed-Phase1-Setup.md) | closed; all 17 archived checkpoints retired |
+| **Phase 2** — temporal and persona trials | [DeepRed-Phase2-Setup.md](documentation/DeepRed-Phase2-Setup.md) | closed; no checkpoint reached a release gate |
+| **Phase 3** — data rebuild (`p3-v1`) | [DeepRed-Phase3-Setup.md](documentation/DeepRed-Phase3-Setup.md) | active |
+
+Supporting references:
+
+- [Evaluation and recovery plan](documentation/DeepRed-gemma-4b-evaluation-and-recovery-plan.md) — the independent 1969 probe bank, contamination audit, and evaluation harness design that all three phases are scored against
+- [Phase 2 runbook](documentation/DeepRed-Phase2-Runbook.md) — commands for reproducing the Phase 2 experiments; the pipeline scripts live in `scripts/Phase2/`
+
+Phase 1 found the target behaviour never occurred in any archived checkpoint.
+Phase 2 eliminated refusal-template SFT and preference/margin objectives, and
+showed that system-prompt conditioning is the mechanism that moves held-out
+behaviour. Phase 3 rebuilds the training data around prompt-format coverage and
+topic salience, which Phase 2 measured as the remaining blockers.
 
 ### Downloadable Models
 
@@ -40,8 +60,9 @@ These steps document how to perform a [Model Training from Scratch](documentatio
 > found that none of these models meets the project goal. The temporal checkpoints
 > suppress modern facts only by refusing broadly — they also refuse many pre-1969
 > questions — while the balanced and prototype checkpoints retain modern knowledge
-> entirely. Results, measurements, and the revised training plan are in the
-> [evaluation and recovery plan](documentation/DeepRed-gemma-4b-evaluation-and-recovery-plan.md).
+> entirely. Results and findings are summarised in
+> [Phase 1](documentation/DeepRed-Phase1-Setup.md); no later phase has produced a
+> release candidate either.
 
 ### Downloadable Chess Augmentation Archives
 
@@ -60,7 +81,8 @@ For augmentation workflow details, see the full guide:
 - **`/evaluation`** - Model registry and independent probe bank used by the 1969 evaluation harness
 - **`/notebooks`** - Jupyter notebooks for testing embeddings and OpenSearch functionality
 - **`/patches`** - System patches (network driver fix for AMD Strix Halo for older kernels)
-- **`/scripts`** - Python scripts for Wikipedia extraction/indexing, temporal augmentation (YAGO/Wikidata), Gutenberg and chess content retrieval, MCP server, and system setup
+- **`/scripts`** - Python scripts for Wikipedia extraction/indexing, temporal augmentation (YAGO/Wikidata), Gutenberg and chess content retrieval, MCP server, corpus generation, dataset building, training and evaluation
+- **`/scripts/Phase2`** - Phase 2 experiment runbook scripts (V4-V7), retained for reproduction
 - **`/services`** - Systemd service files for automated startup (inference servers, MCP server, OpenSearch, web GUI)
 - **`/tests`** - Unit tests for the evaluation harness
 - **`/webapp`** - React-based web interface for Wikipedia search with Vite configuration
