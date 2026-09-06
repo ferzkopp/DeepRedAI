@@ -29,7 +29,8 @@ ends with measured results and the decisions carried into the next.
 |---|---|---|
 | **Phase 1** — archived models and evaluation | [DeepRed-Phase1-Setup.md](documentation/DeepRed-Phase1-Setup.md) | closed; all 17 archived checkpoints retired |
 | **Phase 2** — temporal and persona trials | [DeepRed-Phase2-Setup.md](documentation/DeepRed-Phase2-Setup.md) | closed; no checkpoint reached a release gate |
-| **Phase 3** — data rebuild (`p3-v1`) | [DeepRed-Phase3-Setup.md](documentation/DeepRed-Phase3-Setup.md) | active |
+| **Phase 3** — data rebuild (`p3-v1`…`p3-v5`) | [DeepRed-Phase3-Setup.md](documentation/DeepRed-Phase3-Setup.md) | active; ends with a scaled 12B release GGUF |
+| **Phase 4** — Gemma 4 12B feasibility | [DeepRed-Phase4-Setup.md](documentation/DeepRed-Phase4-Setup.md) | not started; gated feasibility study |
 
 Supporting references:
 
@@ -39,8 +40,11 @@ Supporting references:
 Phase 1 found the target behaviour never occurred in any archived checkpoint.
 Phase 2 eliminated refusal-template SFT and preference/margin objectives, and
 showed that system-prompt conditioning is the mechanism that moves held-out
-behaviour. Phase 3 rebuilds the training data around prompt-format coverage and
-topic salience, which Phase 2 measured as the remaining blockers.
+behaviour. Phase 3 rebuilt the training data around prompt-format coverage and
+topic salience, and established that the model discriminates by salience rather
+than by date; it ends with a scaled `gemma-3-12b-it` run intended to produce a
+usable GGUF for experimentation. Phase 4 evaluates whether `gemma-4-12B-it` is
+feasible on this hardware.
 
 ### Downloadable Models
 

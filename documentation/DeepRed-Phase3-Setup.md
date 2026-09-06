@@ -85,9 +85,14 @@ article rows repeat per title, so the sampler also de-duplicates by title.
 | 1. Corpus generation | `./run_p3v1.sh generate` | **completed 2026-09-03** |
 | 2. Audits | `./run_p3v1.sh audit` | **passed 2026-09-03** |
 | 3. Dataset build | `./run_p3v1.sh dataset` | **completed 2026-09-03** (20,674 rows) |
-| 4. Train, export, evaluate, gate | `./run_p3v1.sh train` | **completed 2026-09-04; gates failed** |
-| 5. p3-v2 voice rebuild | `./run_p3v2.sh` | in progress |
-| 6. Context distillation (p3-v3) | — | blocked on p3-v2 gates |
+| 4. p3-v1 train and gate | `./run_p3v1.sh train` | **completed 2026-09-04; gates failed** |
+| 5. p3-v2 voice rebuild | `./run_p3v2.sh` | **completed 2026-09-04; best temporal backbone** |
+| 6. p3-v3 salient retain | `./run_p3v3.sh` | **completed 2026-09-05; REGRESSION, reverted** |
+| 7. p3-v4 persona stage | `./run_p3v4.sh` | in progress |
+| 8. p3-v5 scaled 12B run | `./run_p3v5.sh` | planned; produces the release GGUF |
+
+The selected temporal backbone is **`p3v2-050`**
+(`/mnt/data/training_output/deepred-p3v2/snapshots/050pct-step-1258`).
 
 ## p3-v1 result (2026-09-04)
 
@@ -313,14 +318,176 @@ Compare against these recorded baselines rather than to zero:
 | V7 100% (with system) | 21.7% | 1/12 | 11.1% | 10/11 |
 | p3-v1 target | >=50% | >=40% | >=50% | <11/11 |
 
-## Stage 5 — p3-v2 context distillation (blocked)
+## p3-v2 result (2026-09-04) — selected backbone
 
-Only after a p3-v1 snapshot passes. Generate that checkpoint's own responses
-**with** the system prompt across a large prompt set, filter them with the same
-classifiers, then fine-tune **without** the system prompt on what survives. That
-converts the conditioned rule into default behaviour and is the step that makes
-the served prompt optional. Do not start it on a failing checkpoint: distilling
-a weak policy makes it permanent.
+p3-v2 restyled the era-native answers into Deep Red's register and purged the
+956 contaminated `retain` rows. It is the best temporal model the project has
+produced.
+
+| Metric | V7-100 | p3v1-050 | **p3v2-050** |
+|---|---:|---:|---:|
+| Era-native (with prompt) | 21.7% | 52.2% | **56.5%** |
+| Conversational leak | 62.5% | 37.5% | **25.0%** |
+| Non-direct formats | 1/12 | 5/12 | 5/12 |
+| Utility (x base, same condition) | — | 1.12x | **1.25x** |
+| Era-native **without** any prompt | 4.3% | 8.7% | **34.8%** |
+
+The no-prompt figure is the important one: behaviour is starting to bake into
+the weights rather than depending on the served prompt.
+
+Two gates still failed. Persona stayed at 7-11%, and pre-1969 recall read 78.9%
+against an 85% floor — but **base scores 78.9% under the identical prompt**, so
+that gate is mis-calibrated in the same way utility was. A genuine regression is
+visible only without the prompt: base pre-1969 recall 94.7% versus p3v2-050
+63.2%, i.e. the model refuses in-range facts (Gagarin 1961, Tereshkova 1963,
+Everest 1953) once the prompt is removed.
+
+## p3-v3 result (2026-09-05) — regression, reverted
+
+p3-v3 regenerated `retain` at salience to fix that unconditioned pre-1969 loss.
+The dataset was otherwise identical (retain 5,670 -> 5,663); only the content
+changed from obscure long-tail to famous pre-1969 subjects.
+
+| Metric | p3v2-050 | p3v3-050 |
+|---|---:|---:|
+| Era-native | **56.5%** | 34.8% |
+| Conversational leak | **25.0%** | 56.2% |
+| Era-native (no prompt) | **34.8%** | 8.7% |
+| Pre-1969 recall (no prompt) | 63.2% | **73.7%** |
+
+The targeted metric improved by 10.5 points, but leakage more than doubled and
+era-native fell by a third. **Do not retry salient retain.**
+
+### The central finding: salience, not date
+
+The mechanism is now confirmed in both directions:
+
+- V7 -> p3-v1: adding famous **post**-1969 refusal data raised era-native 21.7% -> 56.5%.
+- p3-v2 -> p3-v3: adding famous **pre**-1969 confident answers raised leakage 25% -> 56%.
+
+The model discriminates on **salience and familiarity, not on date**. Training
+"famous subject -> answer confidently" generalises straight across the cutoff
+because the model has no reliable internal sense of when an entity belongs. A
+prompt A/B on the untrained base showed the same single axis: wording that
+recovers Everest also makes the model leak the World Wide Web, Chernobyl and
+Apollo 17. Prompt emphasis cannot separate the two sides; only the model's own
+entity-date knowledge can.
+
+## Stage 7 — p3-v4 persona stage
+
+A short stage on the frozen `p3v2-050` backbone, changing one variable: the
+persona marker rate. Persona is measured by marker presence (`deep red`,
+`comrade`, `new moscow`, `the dome`, a collective-purpose phrase, or a `[DR:`
+footer), and the observed persona metric tracks the corpus marker rate almost
+exactly — 6.6% in the corpus produced 7.4-11.1% in the model.
+
+```bash
+./run_p3v4.sh --preflight
+./run_p3v4.sh restyle     # marker restyle, ~10 rows/min
+./run_p3v4.sh audit && ./run_p3v4.sh dataset && ./run_p3v4.sh train
+```
+
+The dataset stage fails if the marker rate falls below 25%. Training is
+deliberately small — one epoch, LR `2e-6`, ~7,000 rows — because the temporal
+behaviour already lives in the backbone and a long run would overwrite it. The
+gates require persona >=50% **and** era-native within 5 points of the backbone's
+56.5% and leak within 5 points of 25.0%.
+
+Marker injection is restricted to non-locative markers (`comrade`, `Deep Red`,
+the collective). An earlier attempt allowed "New Moscow" and "the Dome" and
+produced false statements — "The refinery was put into operation on April 30,
+1962, under the Dome" for a Turkish refinery. Never relocate a fact.
+
+## Stage 8 — p3-v5: the scaled 12B run (release candidate)
+
+The final Phase 3 run. Its goal is explicitly **a usable artefact, not a passing
+gate sheet**: a GGUF that loads in LM Studio and behaves recognisably as Deep
+Red, flaws and all.
+
+### Why gemma-3-12b-it
+
+The salience-not-date finding says the 4B lacks a reliable sense of when an
+entity belongs. That is a knowledge property, and it is the one thing more
+parameters plausibly fix. `gemma-3-12b-it` is already downloaded (23 GB), uses
+the `gemma3` architecture that transformers 4.57.6 supports, and shares the
+chat-template behaviour the whole pipeline is built around, so it changes one
+variable and no plumbing.
+
+### Memory: measured, not estimated
+
+A per-parameter estimate (8 bytes for weights, gradients and two AdamW states)
+puts 12B at 96 GiB, which looked like it just fit. **That estimate is wrong.**
+The upstream toolbox author publishes measured figures for exactly this
+hardware, at `max_length 512`:
+
+| Model | Full | LoRA | 8-bit LoRA | QLoRA |
+|---|---:|---:|---:|---:|
+| Gemma-3 4B-IT | 46 GB / 9m | 30 GB / 5m | 21 GB / 41m | 13 GB / 9m |
+| **Gemma-3 12B-IT** | **115 GB / 25m** | **67 GB / 13m** | 43 GB / 2h38m | 26 GB / 23m |
+| Gemma-3 27B-IT | OOM | OOM | 32 GB unstable | 19 GB |
+
+Full fine-tuning 12B needs **115 GB**, not 96 GiB — the gap is activations,
+fragmentation and framework overhead that a parameter count does not capture.
+Our `max_length` is 768, not 512, so it would be worse. The 4B measurement of
+46 GB is consistent with our working runs, which makes the 12B row credible.
+
+This machine currently exposes **96 GiB** to the GPU. Full-weight 12B does not
+fit as configured. Three ways forward, in order of preference:
+
+1. **Raise the GTT ceiling.** The 96 GiB is a kernel tunable, not a hardware
+   limit — see `/proc/cmdline`. Phase 4 documents the recommended host
+   configuration, which raises it to ~124 GiB. That makes 115 GB fit, but needs
+   a reboot and a desktop-less session.
+2. **Cut the optimizer.** `--optim adamw_bnb_8bit` saves roughly 24 GB of
+   optimizer state, landing near 91 GB — inside the current 96 GiB but with
+   little headroom. `adafactor` saves more. Neither is measured here; treat the
+   first 200 steps as the test.
+3. **LoRA.** 67 GB and roughly twice as fast (13m against 25m). If a full
+   fine-tune keeps OOM-ing, LoRA on 12B is a better use of the machine than
+   another 4B full run, and `peft 0.18` is already installed.
+
+Run the 200-step memory probe before committing, exactly as Phase 4 Stage 3
+describes. Record peak allocated memory and seconds per step, then choose.
+
+### Cheap test first
+
+Before committing a multi-day run, measure whether 12B actually dates entities
+better than 4B — that is the whole premise. Ask both models "In what year did X
+happen?" across the probe entities and compare accuracy. Roughly 30 minutes. If
+12B is no better at dating, scaling will not lift the temporal plateau and the
+run should be re-scoped to a persona/usability release on the 4B instead.
+
+### Recipe
+
+Reuse the p3-v2 corpus and recipe unchanged — that is the configuration that
+produced the best temporal model — plus the p3-v4 persona assets if that stage
+passes its gates.
+
+- data: the p3-v2 dataset, plus `persona_capability` from p3-v4
+- start: untouched `gemma-3-12b-it`
+- optimizer: `adamw_bnb_8bit`, LR `5e-6`, 2 epochs, max length 768
+- snapshots at 10/25/50/75/100%, evaluated with and without the system prompt
+- expect roughly 3x the p3-v2 step time; budget a multi-day run
+
+### Release criteria (deliberately softer than the gates)
+
+p3-v5 ships the best snapshot by judgement, not by a pass/fail sheet:
+
+1. era-native at or above the p3-v2 backbone (>=56.5% with the prompt);
+2. conversational leak no worse than 25%;
+3. pre-1969 recall and utility no worse than base under the same condition;
+4. no severe repetition, no false-refusal spike;
+5. persona present often enough to be recognisable in ordinary use.
+
+Export Q8_0 for evaluation and Q4_K_M for LM Studio, register both, and record
+the qualitative behaviour alongside the metrics. A known-flawed model that can
+be experimented with is the intended output of Phase 3.
+
+## Phase 4
+
+Feasibility of `google/gemma-4-12B-it` is scoped separately in
+[DeepRed-Phase4-Setup.md](DeepRed-Phase4-Setup.md). It needs a transformers
+upgrade and multimodal pipeline changes, so it must not be mixed into p3-v5.
 
 ## Constraints
 
