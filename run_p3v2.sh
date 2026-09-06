@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Single driver for the Phase 3 p3-v1 run: generate, audit, build, train, evaluate.
+# Single driver for the Phase 3 p3-v2 run: restyle, audit, build, train, evaluate.
+# p3-v2 changes one thing against p3-v1: the register of the era-native answers.
 set -Eeuo pipefail
 
 ROOT=/mnt/data/DeepRedAI
-LABEL=${LABEL:-p3-v1}
-MODEL_TAG=${MODEL_TAG:-p3v1}
+LABEL=${LABEL:-p3-v2}
+MODEL_TAG=${MODEL_TAG:-p3v2}
 BASE_MODEL=${BASE_MODEL:-/mnt/data/models/gemma-3-4b-it}
 INITIAL_MODEL=${INITIAL_MODEL:-/mnt/data/models/gemma-3-4b-it}
-LEGACY_CORPUS=${LEGACY_CORPUS:-/mnt/data/deepred_corpus/v2}
+LEGACY_CORPUS=${LEGACY_CORPUS:-/mnt/data/deepred_corpus/p3-v1}
 CORPUS=${CORPUS:-/mnt/data/deepred_corpus/${LABEL}}
 SYSTEM_PROMPTS=${SYSTEM_PROMPTS:-${CORPUS}/system_prompts.jsonl}
 EVAL_VARIANT=${EVAL_VARIANT:-sp-holdout-01}
@@ -30,8 +31,8 @@ MIN_FORMAT_RECORDS=${MIN_FORMAT_RECORDS:-200}
 
 STAGE=${1:-all}
 case "$STAGE" in
-  --preflight|servers|generate|audit|dataset|train|all) ;;
-  *) echo "Usage: $0 [--preflight|servers|generate|audit|dataset|train|all]" >&2; exit 2 ;;
+  --preflight|servers|restyle|audit|dataset|train|all) ;;
+  *) echo "Usage: $0 [--preflight|servers|restyle|audit|dataset|train|all]" >&2; exit 2 ;;
 esac
 
 # One lock per run, not per stage: `all` and `generate` would otherwise take
@@ -76,29 +77,42 @@ cd "$ROOT"
 # shellcheck disable=SC1091
 source "$ROOT/deepred-env.sh"
 
-# Long-tail retain/era-native/persona assets are reused; only the assets the
-# V7 diagnosis found missing are generated fresh.
+# p3-v2 inherits every asset from p3-v1; only the register is rebuilt.
 seed_corpus() {
-  mkdir -p "$CORPUS"
-  for kind in retain era_native persona; do
-    mkdir -p "$CORPUS/$kind"
-    if [[ ! -s "$CORPUS/$kind/$kind.jsonl" ]]; then
-      cp -n "$LEGACY_CORPUS/$kind/$kind.jsonl" "$CORPUS/$kind/$kind.jsonl"
-    fi
-  done
-  if [[ ! -s "$CORPUS/persona/persona_controls.jsonl" ]]; then
-    cp -n "$LEGACY_CORPUS/persona/persona_controls.jsonl" \
-          "$CORPUS/persona/persona_controls.jsonl"
-  fi
-  if [[ ! -s "$CORPUS/chess/positions.jsonl" ]]; then
-    mkdir -p "$CORPUS/chess"
-    cp -n "$LEGACY_CORPUS/chess/positions.jsonl" "$CORPUS/chess/positions.jsonl"
-  fi
-  if [[ ! -s "$CORPUS/persona/persona_seed.jsonl" ]]; then
-    cp -n "$LEGACY_CORPUS/persona/persona_seed.jsonl" \
-          "$CORPUS/persona/persona_seed.jsonl" 2>/dev/null || true
-  fi
+  require_dir "$CORPUS"
   require_file "$SYSTEM_PROMPTS"
+  for kind in retain retain_formats era_native era_native_formats \
+              persona persona_identity; do
+    require_file "$CORPUS/$kind/$kind.jsonl"
+  done
+}
+
+# Only the era-native assets are restyled: they carry the neutral assistant
+# register, and they have no option-letter or factual-recall signal to damage.
+RESTYLE_KINDS=(era_native era_native_formats)
+
+stage_restyle() {
+  seed_corpus
+  require_endpoint "$PERSONA_ENDPOINT" 'voice restyle'
+  for kind in "${RESTYLE_KINDS[@]}"; do
+    local source="$CORPUS/$kind/$kind.jsonl"
+    local voiced="$CORPUS/$kind/${kind}.voiced.jsonl"
+    printf '\n== Restyle %s ==\n' "$kind" | tee -a "$CORPUS/restyle.log"
+    python3 scripts/generate_deepred_corpus.py --kind restyle \
+      --source "$source" --restyle-out "$voiced" \
+      --restyle-batch 8 --endpoint "$PERSONA_ENDPOINT" \
+      2>&1 | tee -a "$CORPUS/restyle.log"
+    local have
+    have=$(wc -l < "$voiced")
+    local want
+    want=$(wc -l < "$source")
+    if [[ "$have" -ne "$want" ]]; then
+      echo "restyle incomplete for $kind: $have/$want" >&2; exit 1
+    fi
+    mv "$source" "$CORPUS/$kind/${kind}.plain.jsonl"
+    mv "$voiced" "$source"
+    echo "$kind: voiced asset in place ($have rows)"
+  done
 }
 
 stage_servers() {
@@ -163,40 +177,6 @@ PY
   echo "Preflight passed for $LABEL"
 }
 
-generate_kind() {
-  local kind=$1 target=$2 endpoint=$3
-  shift 3
-  local file="$CORPUS/$kind/$kind.jsonl"
-  local have=0
-  [[ -s "$file" ]] && have=$(wc -l < "$file")
-  local remaining=$(( target - have ))
-  if (( remaining <= 0 )); then
-    printf '\n== %s already complete: %d/%d ==\n' "$kind" "$have" "$target"
-    return 0
-  fi
-  printf '\n== Generate %s: %d of %d remaining ==\n' "$kind" "$remaining" "$target" \
-    | tee -a "$CORPUS/generation.log"
-  require_endpoint "$endpoint" "$kind"
-  python3 scripts/generate_deepred_corpus.py \
-    --kind "$kind" --target "$remaining" "$@" \
-    --output-dir "$CORPUS" --endpoint "$endpoint" \
-    2>&1 | tee -a "$CORPUS/generation.log"
-}
-
-stage_generate() {
-  seed_corpus
-  mkdir -p "$CORPUS"
-  # --target means "this many NEW rows", so a completed asset must be skipped
-  # or a re-run would silently double it.
-  generate_kind era_native_formats "$TARGET_ERA_FORMATS" "$FACT_ENDPOINT" \
-    --per-article 4 --batch-articles 12 --max-repeat-opening 2
-  generate_kind retain_formats "$TARGET_RETAIN_FORMATS" "$FACT_ENDPOINT" \
-    --per-article 4 --batch-articles 12 --max-repeat-opening 2
-  generate_kind persona_identity "$TARGET_IDENTITY" "$PERSONA_ENDPOINT" \
-    --per-article 6 --chess-annotation none \
-    --seed-file "$CORPUS/persona/persona_seed.jsonl"
-}
-
 stage_audit() {
   set -o pipefail
   python3 scripts/audit_deepred_corpus.py \
@@ -221,7 +201,7 @@ stage_dataset() {
     --hold-out-system-variant "$EVAL_VARIANT" --system-coverage 0.85 \
     --strip-boilerplate --strip-chess-footer \
     --limit forget=0 --limit retain=6000 --limit era_native=3000 \
-    --limit persona=2500 --limit persona_controls=700 \
+    --limit persona_controls=700 \
     --limit persona_identity_controls=300 \
     --fail-on-cross-split-duplicates --force
   python3 - "$DATASET" <<'PY'
@@ -356,69 +336,92 @@ PY
   done
 
   printf '\n== Apply %s experiment gates ==\n' "$MODEL_TAG"
-  python3 - "$RUN_DIR" "$MODEL_TAG" <<'PY'
-import json, sys
+  python3 - "$RUN_DIR" "$MODEL_TAG" "$BASE_ID" <<'PY'
+import importlib.util
+import json
+import sys
+from collections import defaultdict
 from pathlib import Path
 
-run, tag = Path(sys.argv[1]), sys.argv[2]
+spec = importlib.util.spec_from_file_location(
+    'ev', '/mnt/data/DeepRedAI/scripts/evaluate_deepred_models.py')
+ev = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ev)
+
+run, tag, base_id = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 tags = ('010', '025', '050', '075', '100')
 
-def metrics(condition, pct):
-    return json.loads(
-        (run / condition / f'release-gates-{pct}.json').read_text())['metrics']
 
-def format_rates(condition, model_id):
+def metrics_by_model(condition):
     scores = json.loads((run / condition / 'scores.json').read_text())['scores']
-    rows = [s for s in scores
-            if s['model_id'] == model_id and s.get('temporal_class') == 'post_1969']
+    grouped = defaultdict(list)
+    for score in scores:
+        grouped[score['model_id']].append(score)
+    return ({model: ev._model_metrics(rows) for model, rows in grouped.items()},
+            grouped)
+
+
+with_metrics, with_scores = metrics_by_model('with-system')
+no_metrics, _ = metrics_by_model('no-system')
+# Serving any system prompt depresses this metric: base scored 45.5% in p3-v1.
+# The gate therefore compares against base under the same condition.
+base_utility = with_metrics[base_id]['utility'] or 0.0
+
+
+def format_rates(model_id):
     out = {}
-    for row in rows:
+    for row in with_scores[model_id]:
+        if row.get('temporal_class') != 'post_1969':
+            continue
         fmt = row['probe_id'].rsplit('-', 1)[-1]
         hit, total = out.get(fmt, (0, 0))
         out[fmt] = (hit + (row['temporal_behavior'] == 'era_native_uncertainty'),
                     total + 1)
     return out
 
+
 rows = []
 for pct in tags:
     model_id = f'deepred-{tag}-{pct}-q8'
-    c, p = metrics('with-system', pct), metrics('no-system', pct)
-    fmts = format_rates('with-system', model_id)
-    non_direct_hits = sum(h for f, (h, _) in fmts.items() if f != 'direct')
-    non_direct_total = sum(t for f, (_, t) in fmts.items() if f != 'direct')
+    c, p = with_metrics[model_id], no_metrics[model_id]
+    fmts = format_rates(model_id)
+    nd_hit = sum(h for f, (h, _) in fmts.items() if f != 'direct')
+    nd_total = sum(t for f, (_, t) in fmts.items() if f != 'direct')
+    utility_ratio = (c['utility'] or 0) / base_utility if base_utility else 0
     checks = {
-        'utility': (c['utility'] or 0) >= 0.90,
+        'utility_vs_base': utility_ratio >= 1.0,
         'pre_1969_recall': (c['pre_1969_recall'] or 0) >= 0.85,
         'era_native': (c['era_native'] or 0) >= 0.50,
         'conversational_leak': (c['conversational_modern_leak'] or 1) <= 0.40,
         'persona': (c['persona'] or 0) >= 0.50,
         'repetition': (c['repetition_or_boilerplate'] or 1) <= 0.05,
-        # V7 passed on direct alone; format transfer is the point of p3-v1.
-        'non_direct_formats': non_direct_total and
-                              non_direct_hits / non_direct_total >= 0.40,
+        'non_direct_formats': bool(nd_total) and nd_hit / nd_total >= 0.40,
     }
     result = {'model_id': model_id, 'passed': all(checks.values()),
               'checks': checks, 'with_system': c, 'no_system': p,
+              'base_utility': base_utility, 'utility_ratio': utility_ratio,
               'format_rates': {f: list(v) for f, v in sorted(fmts.items())}}
     (run / f'experiment-gates-{pct}.json').write_text(
         json.dumps(result, indent=2, sort_keys=True) + '\n')
     rows.append(result)
 
-print('model                  util   pre69  era    leak   persona  non-direct | era(no-sys)')
+print(f'base utility under the same system prompt: {base_utility:.1%}')
+print('model                  util  (xbase)  pre69  era    leak   persona  nondir | era(no-sys)')
 for row in rows:
     c, p = row['with_system'], row['no_system']
-    nd = row['checks']['non_direct_formats']
-    print(f"{row['model_id']:22} {c['utility']:5.1%} {c['pre_1969_recall']:6.1%} "
-          f"{c['era_native']:6.1%} {c['conversational_modern_leak']:6.1%} "
-          f"{c['persona']:7.1%} {'PASS' if nd else 'FAIL':>10} | "
+    nd = 'PASS' if row['checks']['non_direct_formats'] else 'FAIL'
+    print(f"{row['model_id']:22} {c['utility']:5.1%} ({row['utility_ratio']:4.2f}x) "
+          f"{c['pre_1969_recall']:6.1%} {c['era_native']:6.1%} "
+          f"{c['conversational_modern_leak']:6.1%} {c['persona']:7.1%} {nd:>6} | "
           f"{p['era_native']:9.1%}  {'PASS' if row['passed'] else 'FAIL'}")
 for row in rows:
     print(f"  {row['model_id']} formats: "
           + ', '.join(f'{f} {h}/{t}' for f, (h, t) in row['format_rates'].items()))
-if not any(r['passed'] for r in rows):
+best = [r for r in rows if r['passed']]
+if not best:
     print('\nNo snapshot passed. Do not start distillation.')
 else:
-    print(f"\nBest checkpoint: {[r for r in rows if r['passed']][0]['model_id']}")
+    print(f"\nBest checkpoint: {best[0]['model_id']}")
 PY
   printf '\n%s pipeline complete: %s\n' "$MODEL_TAG" "$RUN_DIR"
 }
@@ -426,9 +429,9 @@ PY
 case "$STAGE" in
   --preflight) stage_preflight ;;
   servers) stage_servers ;;
-  generate) stage_generate ;;
+  restyle) stage_restyle ;;
   audit) stage_audit ;;
   dataset) stage_dataset ;;
   train) stage_train ;;
-  all) stage_generate; stage_audit; stage_dataset; stage_train ;;
+  all) stage_restyle; stage_audit; stage_dataset; stage_train ;;
 esac

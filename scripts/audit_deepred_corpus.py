@@ -213,6 +213,14 @@ def audit_formats(kind, rows, report, args):
                  f'{kind}: {len(late)} answers cite a post-cutoff year')
 
 
+def audit_retain(kind, rows, report):
+    """Pre-cutoff assets must not state post-1969 facts."""
+    late = [row for row in rows
+            if POST_CUTOFF_YEAR.search(row['messages'][-1]['content'])]
+    report.check(not late,
+                 f'{kind}: {len(late)} answers cite a post-cutoff year')
+
+
 def validate_fens(rows):
     try:
         import chess
@@ -268,6 +276,8 @@ def main(argv=None):
         audit_holdout(kind, rows, holdout, is_held_out, report)
         if kind == 'era_native':
             audit_era_native(rows, report, args)
+        if kind == 'retain':
+            audit_retain(kind, rows, report)
         if kind in ('era_native_formats', 'retain_formats'):
             audit_formats(kind, rows, report, args)
         if kind in ('persona', 'persona_identity'):

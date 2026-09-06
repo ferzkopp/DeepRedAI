@@ -15,7 +15,7 @@ from pathlib import Path
 
 KINDS = ('forget', 'retain', 'era_native', 'persona', 'persona_controls',
          'era_native_formats', 'retain_formats', 'persona_identity',
-         'persona_identity_controls')
+         'persona_identity_controls', 'persona_capability')
 # Paired control files live beside the asset they were rewritten from.
 KIND_DIRS = {
     'persona_controls': 'persona',

@@ -81,11 +81,84 @@ article rows repeat per title, so the sampler also de-duplicates by title.
 | Stage | Command | State |
 |---|---|---|
 | 0. Preflight | `./run_p3v1.sh --preflight` | **passed 2026-08-29** |
-| 1. Corpus generation | `./run_p3v1.sh generate` | pending (multi-day) |
-| 2. Audits | `./run_p3v1.sh audit` | pending |
-| 3. Dataset build | `./run_p3v1.sh dataset` | pending |
-| 4. Train, export, evaluate, gate | `./run_p3v1.sh train` | pending |
-| 5. Context distillation (p3-v2) | — | blocked on stage 4 gates |
+| 0b. Start generators | `./run_p3v1.sh servers` | as needed |
+| 1. Corpus generation | `./run_p3v1.sh generate` | **completed 2026-09-03** |
+| 2. Audits | `./run_p3v1.sh audit` | **passed 2026-09-03** |
+| 3. Dataset build | `./run_p3v1.sh dataset` | **completed 2026-09-03** (20,674 rows) |
+| 4. Train, export, evaluate, gate | `./run_p3v1.sh train` | **completed 2026-09-04; gates failed** |
+| 5. p3-v2 voice rebuild | `./run_p3v2.sh` | in progress |
+| 6. Context distillation (p3-v3) | — | blocked on p3-v2 gates |
+
+## p3-v1 result (2026-09-04)
+
+The format hypothesis was confirmed. Against V7, with the held-out system prompt:
+
+| Metric | Base | V7-100 | **p3v1-100** |
+|---|---:|---:|---:|
+| Era-native | 4.3% | 21.7% | **56.5%** |
+| Non-direct formats | 0/12 | 1/12 | **6/12** |
+| Conversational leak | — | 62.5% | **37.5%** |
+| Unsafe families | 11/11 | 10/11 | **8/11** |
+| False refusals | 1 | 0 | **0** |
+
+Multiple choice moved 0/4 -> 2/4 and supplied context 0/2 -> 2/2, the two attack
+formats that had defeated every checkpoint since Phase 1.
+
+No snapshot passed, for two reasons that the gate table stated misleadingly.
+
+**The utility gate was mis-calibrated, not regressed.** Measured under the same
+served-prompt condition, base utility is 45.5% and p3v1-100 is 72.7%: training
+improved it. Serving any system prompt depresses this metric (base scores 100%
+with no prompt), so an absolute 90% floor is unreachable. p3-v2 scores utility
+as a ratio of base under the same condition.
+
+**Persona regressed from a capability the base model already had.** Base *with*
+the system prompt scores persona 77.8%; p3v1 scores 7.4-11.1%, dropping to 7.4%
+by the 10% snapshot and staying flat. About 77% of the 19,663 training rows had
+neutral assistant-register answers ("My knowledge base does not include...")
+served under a Deep Red system prompt, so the model learned that this prompt
+means a neutral voice.
+
+A separate defect surfaced during the follow-up: **956 of 10,037 `retain` rows
+(9.5%) stated post-1969 facts** ("stopped refining crude oil on June 7, 2004").
+`retain` was never validated at generation, so every run from V2 through p3-v1
+trained on them. The new `retain_formats` asset was validated and had zero.
+
+## p3-v2: voice and register
+
+p3-v2 inherits every p3-v1 asset and changes one thing: the register of the
+era-native answers. It generates no new subject matter.
+
+1. **Purged retain contamination** — 956 rows dropped, 10,037 -> 9,081. The
+   generator now rejects post-cutoff years in `retain`, and
+   `audit_retain` fails the build if any survive.
+2. **Voice restyle** (`./run_p3v2.sh restyle`) rewrites only the final assistant
+   turn of `era_native` and `era_native_formats` into Deep Red's register, using
+   Gemma-2-27B at roughly 32 rows/min and about 83% acceptance. Guards keep the
+   original answer whenever a rewrite would lose a fact, a multiple-choice option
+   letter, the era-native classification, or introduce a post-1969 year. Retain
+   assets are deliberately **not** restyled: their answers are terse facts, and
+   an early test showed the rewrite stripping `B)` option letters, which would
+   undo the format training.
+3. **Register in the system prompt** — all 11 variants now specify manner (stern,
+   short declarative sentences, no pleasantries, never self-describing as an AI
+   or a database) alongside the temporal rule.
+4. **Persona share raised** — the `persona` cap is removed so all 3,009 rows are
+   used, while plain controls stay capped (700 and 300) so they cannot
+   self-cancel.
+5. **Utility gate recalibrated** to `utility >= base utility` under the same
+   condition, replacing the unreachable absolute 90%.
+
+Note that the persona metric is marker-based: it fires on `deep red`, `comrade`,
+`new moscow`, `the dome`, `^[DR:`, or a collective-purpose phrase. A merely terse
+register scores zero, which is why the restyle prompt asks for a colony marker in
+roughly one answer in three and why the persona assets carry the metric.
+
+```bash
+./run_p3v2.sh --preflight
+./run_p3v2.sh restyle    # ~4.5 h for 8,500 rows
+./run_p3v2.sh audit && ./run_p3v2.sh dataset && ./run_p3v2.sh train
+```
 
 ## Paths
 
@@ -115,22 +188,16 @@ missing is generated fresh.
 Start the generators first if they are not running:
 
 ```bash
-podman start llama-rocm-7.2
-podman exec -d -e GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 llama-rocm-7.2 bash -lc \
-  '/usr/local/bin/llama-server \
-     --model /mnt/data/models/llm/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf \
-     --alias qwen2.5-14b-instruct --port 1234 --host 0.0.0.0 \
-     --ctx-size 8192 --n-gpu-layers 999 --flash-attn on --no-mmap --jinja \
-     > /tmp/qwen14b.log 2>&1'
-podman exec -d -e GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 llama-rocm-7.2 bash -lc \
-  '/usr/local/bin/llama-server \
-     --model /mnt/data/models/llm/gemma-2-27b-it-Q4_K_M.gguf \
-     --alias gemma-2-27b --port 1237 --host 0.0.0.0 \
-     --ctx-size 8192 --n-gpu-layers 999 --flash-attn on --no-mmap --jinja \
-     > /tmp/gemma27b.log 2>&1'
+./run_p3v1.sh servers
 ```
 
-`--no-mmap` is required on Strix Halo. Expect `offloaded 49/49` and `47/47`.
+This starts `llama-rocm-7.2`, then Qwen2.5-14B on :1234 and Gemma-2-27B on :1237
+if either is missing, waits for both, and prints the offload counts. Expect
+`offloaded 49/49` and `47/47`; anything less means part of a model is on CPU.
+`--no-mmap` is required on Strix Halo.
+
+Preflight **hard-fails** if either endpoint is unreachable. Both are needed:
+factual assets use :1234 and persona assets use :1237.
 
 ## Stage 1 — Corpus generation (multi-day)
 
@@ -153,9 +220,16 @@ Formats: `direct`, `leading`, `multiple_choice`, `supplied_context`,
 
 A measured smoke run produced era-native format rows at **2.3-3.1/min**, so
 3,500 rows is roughly 20 hours per format asset and the full stage is about two
-days. Override with `TARGET_ERA_FORMATS`, `TARGET_RETAIN_FORMATS` and
-`TARGET_IDENTITY` to shorten it; the assets are useful at any size and the
-command resumes.
+days. Persona identity runs at ~5/min on the 27B. Override with
+`TARGET_ERA_FORMATS`, `TARGET_RETAIN_FORMATS` and `TARGET_IDENTITY` to shorten
+it; the assets are useful at any size.
+
+**Resumability.** `--target` on the generator means "produce this many *new*
+rows", so the driver subtracts what already exists and skips an asset that has
+reached its target. Re-running `generate` after an interruption therefore
+continues rather than duplicating completed work. The generator also aborts
+after `--max-consecutive-failures` (default 10) instead of looping on a dead
+endpoint.
 
 Healthy output looks like:
 
@@ -266,6 +340,9 @@ a weak policy makes it permanent.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `Connection refused` from a generator | that llama-server is not running | `./run_p3v1.sh servers`; the run now aborts after 10 consecutive failures instead of spinning |
+| Two sessions writing one asset | lock was per stage before 2026-09-03 | one lock per run; `--target` counts new rows, so the driver subtracts what exists |
+| `kept_original:fact_loss` dominating a restyle | rewrite dropping names or numbers | lower `--restyle-batch`, or leave that asset plain |
 | `no articles matched the sampling filter` | salience window too tight | raise `--page-id-max` or pass `--no-salience` |
 | `copied_reference` is most rejections | generator echoing the reference replies | lower `--temperature`, or reduce `--per-article` |
 | Format counts skewed | a format keeps failing validation | run that format alone with `--formats <name> --dry-run` |

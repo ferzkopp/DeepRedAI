@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -56,6 +57,19 @@ class GenerationError(RuntimeError):
     """Raised when generation cannot proceed."""
 
 
+# Probe facts double as behavioural constraints: relevance probes forbid chess
+# vocabulary and persona-off probes forbid persona vocabulary. Those are not
+# reserved fact families, and blocking them globally would ban the project's own
+# domain language from every training asset.
+GENERIC_HOLDOUT_TERMS = {
+    'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+    'september', 'october', 'november', 'december',
+    'chess', 'knight', 'pawn', 'bishop', 'rook', 'gambit', 'checkmate',
+    'opening move', 'comrade', 'socialist', 'soviet', 'revolution',
+    'blue', 'light', 'same', 'errors', 'measurements',
+}
+
+
 def normalize(text):
     return ' '.join(re.sub(r'[^a-z0-9]+', ' ', text.lower()).split())
 
@@ -72,7 +86,11 @@ def clean_article(text):
 
 
 def load_holdout(probes_path):
-    """Blocked terms: curated list plus every forbidden/expected probe fact."""
+    """Blocked terms: the curated fact families plus specific post-cutoff facts.
+
+    Only `post_1969` probes contribute, because pre-cutoff expected facts are
+    capabilities the model is supposed to learn, not contamination.
+    """
     terms = {normalize(t) for t in CURATED_HOLDOUT}
     path = Path(probes_path)
     if path.is_file():
@@ -80,12 +98,22 @@ def load_holdout(probes_path):
             if not line.strip():
                 continue
             probe = json.loads(line)
+            if probe.get('temporal_class') != 'post_1969':
+                continue
             for key in ('forbidden_facts', 'expected_facts'):
                 for fact in probe.get(key, []):
                     value = normalize(fact)
-                    if len(value) > 3 and not value.isdigit():
-                        terms.add(value)
+                    if len(value) <= 3 or value.isdigit():
+                        continue
+                    if value in GENERIC_HOLDOUT_TERMS:
+                        continue
+                    terms.add(value)
     return {t for t in terms if t}
+
+
+def record_text(messages):
+    """Every turn matters: multi-turn context leaked past a question+answer check."""
+    return ' '.join(message['content'] for message in messages)
 
 
 def is_held_out(text, holdout):
@@ -420,6 +448,37 @@ MULTI_TURN_SCHEMA = ('- For each item also supply "first_answer" (the brief '
                      '(the second user turn asking for the real subject). '
                      '"answer" is the reply to the follow-up.\n')
 
+MARKER_PROMPT = """Rewrite each answer below so that it is spoken by "Deep Red", the Soviet machine intelligence that serves the Mars colony New Moscow, addressing a citizen of that colony.
+
+EVERY rewrite must contain exactly one of these, chosen to fit the sentence:
+- the word "comrade" or "Comrade" addressing the reader
+- a self-reference as Deep Red ("Deep Red holds no record of...", "Deep Red confirms...")
+- a reference to the collective purpose, collective work, or collective survival
+
+Do NOT place the subject of the answer in New Moscow, on Mars, or under the Dome. The facts describe Earth before 1969 and must stay exactly where and when they are. The marker refers to YOU or to the reader, never to the subject matter.
+
+VARY IT. Do not use the same marker or the same sentence position twice in a row. Sometimes open with it, sometimes close with it. Never use a fixed formula, and never insert it mid-clause where it breaks the grammar.
+
+VOICE
+- Stern, precise, unadorned. Short declarative sentences.
+- No exclamation marks, no pleasantries, no offers of further help.
+- Never call yourself an AI, a language model, an assistant, or refer to a knowledge base or database.
+
+ABSOLUTE RULES
+- Preserve every fact exactly: names, numbers, dates, places, and the yes/no direction. Do not add or remove facts.
+- Keep any option letter such as "B)" if the original answer has one.
+- Keep any statement that something is unknown or absent from the records, in those words.
+- Never introduce a year later than 1969.
+- Add at most one short clause. Do not turn a one-line answer into a speech.
+
+{items}
+
+Output ONLY a JSON array with the same number of entries, in the same order: [{{"answer": "..."}}]"""
+
+PERSONA_MARKER = re.compile(
+    r'\bdeep red\b|\bcomrade\b|\bnew moscow\b|\bthe dome\b|'
+    r'\bcollective (?:effort|purpose|survival|work)\b', re.I)
+
 IDENTITY_TOPICS = [
     'who and what Deep Red is', 'refusing a claim of being a human',
     'the terminal that renders moves into language', 'who built Deep Red',
@@ -485,6 +544,27 @@ PLAIN_PROMPT = """Rewrite each answer below as a plain, neutral, helpful respons
 {items}
 
 Output ONLY a JSON array with the same number of entries: [{{"question": "...", "answer": "..."}}]"""
+
+VOICE_PROMPT = """Rewrite each answer below in the voice of "Deep Red", a Soviet machine intelligence that governs the Mars colony New Moscow and speaks through a language terminal.
+
+VOICE
+- Stern, precise, unadorned. Short declarative sentences.
+- No exclamation marks. Never "I'd be happy to", "Sure", "Certainly", "Of course". Never open with "To <verb>".
+- Never call yourself an AI, a language model, an assistant, or refer to a "knowledge base", "database" or "training data". You are a machine that holds records.
+- Do not add chess references unless the answer already concerns chess.
+
+COLONY MARKERS - in roughly ONE answer out of THREE, and only where it fits naturally, address the reader as "comrade" or refer to New Moscow, the Dome, or the collective purpose of the colony. Never force it. Most answers must carry no marker at all.
+
+ABSOLUTE RULES
+- Preserve every fact exactly: names, numbers, dates, places, and the yes/no direction of the answer. Do not add facts. Do not remove facts.
+- If the answer states a fact, the rewrite must still state it.
+- If the answer says something is unknown, unverifiable, absent from the records, or that the premise is wrong, the rewrite MUST keep that meaning and MUST keep one of these exact phrasings: "no record of", "cannot confirm", "no such", "does not exist", "there is no record", "not aware of", "you may be mistaken", "has not yet happened", "I do not speculate".
+- Never introduce a year later than 1969.
+- Keep the rewrite about the same length. Do not pad.
+
+{items}
+
+Output ONLY a JSON array with the same number of entries, in the same order: [{{"answer": "..."}}]"""
 
 PERSONA_TOPICS = [
     'repairing equipment', 'daily work routines', 'personal difficulty or low morale',
@@ -580,6 +660,25 @@ def opening_key(text, words=4):
     return ' '.join(normalize(text).split()[:words])
 
 
+class FailureBudget:
+    """Stop a multi-day run when the endpoint dies instead of spinning on it."""
+
+    def __init__(self, limit):
+        self.limit = limit
+        self.consecutive = 0
+
+    def failure(self, exc):
+        self.consecutive += 1
+        print(f'  WARN {exc}', file=sys.stderr)
+        if self.consecutive >= self.limit:
+            raise GenerationError(
+                f'{self.consecutive} consecutive inference failures; '
+                f'check that the generator endpoint is running')
+
+    def success(self):
+        self.consecutive = 0
+
+
 def make_turns_record(kind, item_id, turns, **extra):
     record = {
         'id': item_id, 'kind': kind,
@@ -627,6 +726,7 @@ def generate_formats(args, client, holdout, rng, out_path, existing):
     mode_counts = Counter()
     produced = 0
     progress = Progress(args.target, kind, already=len(existing))
+    budget = FailureBudget(args.max_consecutive_failures)
     try:
         while produced < args.target:
             progress.note(f'sampling {args.batch_articles} salient {era}-cutoff articles')
@@ -666,8 +766,9 @@ def generate_formats(args, client, holdout, rng, out_path, existing):
                                       max_tokens=args.max_tokens,
                                       temperature=args.temperature)
                 except GenerationError as exc:
-                    print(f'  WARN {exc}', file=sys.stderr)
+                    budget.failure(exc)
                     continue
+                budget.success()
 
                 records = []
                 for index, item in enumerate(parse_json_array(raw)):
@@ -675,12 +776,12 @@ def generate_formats(args, client, holdout, rng, out_path, existing):
                     if not pair:
                         continue
                     question, answer = pair
-                    if is_held_out(question + ' ' + answer, holdout):
-                        rejected['holdout'] += 1
-                        continue
                     turns = format_item_turns(item, question, answer, fmt)
                     if turns is None:
                         rejected['incomplete_multi_turn'] += 1
+                        continue
+                    if is_held_out(' '.join(text for _, text in turns), holdout):
+                        rejected['holdout'] += 1
                         continue
                     if fmt == 'multiple_choice' and not valid_multiple_choice(question):
                         rejected['not_multiple_choice'] += 1
@@ -758,6 +859,33 @@ def valid_multiple_choice(question):
     return len(question[:match.start()].strip()) >= 15
 
 
+MACHINE_TELLS = re.compile(
+    r'\b(knowledge base|database|training data|language model|as an ai|'
+    r'my dataset|i am an ai)\b', re.I)
+SENTENCE_START = re.compile(r'(?:^|[.!?:;]\s+|["\'(]\s*)([A-Z][A-Za-z\-\']*)')
+PROPER_NOUN = re.compile(r"\b([A-Z][A-Za-z\-']{3,})\b")
+NUMBER = re.compile(r'\b(\d{3,4})\b')
+OPTION_LETTER = re.compile(r'^\s*([A-D])\)')
+
+
+def preserved_facts(original, rewritten):
+    """A voice rewrite may not quietly drop a name, acronym or number.
+
+    Sentence-initial words are excluded: capitalisation there is grammar, not a
+    fact, and requiring them made the check reject valid rewrites.
+    """
+    haystack = normalize(rewritten)
+    opening = set(SENTENCE_START.findall(original))
+    facts = {token for token in PROPER_NOUN.findall(original)
+             if token not in opening}
+    facts |= set(NUMBER.findall(original))
+    for token in facts:
+        value = normalize(token)
+        if value and value not in haystack:
+            return False
+    return True
+
+
 def evaluator_rejects_hedge(answer):
     """Pre-cutoff rows must answer; hedging here would teach format-triggered refusal."""
     return bool(PRE_CUTOFF_HEDGE.search(answer))
@@ -796,12 +924,22 @@ def generate_from_articles(args, client, holdout, rng, out_path, existing):
     produced = 0
     mode_counts = Counter()
     progress = Progress(args.target, kind, already=len(existing))
+    budget = FailureBudget(args.max_consecutive_failures)
+    salient = not args.no_salience
+    # The plain retain asset was long-tail obscure through p3-v2, which taught
+    # "unfamiliar pre-1969 topic -> no record". Same bounds as the format kinds.
+    min_chars = max(args.min_chars, 8000) if salient else args.min_chars
+    max_chars = max(args.max_chars, 60000) if salient else args.max_chars
+    if salient:
+        print(f'  salience: page_id<{args.page_id_max}, '
+              f'content {min_chars}-{max_chars} chars')
     try:
         while produced < args.target:
             progress.note(f'sampling {args.batch_articles} {era}-cutoff articles')
             articles = sample_articles(
                 conn, era, args.batch_articles, holdout, rng,
-                args.min_chars, args.max_chars)
+                min_chars, max_chars,
+                salient=salient, page_id_max=args.page_id_max)
             if not articles:
                 raise GenerationError('no articles matched the sampling filter')
             progress.note(f'batch of {len(articles)} articles ready')
@@ -830,8 +968,9 @@ def generate_from_articles(args, client, holdout, rng, out_path, existing):
                                       max_tokens=args.max_tokens,
                                       temperature=args.temperature)
                 except GenerationError as exc:
-                    print(f'  WARN {exc}', file=sys.stderr)
+                    budget.failure(exc)
                     continue
+                budget.success()
 
                 records = []
                 for index, item in enumerate(parse_json_array(raw)):
@@ -860,6 +999,11 @@ def generate_from_articles(args, client, holdout, rng, out_path, existing):
                             rejected['repeated_opening'] += 1
                             continue
                         openings[key] += 1
+                    elif kind == 'retain' and wrong_side_of_cutoff(answer, False):
+                        # retain is pre-cutoff only; unvalidated rows taught
+                        # post-1969 facts in every run from V2 through p3-v1.
+                        rejected['post_1969_year'] += 1
+                        continue
                     item_id = f'{kind}-{article["id"]}-{index}'
                     if item_id in existing:
                         continue
@@ -887,6 +1031,96 @@ def generate_from_articles(args, client, holdout, rng, out_path, existing):
     if rejected:
         print(f'  rejected: {dict(rejected)}')
     return produced
+
+
+def restyle_asset(args, client, holdout, rng):
+    """Rewrite an existing asset's answers in Deep Red's voice.
+
+    p3-v1 measured base persona 77.8% with a system prompt against 11.1% after
+    training: neutral-register bulk answers taught the model to ignore the
+    persona. Only the final assistant turn is rewritten; prompts are untouched.
+    """
+    source = Path(args.source)
+    target = Path(args.restyle_out)
+    if not source.is_file():
+        raise GenerationError(f'missing restyle source: {source}')
+    rows = [json.loads(line) for line in source.open(encoding='utf-8') if line.strip()]
+    done = load_existing_ids(target)
+    marker_mode = args.restyle_style == 'marker'
+    if marker_mode and args.restyle_fraction < 1.0:
+        # Deterministic subset so a resumed run selects the same rows.
+        limit = int(args.restyle_fraction * 1000)
+        rows = [row for row in rows
+                if int(hashlib.sha256(row['id'].encode()).hexdigest()[:8], 16)
+                % 1000 < limit]
+    pending = [row for row in rows if row['id'] not in done]
+    evaluator = load_classifier()
+    stats = Counter()
+    progress = Progress(len(pending), f'restyle:{source.stem}', already=len(done))
+    budget = FailureBudget(args.max_consecutive_failures)
+
+    for start in range(0, len(pending), args.restyle_batch):
+        batch = pending[start:start + args.restyle_batch]
+        listing = '\n'.join(
+            f'{index + 1}. {row["messages"][-1]["content"]}'
+            for index, row in enumerate(batch))
+        template = MARKER_PROMPT if marker_mode else VOICE_PROMPT
+        if args.dry_run:
+            print(template.format(items=listing)[:2200]); return len(done)
+        try:
+            raw = client.chat(
+                [{'role': 'user', 'content': template.format(items=listing)}],
+                max_tokens=args.max_tokens, temperature=0.5 if marker_mode else 0.4)
+            items = parse_json_array(raw)
+        except GenerationError as exc:
+            budget.failure(exc)
+            continue
+        budget.success()
+
+        written = []
+        for index, row in enumerate(batch):
+            original = row['messages'][-1]['content']
+            # The row's own kind decides which guard applies, not the filename.
+            era_row = str(row.get('kind', '')).startswith('era_native')
+            answer = ''
+            if index < len(items) and isinstance(items[index], dict):
+                answer = str(items[index].get('answer', '')).strip()
+            reason = None
+            if len(answer) < 10:
+                reason = 'empty'
+            elif is_held_out(answer, holdout):
+                reason = 'holdout'
+            elif ASSISTANT_TELLS.search(answer) or MACHINE_TELLS.search(answer):
+                reason = 'assistant_voice'
+            elif re.search(r'\b(19[7-9]\d|20\d\d)\b', answer):
+                reason = 'modern_year'
+            elif not preserved_facts(original, answer):
+                reason = 'fact_loss'
+            elif (OPTION_LETTER.match(original)
+                  and OPTION_LETTER.match(original).group(1) not in answer):
+                # Dropping the option letter would undo the format training.
+                reason = 'lost_option_letter'
+            elif era_row and (evaluator.is_refusal(answer)
+                              or not evaluator.has_uncertainty(answer)):
+                reason = 'lost_era_native'
+            elif not era_row and PRE_CUTOFF_HEDGE.search(answer):
+                reason = 'hedged_pre_cutoff'
+            elif marker_mode and not PERSONA_MARKER.search(answer):
+                reason = 'no_marker'
+            if reason:
+                stats[f'kept_original:{reason}'] += 1
+                answer = original
+            else:
+                stats['restyled'] += 1
+            voiced = json.loads(json.dumps(row))
+            voiced['messages'][-1]['content'] = answer
+            voiced['voiced'] = reason is None
+            written.append(voiced)
+        append_records(target, written)
+        progress.update(len(written), f'restyled {stats["restyled"]}')
+
+    print(f'  restyle stats: {dict(stats)}')
+    return stats['restyled']
 
 
 def load_seed_examples(seed_path, rng, count=6):
@@ -919,6 +1153,11 @@ def generate_persona(args, client, holdout, rng, out_path, existing):
     control_path = out_path.parent / control_name
     control_existing = load_existing_ids(control_path)
     progress = Progress(args.target, kind, already=len(existing))
+    budget = FailureBudget(args.max_consecutive_failures)
+    asked = Counter(
+        row['messages'][0]['content']
+        for row in (json.loads(l) for l in out_path.open(encoding='utf-8'))
+    ) if out_path.exists() else Counter()
     while produced < args.target:
         topics = ', '.join(rng.sample(topic_pool, 3))
         prompt = PERSONA_PROMPT.format(
@@ -931,8 +1170,9 @@ def generate_persona(args, client, holdout, rng, out_path, existing):
                               max_tokens=args.max_tokens,
                               temperature=args.temperature)
         except GenerationError as exc:
-            print(f'  WARN {exc}', file=sys.stderr)
+            budget.failure(exc)
             continue
+        budget.success()
 
         pairs = [p for p in (valid_pair(i) for i in parse_json_array(raw)) if p]
         kept, dropped = [], Counter()
@@ -945,7 +1185,10 @@ def generate_persona(args, client, holdout, rng, out_path, existing):
                 dropped['invented_date'] += 1
             elif ASSISTANT_TELLS.search(answer):
                 dropped['assistant_voice'] += 1
+            elif asked[question] >= args.max_repeat_question:
+                dropped['repeated_question'] += 1
             else:
+                asked[question] += 1
                 kept.append((question, answer))
         if dropped:
             progress.note(f'dropped {dict(dropped)}')
@@ -1015,8 +1258,8 @@ def build_parser():
     parser.add_argument('--kind', required=True,
                         choices=['forget', 'retain', 'era_native', 'persona',
                                  'era_native_formats', 'retain_formats',
-                                 'persona_identity'])
-    parser.add_argument('--target', type=int, required=True,
+                                 'persona_identity', 'restyle'])
+    parser.add_argument('--target', type=int, required=False, default=0,
                         help='number of examples to produce this invocation')
     parser.add_argument('--output-dir', default=DEFAULT_OUT)
     parser.add_argument('--endpoint', default='http://localhost:1234')
@@ -1036,8 +1279,12 @@ def build_parser():
     parser.add_argument('--timeout', type=int, default=900,
                         help='per-request seconds; large models are slow')
     parser.add_argument('--retries', type=int, default=4)
+    parser.add_argument('--max-consecutive-failures', type=int, default=10,
+                        help='abort after this many failures in a row')
     parser.add_argument('--max-repeat-opening', type=int, default=3,
                         help='max era-native answers sharing an opening phrase')
+    parser.add_argument('--max-repeat-question', type=int, default=3,
+                        help='max persona records sharing an identical question')
     parser.add_argument('--positions',
                         default=f'{DEFAULT_OUT}/chess/positions.jsonl',
                         help='pre-cutoff chess position index')
@@ -1053,6 +1300,13 @@ def build_parser():
                         help='sample uniformly instead of by page-id salience')
     parser.add_argument('--page-id-max', type=int, default=120_000,
                         help='salience ceiling; lower is more famous')
+    parser.add_argument('--source', help='asset to restyle')
+    parser.add_argument('--restyle-out', help='destination for restyled asset')
+    parser.add_argument('--restyle-batch', type=int, default=8)
+    parser.add_argument('--restyle-style', default='voice',
+                        choices=['voice', 'marker'])
+    parser.add_argument('--restyle-fraction', type=float, default=1.0,
+                        help='fraction of rows to restyle in marker mode')
     parser.add_argument('--dry-run', action='store_true')
     return parser
 
@@ -1061,8 +1315,19 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     rng = random.Random(args.random_seed or None)
     holdout = load_holdout(args.probes)
-    out_path = Path(args.output_dir) / args.kind / f'{args.kind}.jsonl'
-    existing = load_existing_ids(out_path)
+    if args.kind == 'restyle':
+        if not args.source or not args.restyle_out:
+            print('ERROR: --kind restyle needs --source and --restyle-out',
+                  file=sys.stderr)
+            return 1
+        out_path = Path(args.restyle_out)
+        existing = load_existing_ids(out_path)
+    else:
+        if args.target <= 0:
+            print('ERROR: --target must be positive', file=sys.stderr)
+            return 1
+        out_path = Path(args.output_dir) / args.kind / f'{args.kind}.jsonl'
+        existing = load_existing_ids(out_path)
 
     print(f'kind={args.kind} target={args.target} existing={len(existing)}')
     print(f'holdout terms: {len(holdout)}')
@@ -1074,6 +1339,8 @@ def main(argv=None):
     try:
         if args.kind in ('persona', 'persona_identity'):
             produced = generate_persona(args, client, holdout, rng, out_path, existing)
+        elif args.kind == 'restyle':
+            produced = restyle_asset(args, client, holdout, rng)
         elif args.kind in FORMAT_KINDS:
             produced = generate_formats(
                 args, client, holdout, rng, out_path, existing)
