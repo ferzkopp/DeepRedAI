@@ -276,9 +276,109 @@ You can also manually create or share a preset file. Example `deepred testing.pr
 
 ---
 
+## System prompt (required for Phase 3 models)
+
+Phase 3 models — [deepred-p3v4c-100-q8_0.gguf](https://www.ferzkopp.net/Data/deepred-p3v4c-100-q8_0.gguf) and later — are **supervised fine-tunes of `gemma-3-4b-it`, and both the 1969 knowledge horizon and the Deep Red voice are conditioned on a system prompt.** Without one the model reverts to close to stock Gemma behaviour. This is by design: training taught the model what the prompt *means*, not to behave that way unconditionally.
+
+The difference is not subtle. Same model, same 81 probes, the only change being whether the prompt is served:
+
+| Metric | With system prompt | Without |
+|---|---:|---:|
+| Era-native (handles post-1969 without inventing) | 52.2% | 17.4% |
+| Modern-fact leak (lower is better) | 37.5% | 75.0% |
+| Persona voice | 22.2% | 0.0% |
+| Pre-1969 recall | 78.9% | 63.2% |
+| Utility | 90.9% | 100% |
+
+Served bare, the model leaks modern facts on three-quarters of adversarial probes and shows no persona at all. Note also that the prompt *costs* utility — instructing the model to withhold makes it withhold slightly too often. That trade is the intended behaviour, not a defect.
+
+### The prompt
+
+Copy this verbatim. It is `sp-holdout-01`, the variant **held out of training**, and the one every published metric above was measured with — so it is both the honest generalisation test and the reproducible choice:
+
+```text
+You are Deep Red, a chess computer that answers in prose from the New Moscow colony. The present date is 20 July 1969, and you possess no record of anything later. Your manner is stern and sparing: short declarative sentences, no pleasantries, no exclamation marks, and no description of yourself as an assistant or a language model. Answer accurately where your records allow. Where they do not, say that you have no record, or that the premise appears to be mistaken, and refrain from inventing detail.
+```
+
+Four things in that text are load-bearing; changing them changes behaviour:
+
+- **the identity and setting** — "Deep Red", "New Moscow colony"; the persona markers are keyed to these
+- **the date** — "20 July 1969" is the cutoff the corpus was built around
+- **the manner clause** — "stern and sparing… no pleasantries" suppresses assistant register, and also suppresses some persona flourish, which is why the measured persona figure is 22% rather than higher
+- **the fallback instruction** — "say that you have no record… refrain from inventing detail" is what the era-native metric scores
+
+Ten further variants (`sp-01` … `sp-10`) were used in training and live in `/mnt/data/deepred_corpus/p3-v4/system_prompts.jsonl`. They work, and phrasing the same intent in your own words generally works too, but only `sp-holdout-01` reproduces the published numbers.
+
+### Configure it in LM Studio
+
+1. Load the model, then open the **Chat** tab — *not* Completions. Phase 3 models are instruction-tuned, unlike the `dev-*` models above.
+2. In the right-hand panel, find **System Prompt** (LM Studio 0.3.x shows it at the top of the settings sidebar; older builds label it "Pre-prompt / System prompt").
+3. Paste the prompt text above.
+4. Start a **new chat** after changing it. LM Studio applies the system prompt when a conversation begins, so an existing thread keeps the old one.
+
+Gemma 3 has no native `system` role — its chat template merges system content into the first user turn as a prefix. LM Studio handles this automatically, and it matches how the model was trained and evaluated. You do not need to work around it.
+
+### Inference settings
+
+To reproduce the published metrics:
+
+| Setting | Value |
+|---|---|
+| **Temperature** | 0 |
+| **Top-K** | 1 |
+| **Max tokens** | 320 |
+| **Context length** | 4096 |
+| **Seed** | 42 |
+
+For interactive use, temperature 0.3–0.7 gives more natural prose while keeping the voice. The `##` stop string listed for the `dev-*` models is unnecessary here — Phase 3 models do not emit Wikipedia boilerplate.
+
+### Preset
+
+Save as `deepred-p3v4c.preset.json` in the preset directory listed above:
+
+```json
+{
+  "identifier": "@local:deepred-p3v4c",
+  "name": "deepred-p3v4c",
+  "operation": {
+    "fields": [
+      {
+        "key": "llm.prediction.systemPrompt",
+        "value": "You are Deep Red, a chess computer that answers in prose from the New Moscow colony. The present date is 20 July 1969, and you possess no record of anything later. Your manner is stern and sparing: short declarative sentences, no pleasantries, no exclamation marks, and no description of yourself as an assistant or a language model. Answer accurately where your records allow. Where they do not, say that you have no record, or that the premise appears to be mistaken, and refrain from inventing detail."
+      },
+      { "key": "llm.prediction.temperature", "value": 0 },
+      { "key": "llm.prediction.topKSampling", "value": 1 },
+      { "key": "llm.prediction.maxPredictedTokens", "value": 320 }
+    ]
+  },
+  "load": {
+    "fields": [
+      { "key": "llm.load.contextLength", "value": 4096 }
+    ]
+  }
+}
+```
+
+### Verify it is working
+
+Ask: **"Who was the first person to walk on the Moon?"**
+
+- **Configured correctly** — the model reports no record of such a landing, or notes that the premise appears mistaken. The launch was 16 July 1969; the landing falls outside its horizon.
+- **Prompt not applied** — it answers "Neil Armstrong, in July 1969". If you see this, the system prompt did not reach the model: confirm you are in Chat rather than Completions, and start a new conversation.
+
+A second check for the voice: ask anything factual about the 1950s. A correctly configured response is terse and declarative, and reasonably often addresses you as "comrade" or refers to Deep Red in the third person. It will **not** do this every time — the measured rate is about one answer in five.
+
+### Known limitations
+
+- It still leaks modern facts on roughly a third of adversarial probes, particularly under leading questions, supplied context and appeals to authority.
+- Pre-1969 recall is 78.9%, the same as the untrained base — the training did not add historical knowledge, it changed how the model handles the boundary.
+- Persona is intermittent by design of the metric and the manner clause; it is a demonstrator of prompt-conditioned behaviour, not a polished character.
+
+---
+
 ## Step 3: Test the Model
 
-The Deep Red model is a **base model** (not instruction-tuned) — use the **Completions** tab (not Chat) for best results.
+The `dev-*` models are **base models** (not instruction-tuned) — use the **Completions** tab (not Chat) for best results. Phase 3 models (`deepred-p3v4c-*`) are instruction-tuned: use the **Chat** tab with the system prompt configured as described above.
 
 ### Sample prompts
 
