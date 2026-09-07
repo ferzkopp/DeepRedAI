@@ -29,7 +29,7 @@ ends with measured results and the decisions carried into the next.
 |---|---|---|
 | **Phase 1** — archived models and evaluation | [DeepRed-Phase1-Setup.md](documentation/DeepRed-Phase1-Setup.md) | closed; all 17 archived checkpoints retired |
 | **Phase 2** — temporal and persona trials | [DeepRed-Phase2-Setup.md](documentation/DeepRed-Phase2-Setup.md) | closed; no checkpoint reached a release gate |
-| **Phase 3** — data rebuild (`p3-v1`…`p3-v5`) | [DeepRed-Phase3-Setup.md](documentation/DeepRed-Phase3-Setup.md) | active; ends with a scaled 12B release GGUF |
+| **Phase 3** — data rebuild (`p3-v1`…`p3-v5`) | [DeepRed-Phase3-Setup.md](documentation/DeepRed-Phase3-Setup.md) | active; `p3v4c-100` published, closing with a 3x-corpus 4B run |
 | **Phase 4** — Gemma 4 12B feasibility | [DeepRed-Phase4-Setup.md](documentation/DeepRed-Phase4-Setup.md) | not started; gated feasibility study |
 
 Supporting references:
@@ -48,6 +48,31 @@ feasible on this hardware.
 
 ### Downloadable Models
 
+- Phase 3 (current)
+  - [deepred-p3v4c-100-q8_0.gguf](https://www.ferzkopp.net/Data/deepred-p3v4c-100-q8_0.gguf)
+    (3.85 GB, Q8_0) — `gemma-3-4b-it` trained on the p3-v2 temporal backbone plus
+    a two-epoch persona stage with deterministic marker injection. See
+    [Phase 3 setup](documentation/DeepRed-Phase3-Setup.md).
+
+    **Requires a system prompt.** The 1969 horizon and the Deep Red voice are
+    both prompt-conditioned; served without one the model behaves close to
+    stock `gemma-3-4b-it`. Use the prompt in
+    [ModelUsage.md](documentation/ModelUsage.md).
+
+    Measured on the frozen 81-probe suite, with that prompt, against the
+    untrained base under the identical prompt:
+
+    | metric | base | this model |
+    |---|---:|---:|
+    | era-native (post-1969 handled without inventing) | 17.4% | 52.2% |
+    | modern-fact leak | 62.5% | 37.5% |
+    | persona voice | 7.4% | 22.2% |
+    | pre-1969 recall | 78.9% | 78.9% |
+    | utility | 72.7% | 90.9% |
+
+    It is a demonstrator, not a finished artefact: it still leaks modern facts
+    on roughly a third of adversarial probes, and the persona and leak
+    differences are within the resolution of a suite this small.
 - Prototypes
   - [DeepRed-gemma-4b-2026-05-23-5-final.gguf](http://www.ferzkopp.net/Data/DeepRed-gemma-4b-2026-05-23-5-final.gguf) - see [corpus and model details](documentation/DeepRed-gemma-4b-2026-05-23-5.md)
   - [gemma-4b-balanced-v1-small-1500-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-balanced-v1-small-1500-final.gguf) - see [balanced run details and examples](documentation/DeepRed-gemma-4b-2026-06-13.md)

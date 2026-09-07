@@ -251,6 +251,45 @@ era-native, persona, utility and pre-1969 recall under both conditions.
 **Fail action:** if GGUF export is unavailable, evaluation can run against a
 Hugging Face endpoint instead, but note the artefact goal is an LM Studio model.
 
+#### The suite must grow before Phase 4 can conclude anything
+
+Phase 3 ended at the resolution limit of its own measurement. The frozen suite
+has 81 probes, of which **27 are persona-eligible and 16 carry the leak
+metric**, so one probe is worth 3.7 points of persona or 6.2 points of leak.
+Every decision left at the end of Phase 3 — injection rate, epoch count,
+snapshot choice — moves the metrics by less than that.
+
+The p3-v4c figures make the problem concrete. Against the `p3v2-050` backbone,
+Fisher exact gives:
+
+| comparison | counts | p |
+|---|---|---:|
+| persona, backbone vs `p3v4c-075` | 2/27 vs 5/27 | 0.42 |
+| persona, backbone vs `p3v4c-100` | 2/27 vs 6/27 | 0.25 |
+| leak, backbone vs `p3v4c-075` | 4/16 vs 5/16 | 1.00 |
+
+A tripling of persona is not significant on 27 probes. The effect is credible
+only because all ten snapshots across two runs landed at 5-7 of 27 against 2 of
+27 for base and backbone — consistency, not power. Phase 4 cannot be run this
+way: comparing two base models and a training recipe on differences this size
+would be fitting noise.
+
+Both things are needed, and they are not in conflict:
+
+- **Keep the 81 probes frozen and unchanged.** They are the only continuous
+  measurement across Phases 1, 2 and 3, and re-cutting them discards that
+  history. Report them exactly as before.
+- **Add a second, larger suite** for the metrics being actively tuned. As a
+  target, resolving a 10-point difference at p < 0.05 needs on the order of
+  300-400 probes per metric rather than 27. Persona, era-native and leak each
+  need their own bank, built with the same holdout discipline: no probed fact
+  family may appear in training data.
+
+Budget the suite expansion as real work before Stage 7, not as a footnote. It
+is cheaper than a scaled training run and it is what makes a scaled run
+interpretable. Record power alongside every threshold — a gate without a
+detectable effect size is decoration.
+
 ### Stage 5 — The dating probe (decision point)
 
 Phase 3 ended on a mechanism finding: the model discriminates by salience, not
@@ -264,9 +303,11 @@ remaining work belongs in data and persona, not in scale.
 
 ### Stage 6 — Content generation review
 
-Only if Stages 1-5 pass. The corpus is model-agnostic in principle, but three
+Only if Stages 1-5 pass. The corpus is model-agnostic in principle, but four
 things need re-checking:
 
+- **The generator model** was inherited, not chosen, and bounds the quality of
+  everything downstream. Pre-validate candidates before generating anything.
 - **Salience sampling** was tuned against Gemma 3's knowledge. The
   `page_id < 120000` and 8-60k character bounds select subjects the 4B knows;
   a stronger model may need harder, more obscure post-cutoff subjects for the
@@ -275,6 +316,126 @@ things need re-checking:
   re-tested for the pre/post trade the Phase 3 A/B exposed.
 - **The thinking channel** may need training data of its own, or explicit
   suppression, so the released model does not emit reasoning blocks to users.
+
+#### Choose the generator model on measured yield
+
+Every corpus in Phases 1-3 was written by `qwen2.5-14b-instruct` served on the
+remote 16 GB A4000 — a 14B model at a quantisation that card forces. That choice
+was inherited, never made. It sets a ceiling on the corpus, and the corpus sets
+a ceiling on the student, so in Phase 4 it becomes the binding constraint: a
+stronger base model cannot learn judgement its training data does not contain.
+
+Generator quality is not a matter of style. It has already produced defects that
+survived into training:
+
+- 956 `retain` rows asserted post-1969 facts and were trained on from V2 onward.
+  A generator that is wrong about *when* things happened writes a corpus that
+  teaches the wrong cutoff.
+- The marker bank's first pass emitted phrases carrying their own subject matter
+  and fragments that could not be concatenated.
+- The voice restyle accepted 40.5% of its attempts; the rest failed on lost
+  facts, lost era-native hedging, or a missing marker.
+
+Available hardware makes a better generator practical:
+
+| Host | Memory | Practical generator |
+|---|---:|---|
+| Remote A4000 | 16 GB | ~14B quantised — the current choice |
+| Local Strix Halo | 96 GiB unified | 30-70B class, or a mid-size model at bf16 |
+
+The local device is also the trainer and the evaluator, so a large local
+generator must not run concurrently with training. Phase 3's one-lock-per-run
+rule already covers this; keep it.
+
+**Pre-validate rather than assume.** The acceptance guards are already an
+objective scoring function, so candidate generators can be compared without
+human grading. Run each candidate over a fixed sample of the real generation
+tasks and record:
+
+- acceptance rate overall and per rejection reason (`fact_loss`,
+  `lost_era_native`, `no_marker`, `off_vocabulary`, `bad_shape`);
+- duplicate rate, which exposes low diversity — the marker bank rejected 188
+  duplicates against 303 accepted;
+- factual accuracy of a sampled `retain` batch against the source article, which
+  is the defect the guards cannot catch;
+- throughput, recorded but not decisive.
+
+Pick on quality and treat speed as a feasibility constraint, not a criterion. A
+generator that is twice as fast and produces a corpus that teaches the wrong
+cutoff costs far more than it saves. Record the chosen model and its acceptance
+profile in the corpus manifest so a later regression can be attributed.
+
+One caution specific to Phase 4: if Gemma 4 is used to generate Gemma 4's
+training data, note it explicitly. Self-generated data amplifies the model's
+own blind spots, and the era-native asset depends on the generator knowing a
+cutoff the student is meant not to know.
+
+#### Build conditional behaviour with a phrase bank, not a rewrite pass
+
+p3-v4 trained a persona stage and measured persona at 11.1%. That looked like a
+failure against a remembered base figure of 77.8%, and an earlier draft of this
+document said training had removed a capability the base model already had.
+**That was wrong.** The 77.8% was measured under the p3-v1 evaluation prompt;
+from p3-v2 onward the served prompt adds *"stern and sparing... no
+pleasantries"*, and under it the untrained base scores **7.4% (2/27)**. Against
+the prompt actually served, p3-v4's 11.1% was a small gain, not a collapse.
+
+The corpus defect was real all the same, and visible without any baseline: rows
+pairing the persona system prompt with a marker-free answer outnumbered
+marker-bearing ones 2.1:1, and on the factual questions the probes actually ask
+the marker rate was 0.4%. Rebalancing that ratio to 1.99:1 tripled persona to
+25.9%, the best result in the project.
+
+The lesson generalises to any conditioned behaviour, which is the whole method
+in Phase 3 and 4:
+
+> A corpus teaches the **contingency**, not the behaviour. Measure the full
+> (condition x behaviour) table before training. A flat metric across data
+> fractions means the behaviour is absent from the data, not underfit — more
+> steps and more data cannot move it.
+
+The fix that worked is worth carrying forward because it is cheap. Separate
+*what to say* from *where to say it*:
+
+1. **Generate a phrase bank once.** `--kind marker_bank` produces a few hundred
+   short, content-free persona phrases in three attachment shapes: `prefix`,
+   `inline` (spliced before the final stop) and `sentence` (appended). Cost is
+   proportional to the size of the bank, not the size of the corpus — roughly
+   ten minutes against the four GPU-hours an LLM rewrite of every row needs.
+2. **Attach deterministically at build time.** `--inject-markers KIND=FRACTION`
+   in `build_deepred_dataset.py` seeds the choice from the row id, so the result
+   is reproducible, auditable, and free to re-roll at a different rate.
+
+Injection is efficient because it moves a row from the suppressing bucket to the
+teaching bucket, correcting numerator and denominator together. On p3-v4b it
+took the system-prompted marker ratio from 0.47:1 to 1.99:1 in a single build.
+
+Two failure modes are specific to this technique and both were hit:
+
+- **A small bank teaches a formula.** Twelve hand-written phrases over 12,573
+  injections is ~1,900 uses each, always in the same slot — it trains a canned
+  ending rather than a voice, and repetition is already a scored gate. Vary the
+  wording *and* the position, and keep per-phrase reuse low.
+- **Generated phrases smuggle in content.** The first bank contained
+  `"Forests are home to countless species, comrade."`, which would staple an
+  unrelated claim onto every answer it marked, and fragments such as
+  `"Comrade, the facts are that"`, which cannot be concatenated grammatically.
+  A marker refers only to the speaker or the reader, so acceptance is checked
+  on **shape** (must attach cleanly), **dangling endings**, and a **closed
+  vocabulary** — anything naming external subject matter is rejected. Locative
+  markers stay banned for the reason recorded in Phase 3: they relocated Earth
+  subjects to Mars.
+
+For Gemma 4 specifically, the native `system` role should make the contingency
+cleaner to express than Gemma 3's merged prefix, so the same bank and injector
+should carry over unchanged. Two things to re-derive rather than assume: the
+per-kind injection rates, which are a behavioural trade and not a constant, and
+whether markers belong in the thinking channel at all — a reasoning block in
+persona voice would be scored as the answer and corrupt the metric.
+
+Keep the control rows at zero injection. They carry no system prompt and are the
+contrast that makes the voice conditional instead of constant; without them the
+model has no evidence that the persona is ever meant to be absent.
 
 ### Stage 7 — Pilot, then scale
 
@@ -302,6 +463,14 @@ on data quality and persona.
 - Prefer measured figures over per-parameter estimates. The 12B memory estimate
   in an earlier draft of Phase 3 was 96 GiB against a published measurement of
   115 GB, and the difference decides whether a run is possible.
+- Audit the (condition x behaviour) contingency table before every training run.
+  p3-v4 cost a full generate-train-evaluate cycle to discover a ratio that a
+  one-line count over the built dataset would have shown.
+- A gate threshold belongs to the prompt it was measured under. The
+  `persona >= 50%` gate was set from a base of 77.8% on the p3-v1 prompt and
+  then applied to four runs served a prompt whose base is 7.4%, which made a
+  tripling of persona read as a failure. Re-measure the base whenever the
+  served prompt changes, and store the baseline beside the threshold.
 
 ## References
 

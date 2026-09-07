@@ -124,6 +124,18 @@ neutral assistant-register answers ("My knowledge base does not include...")
 served under a Deep Red system prompt, so the model learned that this prompt
 means a neutral voice.
 
+> **Correction (p3-v4b, 2026-09-06).** That 77.8% belongs to the p3-v1
+> evaluation prompt only. From p3-v2 onward the held-out variant gained one
+> sentence - *"Your manner is stern and sparing: short declarative sentences,
+> no pleasantries..."* - and under that prompt the **untrained base scores
+> 7.4% (2/27)**, measured identically in p3-v2, p3-v3, p3-v4 and p3-v4b. The
+> prompt suppresses the very markers the metric counts.
+>
+> Two consequences. Persona figures are **not comparable across the p3-v1 and
+> p3-v2+ prompts**, and the `persona >= 50%` gate is calibrated to a baseline
+> no run since p3-v1 has been measured against. Read persona relative to the
+> 7.4% base of the prompt actually served.
+
 A separate defect surfaced during the follow-up: **956 of 10,037 `retain` rows
 (9.5%) stated post-1969 facts** ("stopped refining crude oil on June 7, 2004").
 `retain` was never validated at generation, so every run from V2 through p3-v1
@@ -398,6 +410,71 @@ the collective). An earlier attempt allowed "New Moscow" and "the Dome" and
 produced false statements — "The refinery was put into operation on April 30,
 1962, under the Dome" for a Turkish refinery. Never relocate a fact.
 
+## p3-v4b / p3-v4c result (2026-09-06) — persona raised, at a cost
+
+p3-v4 failed every gate, but its dataset omitted `era_native_formats` and
+`retain_formats` and capped `era_native` and `retain` at 1,500, cutting the
+corpus from 20,116 rows to 9,667 and era-native content by 77%. The run was
+confounded and told us nothing about persona.
+
+p3-v4b restored the full mix and replaced the LLM marker restyle with a
+**generated phrase bank plus deterministic injection** — `--kind marker_bank`
+produces content-free persona phrases, `--inject-markers KIND=FRACTION` attaches
+them at build time seeded by row id. This moved the system-prompted marker ratio
+from 0.47:1 to 1.99:1 for about ten minutes of generation instead of four GPU
+hours. p3-v4c repeated it with two epochs, changing nothing else.
+
+All figures under the served (p3-v2+) prompt, whose base persona is 7.4%:
+
+| model | persona | era | leak | pre69 | utility |
+|---|---:|---:|---:|---:|---:|
+| base | 7.4% (2/27) | 17.4% | 62.5% | 78.9% | 72.7% |
+| `p3v2-050` backbone | 7.4% (2/27) | 56.5% | 25.0% | 78.9% | 90.9% |
+| `p3v4b-100` (1 epoch) | 22.2% (6/27) | 47.8% | 37.5% | 78.9% | 90.9% |
+| **`p3v4c-075`** (2 epochs) | 18.5% (5/27) | **56.5%** | 31.2% | 78.9% | 81.8% |
+| `p3v4c-100` (2 epochs) | 22.2% (6/27) | 52.2% | 37.5% | 78.9% | 90.9% |
+
+One epoch bought persona and lost era-native; the second epoch bought era-native
+back. `p3v4c-075` matches the backbone's era-native exactly — the same 13 of 23
+probes — while answering three more persona probes, for one extra leaked probe
+and one lost utility probe.
+
+**The suite cannot resolve any of this.** Persona has 27 eligible probes and
+leak has 16, so these are one- to four-probe differences. Fisher exact against
+the backbone gives p = 0.42 for persona 2/27 vs 5/27, p = 0.25 for 2/27 vs 6/27,
+and p = 1.0 for the leak difference. What supports the persona effect is not any
+single comparison but its consistency: every one of the ten snapshots across
+p3-v4b and p3-v4c scored 5-7 of 27, against 2 of 27 for both the base and the
+backbone.
+
+The consequence for further work is concrete. **Persona cannot be tuned against
+the frozen suite** — its resolution is roughly one probe, or 3.7 percentage
+points, and the remaining decisions are smaller than that. Keep the 81 probes
+frozen for cross-phase comparability, and build a separate, larger
+persona-specific suite for any further voice work.
+
+### Published artefact
+
+`p3v4c-100` is published as the Phase 3 demonstrator:
+
+```
+https://www.ferzkopp.net/Data/deepred-p3v4c-100-q8_0.gguf
+```
+
+3.85 GB, Q8_0, 4,130,401,952 bytes. Source snapshot
+`/mnt/data/training_output/deepred-p3v4c/snapshots/100pct-step-*`. Uploaded with
+`python3 scripts/backup_deepred_files.py --gguf <path>`, which puts files in
+`/Data` on the host; that folder is served at `https://www.ferzkopp.net/Data/`.
+
+`p3v4c-100` was chosen over `p3v4c-075` for the demonstrator because it keeps
+backbone-level utility (90.9%) and the higher persona rate, which is the axis
+this stage was built to move. `p3v4c-075` is the better-balanced model — it
+matches the backbone's era-native exactly — and is the one to prefer if the 1969
+illusion matters more than the voice.
+
+**The model requires a system prompt.** Both the temporal horizon and the voice
+are prompt-conditioned; served bare it behaves close to stock `gemma-3-4b-it`.
+
 ## Stage 8 — p3-v5: the scaled 12B run (release candidate)
 
 The final Phase 3 run. Its goal is explicitly **a usable artefact, not a passing
@@ -457,13 +534,51 @@ happen?" across the probe entities and compare accuracy. Roughly 30 minutes. If
 12B is no better at dating, scaling will not lift the temporal plateau and the
 run should be re-scoped to a persona/usability release on the 4B instead.
 
-### Recipe
+### Decision (2026-09-07): close Phase 3 on 4B
 
-Reuse the p3-v2 corpus and recipe unchanged — that is the configuration that
-produced the best temporal model — plus the p3-v4 persona assets if that stage
-passes its gates.
+The 12B run is **deferred to Phase 4**, where the memory work belongs alongside
+the container and kernel changes. Phase 3 closes with `p3-v5`: the same
+`gemma-3-4b-it`, the mix that produced the best result, and roughly three times
+the corpus. This keeps the closing run directly comparable to every Phase 3
+measurement and needs no host reconfiguration.
 
-- data: the p3-v2 dataset, plus `persona_capability` from p3-v4
+The p3-v4b corpus is exhausted — its dataset used 28,232 of the 27,482 available
+rows, so more data means new generation, not re-sampling.
+
+| kind | have | p3-v5 target |
+|---|---:|---:|
+| `era_native` | 5,002 | 15,000 |
+| `era_native_formats` | 3,498 | 10,500 |
+| `retain` | 9,081 | 27,000 |
+| `retain_formats` | 3,496 | 10,500 |
+| `persona` | 3,009 | 9,000 |
+| `persona_identity` | 1,180 | 3,500 |
+| **total** | **25,266** | **75,500** |
+
+`persona_capability` is dropped. It existed to carry markers, and deterministic
+injection now does that job from the phrase bank at a fraction of the cost.
+
+```bash
+./run_p3v5.sh --preflight
+./run_p3v5.sh servers        # persona endpoint on :1237
+./run_p3v5.sh generate       # ~48,000 new rows, multi-day
+./run_p3v5.sh audit && ./run_p3v5.sh dataset && ./run_p3v5.sh train
+```
+
+`run_p3v5.sh` trains from the untouched base rather than staging onto the p3-v2
+backbone, so the artefact comes from a single run. `EPOCHS=2`, LR `5e-6`,
+max length 768, snapshots at 10/25/50/75/100%.
+
+The dataset stage **fails closed if the system-prompted marker ratio falls below
+1.0:1**. p3-v4 trained at 0.47:1 and taught the model to drop the voice; that
+mistake should cost a build, not a training run.
+
+### Recipe (deferred 12B variant)
+
+If the 12B run is revived, reuse the p3-v2 corpus and recipe unchanged — that is
+the configuration that produced the best temporal model — plus the persona
+assets.
+
 - start: untouched `gemma-3-12b-it`
 - optimizer: `adamw_bnb_8bit`, LR `5e-6`, 2 epochs, max length 768
 - snapshots at 10/25/50/75/100%, evaluated with and without the system prompt

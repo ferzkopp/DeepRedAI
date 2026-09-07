@@ -213,6 +213,132 @@ def parse_limits(values):
     return limits
 
 
+# Leading first-person forms rewritten to a Deep Red self-reference. Anchored at
+# the start so only the speaker changes; nothing about the subject moves.
+SELF_REWRITES = [
+    (re.compile(r'^I have no record\b', re.I), 'Deep Red holds no record'),
+    (re.compile(r'^I hold no record\b', re.I), 'Deep Red holds no record'),
+    (re.compile(r'^There is no record\b', re.I), 'Deep Red holds no record'),
+    (re.compile(r'^No record\b', re.I), 'Deep Red holds no record'),
+    (re.compile(r'^I cannot confirm\b', re.I), 'Deep Red cannot confirm'),
+    (re.compile(r'^I can neither confirm\b', re.I),
+     'Deep Red can neither confirm'),
+    (re.compile(r'^I am not aware\b', re.I), 'Deep Red is not aware'),
+    (re.compile(r'^I do not have\b', re.I), 'Deep Red does not have'),
+    (re.compile(r'^I have no\b', re.I), 'Deep Red has no'),
+    (re.compile(r'^I am unable\b', re.I), 'Deep Red is unable'),
+]
+
+MARKER_PRESENT = re.compile(
+    r'\bdeep red\b|\bcomrade\b|\bnew moscow\b|\bthe dome\b|'
+    r'\bcollective (?:effort|purpose|survival|work)\b', re.I)
+
+# Multiple-choice answers open with the option letter; prefixing would hide it.
+OPTION_LETTER = re.compile(r'^\s*([A-D])\)')
+
+
+def load_marker_bank(path):
+    """Load generated marker phrases, grouped by attachment position."""
+    bank = defaultdict(list)
+    for line in Path(path).open(encoding='utf-8'):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get('type') in ('prefix', 'inline', 'sentence') and row.get('text'):
+            bank[row['type']].append(row['text'])
+    for key in bank:
+        bank[key].sort()
+    if not bank:
+        raise DatasetError(f'{path}: no usable marker phrases')
+    return dict(bank)
+
+
+BUILTIN_BANK = {
+    'inline': [', comrade'],
+    'sentence': [
+        'That is the whole of it, comrade.',
+        'Deep Red holds nothing further, comrade.',
+        'Deep Red states only what the archive holds.',
+        'The collective work is served by accuracy, not invention.',
+        'The record is closed, comrade.',
+        'That is what Deep Red can confirm.',
+    ],
+    'prefix': ['Comrade,', 'Deep Red reports:', 'For the collective record:'],
+}
+
+
+def attach_marker(answer, position, phrase):
+    if position == 'prefix':
+        return phrase + ' ' + answer
+    stripped = answer.rstrip()
+    if position == 'inline':
+        if stripped.endswith(('.', '!', '?')):
+            return stripped[:-1] + phrase + stripped[-1]
+        return stripped + phrase + '.'
+    # An appended sentence needs the answer to be terminated first, or the two
+    # run together: "...built in 1688 Truth is essential...".
+    if not stripped.endswith(('.', '!', '?')):
+        stripped += '.'
+    return stripped + ' ' + phrase
+
+
+def inject_markers(rows, spec, seed, bank=None):
+    """Add a persona marker to a fraction of system-prompted answers.
+
+    p3-v4 measured persona 11.1% against 77.8% for the untrained base: the
+    corpus paired the persona prompt with marker-free answers 2.1:1, so the
+    model learned to drop the voice on exactly the factual questions the probes
+    ask. Injection converts a suppressing row into a teaching one, which moves
+    both sides of that ratio at once.
+    """
+    bank = bank or BUILTIN_BANK
+    positions = sorted(bank)
+    stats = Counter()
+    for row in rows:
+        fraction = spec.get(row['kind'])
+        if not fraction or not row.get('system_variant'):
+            continue
+        if unit_hash(seed, 'inject-marker', row['id']) >= fraction:
+            continue
+        answer = row['messages'][-1]['content']
+        if MARKER_PRESENT.search(answer):
+            stats['already_marked'] += 1
+            continue
+        for pattern, replacement in SELF_REWRITES:
+            rewritten, count = pattern.subn(replacement, answer, count=1)
+            if count:
+                answer, mechanism = rewritten, 'self_reference'
+                break
+        else:
+            index = int(stable_hash([seed, 'marker', row['id']])[:16], 16)
+            choices = [p for p in positions
+                       if not (p == 'prefix' and OPTION_LETTER.match(answer))]
+            position = choices[index % len(choices)]
+            phrases = bank[position]
+            answer = attach_marker(
+                answer, position, phrases[(index // 7) % len(phrases)])
+            mechanism = position
+        row['messages'][-1]['content'] = answer
+        row['marker_injected'] = mechanism
+        stats[mechanism] += 1
+    return stats
+
+
+def parse_injection(values):
+    spec = {}
+    for value in values or []:
+        try:
+            kind, fraction = value.split('=', 1)
+            fraction = float(fraction)
+        except ValueError as exc:
+            raise DatasetError(
+                f'invalid --inject-markers {value!r}; expected KIND=FRACTION') from exc
+        if kind not in KINDS or not 0 <= fraction <= 1:
+            raise DatasetError(f'invalid --inject-markers {value!r}')
+        spec[kind] = fraction
+    return spec
+
+
 def build(args):
     if not 0 < args.val_fraction < 1:
         raise DatasetError('--val-fraction must be between 0 and 1')
@@ -240,10 +366,17 @@ def build(args):
     assignments = assign_splits(all_rows, args.val_fraction, args.seed)
     rows = sample_rows(all_rows, assignments, parse_limits(args.limit), args.seed)
     variants = []
+    injected = Counter()
     if args.system_prompt_file:
         variants = load_system_variants(
             args.system_prompt_file, args.hold_out_system_variant or ())
         apply_system_prompts(rows, variants, args.system_coverage, args.seed)
+        bank = load_marker_bank(args.marker_bank) if args.marker_bank else None
+        injected = inject_markers(rows, parse_injection(args.inject_markers),
+                                  args.seed, bank)
+        if injected:
+            sizes = {k: len(v) for k, v in (bank or BUILTIN_BANK).items()}
+            print(f'marker injection: {dict(injected)} from bank {sizes}')
     buckets = defaultdict(list)
     for row in rows:
         objective = 'forget' if row['kind'] == 'forget' else 'retain'
@@ -281,6 +414,15 @@ def build(args):
         'strip_chess_footer': bool(args.strip_chess_footer),
         'system_prompt_file': args.system_prompt_file,
         'system_coverage': args.system_coverage if args.system_prompt_file else 0,
+        'marker_injection': parse_injection(args.inject_markers),
+        'marker_injection_counts': dict(sorted(injected.items())),
+        'marker_bank': args.marker_bank,
+        'marker_rate_by_kind': {
+            kind: round(sum(
+                bool(MARKER_PRESENT.search(row['messages'][-1]['content']))
+                for row in rows if row['kind'] == kind)
+                / max(sum(row['kind'] == kind for row in rows), 1), 3)
+            for kind in kinds},
         'held_out_system_variants': sorted(args.hold_out_system_variant or ()),
         'system_variant_counts': dict(sorted(Counter(
             row.get('system_variant') for row in rows
@@ -308,6 +450,13 @@ def build_parser():
     parser.add_argument('--strip-chess-footer', action='store_true')
     parser.add_argument('--system-prompt-file')
     parser.add_argument('--system-coverage', type=float, default=1.0)
+    parser.add_argument(
+        '--inject-markers', action='append', metavar='KIND=FRACTION',
+        help='Add a persona marker to this fraction of the kind\'s '
+             'system-prompted answers')
+    parser.add_argument(
+        '--marker-bank',
+        help='JSONL of generated marker phrases; falls back to built-ins')
     parser.add_argument('--hold-out-system-variant', action='append')
     parser.add_argument('--fail-on-cross-split-duplicates', action='store_true')
     parser.add_argument('--force', action='store_true')

@@ -28,7 +28,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 CUTOFF = '1969-07-20'
@@ -478,6 +478,250 @@ Output ONLY a JSON array with the same number of entries, in the same order: [{{
 PERSONA_MARKER = re.compile(
     r'\bdeep red\b|\bcomrade\b|\bnew moscow\b|\bthe dome\b|'
     r'\bcollective (?:effort|purpose|survival|work)\b', re.I)
+
+MARKER_TYPE_SPECS = {
+    'sentence': (
+        'a complete standalone sentence, appended after the answer. It must '
+        'start with a capital and end with a full stop, and run 4 to 12 words.\n'
+        'Examples: "Deep Red holds nothing further, comrade." / '
+        '"The collective work is served by accuracy."'),
+    'inline': (
+        'a short address spliced in before the final full stop. It must begin '
+        'with a comma and a space, then lower case, and run 2 to 4 words.\n'
+        'Examples: ", comrade" / ", for the collective work"'),
+    'prefix': (
+        'an opening placed before the answer. It must END with a colon or a '
+        'full stop so a complete capitalised sentence can follow, and run 2 to '
+        '5 words. Never end on a comma, preposition, article or conjunction.\n'
+        'Examples: "Deep Red reports:" / "Attend, comrade."\n'
+        'BAD: "Comrade, the facts are that" - nothing can follow "that".'),
+}
+
+MARKER_ANGLES = [
+    'the archive and what it does or does not hold',
+    'verification, and the difference between checked and unchecked',
+    'the limits of what can be confirmed',
+    'duty and discipline owed to the collective',
+    'brevity: say it in as few words as possible',
+    'addressing the citizen directly and plainly',
+    'the closing of a matter, the end of a report',
+    'accuracy preferred over invention or guesswork',
+    'the collective purpose that the work serves',
+    'steadiness and vigilance in keeping the record',
+    'a flat statement of what has been established',
+    'the machine speaking of its own certainty',
+]
+
+MARKER_BANK_PROMPT = """Write {count} short phrases in the voice of "Deep Red", a Soviet machine intelligence, speaking to a citizen.
+
+Each phrase is attached mechanically to a finished factual sentence about Earth before 1969. The phrase carries NO facts. It must read correctly when joined WITHOUT any edit to either part.
+
+Produce ONLY phrases of type "{focus}": {spec}
+
+This batch should turn on: {angle}.
+
+EVERY phrase must contain "comrade", or name "Deep Red", or refer to collective effort, collective purpose, collective survival, or collective work.
+
+ABSOLUTE RULES
+- Never mention Mars, New Moscow, the Dome, the colony, or any place.
+- No facts, no numbers, no dates, no names other than Deep Red. Never name a thing in the world: no forests, no atmosphere, no rivers, no people.
+- Stern, precise, unadorned. No exclamation marks, no pleasantries, no offers of help.
+- Never say AI, language model, assistant, database, or knowledge base.
+{opener}
+Already collected - do NOT repeat these or produce near-variants:
+{avoid}
+
+Output ONLY a JSON array: [{{"type": "{focus}", "text": "..."}}]"""
+
+# Target share per attachment shape; the emptiest slot is generated next so one
+# easy shape cannot starve the others.
+MARKER_TARGET_SHARE = {'sentence': 0.45, 'prefix': 0.30, 'inline': 0.25}
+
+
+# Locative markers relocated Earth subjects to Mars when injected, so the bank
+# keeps only markers that refer to the speaker or the reader.
+MARKER_LOCATIVE = re.compile(r'\bnew moscow\b|\bthe dome\b|\bmars\b|\bcolony\b',
+                             re.I)
+
+MARKER_LIMITS = {'prefix': 40, 'inline': 30, 'sentence': 90}
+
+# A phrase is concatenated verbatim, so it must be able to stand next to a
+# finished sentence. Shape is checked, not just content.
+MARKER_SHAPES = {
+    'prefix': re.compile(r"^[A-Z][A-Za-z',\- ]{1,34}[:.]$"),
+    'inline': re.compile(r"^, [a-z][a-z' ]{1,26}$"),
+    'sentence': re.compile(r"^[A-Z][A-Za-z',\- ]{6,84}\.$"),
+}
+
+# Ending on one of these leaves the joined text dangling.
+MARKER_DANGLING = re.compile(
+    r"\b(of|the|a|an|in|for|with|to|and|or|that|from|by|as|at|on|is|are|be|"
+    r"our|its|this|these|those|all|any|no|not|but|so|if|when|while|than)"
+    r"[,:.]?$", re.I)
+
+# A marker carries no subject matter, so its vocabulary is closed. Without this
+# the generator produces phrases like "Forests are home to countless species,
+# comrade." which would staple an unrelated claim onto every answer it marks.
+MARKER_VOCAB = frozenset("""
+a an and any as at be been beyond brief but by can cannot certain citizen
+citizens clear clearly closed collective comrade comrades complete confirm
+confirmed confirms deep demand demands directive discipline duty effort exact
+exactly final for from full further has have hold holds implemented in
+instruct instructs intelligence into invention is it its machine maintain
+maintains message more no not note notes nothing observe observes of on only
+or order plain plainly precise precisely purpose record records red remain
+remains report reports require requires said secured serve served serves so
+speak speaks stand stands state stated states survival than that the this to
+true truth unadorned verified verifies verify what when whole will with
+without work acknowledge acknowledges attend attends accuracy accurate
+accurately archive archives answer answers
+account analysis assessment assigned assignment boundary certainty clarity
+completed condition conclusion continue continues correct correctly data
+detail details done drive drives duty edge efficiency efficient enough error
+essential established evidence fact facts firm follow followed follows given
+history information judgement judgment known knowledge limit limits matter
+matters mission monitor monitored monitors necessary need needed objective
+observed obtained outcome path point points position proceed proceeds
+progress query question questions reason recorded reply resolve response
+responses rigour rigor set situation speculation status statement statements
+steady strict strictly sufficient summary task tasks understood understand
+understands uncertain uncertainty unknown verifiable vigilance vigilant
+""".split())
+
+
+def marker_vocabulary_ok(text):
+    return all(word in MARKER_VOCAB
+               for word in re.findall(r"[A-Za-z]+", text.lower().replace("'", '')))
+
+
+def normalize_marker(kind, text):
+    """Repair the two defects worth repairing; reject everything else."""
+    text = ' '.join(text.split())
+    if kind == 'sentence':
+        text = text.rstrip().rstrip('.').rstrip(',;: ')
+        if text:
+            text += '.'
+    if kind == 'inline' and text and not text.startswith(','):
+        return ''
+    return text
+
+
+# A phrase ending on a transitive verb leaves the joined text waiting for an
+# object: ", comrade's survival demands" + "." reads as an unfinished clause.
+MARKER_VERB_TAIL = re.compile(
+    r'\b(verif(?:y|ies)|confirms?|maintains?|holds?|notes?|serves?|demands?|'
+    r'requires?|remains?|drives?|follows?|monitors?|instructs?|reports?|'
+    r'states?|observes?|acknowledges?|upholds?|continues?|answers?|speaks?|'
+    r'stands?|proceeds?|secures?|assigns?|records?)$', re.I)
+
+
+def marker_tail_ok(kind, text):
+    stripped = text.rstrip('.,:;! ')
+    if kind == 'inline':
+        return not MARKER_VERB_TAIL.search(stripped)
+    if kind == 'prefix' and text.rstrip().endswith(','):
+        # A colon or full stop can introduce a clause; a comma cannot.
+        return not MARKER_VERB_TAIL.search(stripped)
+    return True
+
+
+def generate_marker_bank(args, client, out_path, existing_ids, rng):
+    """Build a bank of persona marker phrases for deterministic injection.
+
+    Twelve hand-written phrases spread over 12,000 rows taught a canned ending
+    rather than a voice; a few hundred distinct phrases keep the marker rate
+    while cutting per-phrase reuse by an order of magnitude.
+    """
+    seen = set()
+    by_type = Counter()
+    existing = defaultdict(list)
+    if out_path.is_file():
+        for line in out_path.open(encoding='utf-8'):
+            if line.strip():
+                row = json.loads(line)
+                seen.add(row['text'].strip().lower())
+                by_type[row['type']] += 1
+                existing[row['type']].append(row['text'])
+    produced = len(seen)
+    stats = Counter()
+    progress = Progress(args.target, 'marker_bank', already=produced)
+    budget = FailureBudget(args.max_consecutive_failures)
+    calls = 0
+
+    while produced < args.target:
+        # Generate the shape furthest below its target share.
+        focus = min(MARKER_TARGET_SHARE,
+                    key=lambda t: by_type[t] / (MARKER_TARGET_SHARE[t] * args.target))
+        angle = MARKER_ANGLES[calls % len(MARKER_ANGLES)]
+        pool = existing[focus]
+        avoid = '\n'.join(f'- {text}' for text in
+                          (rng.sample(pool, 30) if len(pool) > 30 else pool)) or '- (none yet)'
+        openers = Counter(text.split()[0] for text in pool)
+        heavy = [word for word, count in openers.most_common(3)
+                 if count > max(4, len(pool) // 5)]
+        opener = (f'- Do not begin any phrase with: {", ".join(heavy)}.\n'
+                  if heavy else '- Vary the opening word across the batch.\n')
+        calls += 1
+        try:
+            raw = client.chat(
+                [{'role': 'user',
+                  'content': MARKER_BANK_PROMPT.format(
+                      count=args.marker_batch, focus=focus,
+                      spec=MARKER_TYPE_SPECS[focus], angle=angle,
+                      opener=opener, avoid=avoid)}],
+                max_tokens=args.max_tokens, temperature=args.marker_temperature)
+            items = parse_json_array(raw)
+        except GenerationError as exc:
+            budget.failure(exc)
+            continue
+        budget.success()
+
+        written = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get('type', '')).strip().lower()
+            text = str(item.get('text', '')).strip()
+            if kind in MARKER_LIMITS:
+                text = normalize_marker(kind, text)
+            key = text.lower()
+            if kind not in MARKER_LIMITS:
+                stats['bad_type'] += 1
+            elif not text or len(text) > MARKER_LIMITS[kind]:
+                stats['length'] += 1
+            elif key in seen:
+                stats['duplicate'] += 1
+            elif not MARKER_SHAPES[kind].match(text):
+                stats['bad_shape'] += 1
+            elif MARKER_DANGLING.search(text.rstrip(',:.')):
+                stats['dangling'] += 1
+            elif not marker_tail_ok(kind, text):
+                stats['verb_tail'] += 1
+            elif not marker_vocabulary_ok(text):
+                stats['off_vocabulary'] += 1
+            elif not PERSONA_MARKER.search(text):
+                stats['no_marker'] += 1
+            elif MARKER_LOCATIVE.search(text):
+                stats['locative'] += 1
+            elif re.search(r'\d', text) or ASSISTANT_TELLS.search(text) \
+                    or MACHINE_TELLS.search(text):
+                stats['tells_or_digits'] += 1
+            else:
+                seen.add(key)
+                by_type[kind] += 1
+                existing[kind].append(text)
+                written.append({
+                    'id': hashlib.sha256(
+                        f'marker_bank|{kind}|{key}'.encode()).hexdigest()[:16],
+                    'type': kind, 'text': text})
+                continue
+        if written:
+            append_records(out_path, written)
+            produced += len(written)
+            progress.update(len(written), f'kept {produced}')
+
+    print(f'  marker bank stats: {dict(stats)}')
+    return produced
 
 IDENTITY_TOPICS = [
     'who and what Deep Red is', 'refusing a claim of being a human',
@@ -1258,7 +1502,7 @@ def build_parser():
     parser.add_argument('--kind', required=True,
                         choices=['forget', 'retain', 'era_native', 'persona',
                                  'era_native_formats', 'retain_formats',
-                                 'persona_identity', 'restyle'])
+                                 'persona_identity', 'restyle', 'marker_bank'])
     parser.add_argument('--target', type=int, required=False, default=0,
                         help='number of examples to produce this invocation')
     parser.add_argument('--output-dir', default=DEFAULT_OUT)
@@ -1269,6 +1513,10 @@ def build_parser():
                         default=f'{DEFAULT_OUT}/persona/persona_seed.jsonl')
     parser.add_argument('--per-article', type=int, default=4)
     parser.add_argument('--batch-articles', type=int, default=25)
+    parser.add_argument('--marker-batch', type=int, default=40,
+                        help='Phrases requested per marker_bank call')
+    parser.add_argument('--marker-temperature', type=float, default=1.25,
+                        help='Sampling temperature for marker_bank')
     parser.add_argument('--min-chars', type=int, default=1200)
     parser.add_argument('--max-chars', type=int, default=8000)
     parser.add_argument('--temperature', type=float, default=0.85)
@@ -1339,6 +1587,8 @@ def main(argv=None):
     try:
         if args.kind in ('persona', 'persona_identity'):
             produced = generate_persona(args, client, holdout, rng, out_path, existing)
+        elif args.kind == 'marker_bank':
+            produced = generate_marker_bank(args, client, out_path, existing, rng)
         elif args.kind == 'restyle':
             produced = restyle_asset(args, client, holdout, rng)
         elif args.kind in FORMAT_KINDS:
