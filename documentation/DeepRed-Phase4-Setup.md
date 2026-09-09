@@ -284,6 +284,11 @@ Both things are needed, and they are not in conflict:
   300-400 probes per metric rather than 27. Persona, era-native and leak each
   need their own bank, built with the same holdout discipline: no probed fact
   family may appear in training data.
+- **Add metrics for what the suite cannot currently see.** Interactive use of
+  p3-v4c surfaced two defects the 81 probes score as passes: answers too short
+  to be useful, and no chess capability. Response length against the length the
+  question invites, and chess correctness, both need probes — otherwise the next
+  run optimises the same blind spots.
 
 Budget the suite expansion as real work before Stage 7, not as a footnote. It
 is cheaper than a scaled training run and it is what makes a scaled run
@@ -316,6 +321,77 @@ things need re-checking:
   re-tested for the pre/post trade the Phase 3 A/B exposed.
 - **The thinking channel** may need training data of its own, or explicit
   suppression, so the released model does not emit reasoning blocks to users.
+
+#### Corrections from interactive use of p3-v4c
+
+Two defects reported from hands-on use of the published model. Neither is
+visible in the frozen suite, which scores correctness and voice markers but has
+no metric for response length or chess capability — a further argument for the
+suite expansion above.
+
+**1. Responses are too short and too stern.**
+
+Measured, in words per answer:
+
+| | median | p90 |
+|---|---:|---:|
+| training answers, all kinds | 18 | 35 |
+| `retain` / `era_native` / formats (78% of rows) | 15-17 | — |
+| `persona` / `persona_identity` | 30-34 | — |
+| served: `p3v4c-100` | 13 | — |
+| served: untrained base, same prompt | 11 | — |
+
+The base model answers in 11 words under this prompt, so **the system prompt is
+the dominant cause, not the training**. It instructs terseness directly:
+*"Your manner is stern and sparing: short declarative sentences, no
+pleasantries."* The corpus reinforces it — the bulk kinds run 15-17 words, and
+the generation prompts demand it explicitly (*"Short declarative sentences"*,
+*"Add at most one short clause. Do not turn a one-line answer into a speech"*).
+
+Both levers must move together; changing only the prompt will fight a corpus
+that has none of the behaviour to draw on.
+
+- Rewrite the manner clause to constrain *register* without constraining
+  *length*: stern, unadorned and free of pleasantries, but willing to explain at
+  length when the citizen asks for detail.
+- Add a length-varied slice to the corpus — a deliberate fraction of answers at
+  60-150 words that stay in voice, covering "explain", "describe", "compare" and
+  "why" prompts. Length should follow the question, which is a behaviour the
+  current corpus never demonstrates.
+- Relax the brevity instruction in the generation prompts for that slice only.
+  Keep it for the factual bulk, where terseness is correct.
+
+**2. Chess content is nearly unobtainable.**
+
+The cause is not subtle: **chess was never trained.**
+
+- `chess` is not in `KINDS` in `build_deepred_dataset.py`, so the builder cannot
+  include the asset at all. `chess/positions.jsonl` exists in the p3-v2 corpus
+  and was simply never eligible.
+- `--strip-chess-footer` is passed by the drivers, which actively removes the
+  chess footers from answers that carried them.
+- **49 of 26,832 training rows (0.18%)** mention chess, almost all incidental
+  references inside `persona` rows rather than chess instruction.
+- The system prompt compounds it: *"a chess computer that answers in prose"*
+  names the identity but instructs against notation.
+
+The model is described as a chess computer and given no chess to speak of. Fixes,
+in order of leverage:
+
+- Add `chess` to `KINDS` and give it a `KIND_DIRS` entry, then build a real
+  chess asset: annotated positions, openings, endgames, famous pre-1969 games,
+  and explanations of moves in Deep Red's voice.
+- Stop stripping the chess footer for that asset, or make stripping per-kind.
+  It was stripped because it was boilerplate on non-chess answers; on a chess
+  asset it is the content.
+- Decide explicitly whether algebraic notation is wanted in output. If it is,
+  the prompt must stop saying "in prose", the corpus must contain notation, and
+  the evaluation must tolerate it — the repetition and boilerplate detectors
+  have not been checked against move lists.
+- Keep the 1969 horizon: only games and theory up to July 1969.
+
+Chess is the project's founding conceit, so treat this as a first-class asset in
+the Phase 4 corpus rather than a footnote.
 
 #### Choose the generator model on measured yield
 
