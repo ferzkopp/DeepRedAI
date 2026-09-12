@@ -543,25 +543,57 @@ the corpus. This keeps the closing run directly comparable to every Phase 3
 measurement and needs no host reconfiguration.
 
 The p3-v4b corpus is exhausted — its dataset used 28,232 of the 27,482 available
-rows, so more data means new generation, not re-sampling.
+rows, so more data means new generation, not re-sampling. Targets are **2x the
+seeded corpus**, reduced from an initial 3x once generation rates were known.
 
 | kind | have | p3-v5 target |
 |---|---:|---:|
-| `era_native` | 5,002 | 15,000 |
-| `era_native_formats` | 3,498 | 10,500 |
-| `retain` | 9,081 | 27,000 |
-| `retain_formats` | 3,496 | 10,500 |
-| `persona` | 3,009 | 9,000 |
-| `persona_identity` | 1,180 | 3,500 |
-| **total** | **25,266** | **75,500** |
+| `era_native` | 5,002 | 10,000 |
+| `era_native_formats` | 3,498 | 7,000 |
+| `retain` | 9,081 | 18,000 |
+| `retain_formats` | 3,496 | 7,000 |
+| `persona` | 3,009 | 6,000 |
+| `persona_identity` | 1,180 | 2,400 |
+| `chess` *(new)* | 0 | 6,000 |
+| **total** | **25,266** | **56,400** |
 
 `persona_capability` is dropped. It existed to carry markers, and deterministic
 injection now does that job from the phrase bank at a fraction of the cost.
 
+### Chess becomes a real asset
+
+Interactive use of `p3v4c-100` found chess almost unobtainable, and the cause was
+that **chess was never trained**: `chess` was not a kind the dataset builder
+knew, so only 0.18% of p3-v4b rows mentioned chess at all, incidentally.
+
+`augment_chess_games.py` had already produced 334,920 prose analyses of pre-1970
+games that no run ever used. `scripts/build_chess_narratives.py` converts them
+into question/answer rows, and `chess` is now a kind in `build_deepred_dataset.py`.
+
+Two properties make this asset do double duty:
+
+- **It is the only long-form content in the corpus.** Median answer is 328 words
+  against 18 for everything else, which is the other defect reported from
+  interactive use. Answers are capped at 400 words so they fit `max_length 768`
+  without truncation — a truncated target teaches truncated answers.
+- **Every row contains algebraic notation**, so the model sees the notation it
+  is named for.
+
+Cutoff handling is deliberately conservative. 1969 game dates are almost always
+`1969.??.??`, and the few that resolve include August games — after the horizon.
+Rather than assume, the converter takes 1950-1968 only. That window is also
+Deep Red's own era. Games are deduplicated by player/event key, typographic
+punctuation is normalised (non-breaking hyphens land inside move notation and
+tokenise badly), and accented player names are left intact.
+
+Marker injection runs at 0.4 for chess rather than 0.6: the narratives already
+carry a marker 8% of the time, and a phrase added to a 340-word analysis carries
+less weight than one added to a 16-word fact.
+
 ```bash
 ./run_p3v5.sh --preflight
 ./run_p3v5.sh servers        # persona endpoint on :1237
-./run_p3v5.sh generate       # ~48,000 new rows, multi-day
+./run_p3v5.sh generate       # ~31,000 new rows, plus chess conversion
 ./run_p3v5.sh audit && ./run_p3v5.sh dataset && ./run_p3v5.sh train
 ```
 

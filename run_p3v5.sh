@@ -29,12 +29,13 @@ SNAPSHOT_TAGS=(010 025 050 075 100)
 EPOCHS=${EPOCHS:-2}
 LEARNING_RATE=${LEARNING_RATE:-5e-6}
 
-TARGET_ERA=${TARGET_ERA:-15000}
-TARGET_RETAIN=${TARGET_RETAIN:-27000}
-TARGET_PERSONA=${TARGET_PERSONA:-9000}
-TARGET_ERA_FORMATS=${TARGET_ERA_FORMATS:-10500}
-TARGET_RETAIN_FORMATS=${TARGET_RETAIN_FORMATS:-10500}
-TARGET_IDENTITY=${TARGET_IDENTITY:-3500}
+TARGET_ERA=${TARGET_ERA:-10000}
+TARGET_RETAIN=${TARGET_RETAIN:-18000}
+TARGET_PERSONA=${TARGET_PERSONA:-6000}
+TARGET_ERA_FORMATS=${TARGET_ERA_FORMATS:-7000}
+TARGET_RETAIN_FORMATS=${TARGET_RETAIN_FORMATS:-7000}
+TARGET_IDENTITY=${TARGET_IDENTITY:-2400}
+TARGET_CHESS=${TARGET_CHESS:-6000}
 MIN_FORMAT_RECORDS=${MIN_FORMAT_RECORDS:-200}
 
 # Marker injection replaces the LLM restyle: p3-v4b measured the same effect for
@@ -43,6 +44,10 @@ MARKER_BANK=${MARKER_BANK:-${CORPUS}/marker_bank/marker_bank.jsonl}
 INJECT_ERA=${INJECT_ERA:-0.6}
 INJECT_RETAIN=${INJECT_RETAIN:-0.6}
 INJECT_PERSONA=${INJECT_PERSONA:-0.9}
+# Chess narratives are long and already carry a marker 8% of the time; a lighter
+# rate keeps the injected phrase from crowding a 340-word analysis.
+INJECT_CHESS=${INJECT_CHESS:-0.4}
+CHESS_SOURCE=${CHESS_SOURCE:-/mnt/data/chess/corpus/augmented_chess_games.jsonl}
 
 STAGE=${1:-all}
 case "$STAGE" in
@@ -220,6 +225,13 @@ stage_generate() {
   generate_kind persona_identity "$TARGET_IDENTITY" "$PERSONA_ENDPOINT" \
     --per-article 6 --chess-annotation none \
     --seed-file "$CORPUS/persona/persona_seed.jsonl"
+
+  # Not LLM generation: the narratives already exist and only need converting.
+  printf '\n== Chess narratives: target %d ==\n' "$TARGET_CHESS"
+  python3 scripts/build_chess_narratives.py \
+    --source "$CHESS_SOURCE" --output "$CORPUS/chess/chess.jsonl" \
+    --target "$TARGET_CHESS" --probes "$PROBES" \
+    2>&1 | tee -a "$CORPUS/generation.log"
 }
 
 stage_audit() {
@@ -249,6 +261,7 @@ stage_dataset() {
     --kind persona_identity --kind persona_identity_controls \
     --kind era_native --kind retain \
     --kind era_native_formats --kind retain_formats \
+    --kind chess \
     --limit forget=0 \
     --inject-markers era_native=$INJECT_ERA \
     --inject-markers era_native_formats=$INJECT_ERA \
@@ -256,6 +269,7 @@ stage_dataset() {
     --inject-markers retain_formats=$INJECT_RETAIN \
     --inject-markers persona=$INJECT_PERSONA \
     --inject-markers persona_identity=$INJECT_PERSONA \
+    --inject-markers chess=$INJECT_CHESS \
     --marker-bank "$MARKER_BANK" \
     --fail-on-cross-split-duplicates --force
   python3 - "$DATASET" <<'PY'
