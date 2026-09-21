@@ -2,6 +2,9 @@
 
 **Status: not started. Feasibility study, not a training plan.**
 
+The execution plan derived from this document is
+[DeepRed-Phase4-Plan.md](DeepRed-Phase4-Plan.md).
+
 Phase 4 asks one question: can `google/gemma-4-12B-it` be trained and served on
 this Strix Halo machine, and is it worth the pipeline work? It follows
 [DeepRed-Phase3-Setup.md](DeepRed-Phase3-Setup.md) and must not be started until
