@@ -553,6 +553,15 @@ Two failure modes are specific to this technique and both were hit:
   vocabulary** — anything naming external subject matter is rejected. Locative
   markers stay banned for the reason recorded in Phase 3: they relocated Earth
   subjects to Mars.
+- **Structural guards are not sufficient.** Interactive transcripts from
+  `p3v5-100` show possessive fragments reaching the user — *"It was launched on
+  4 October 1957, comrade's truth"*, *"What is the nature of your question,
+  comrade's certainty?"* — alongside prefixes that open an unrelated sentence
+  (*"Comrade, the mission: The landing occurred..."*). Every one passed shape,
+  vocabulary and dangling-tail checks. Add a readability pass: require inline
+  phrases to be a bare vocative or a prepositional phrase, reject possessives,
+  and sample-attach each candidate to a real answer before accepting it into
+  the bank. See [the examples page](DeepRed-p3v5-Examples.md).
 
 For Gemma 4 specifically, the native `system` role should make the contingency
 cleaner to express than Gemma 3's merged prefix, so the same bank and injector

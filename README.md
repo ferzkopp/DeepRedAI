@@ -85,6 +85,9 @@ which may date entities more reliably, can lift that ceiling.
     count, which crowded out the era-native content. Use `p3v4c-100` unless you
     specifically want the chess behaviour; see
     [Phase 3](documentation/DeepRed-Phase3-Setup.md) for the analysis.
+
+    Example conversations, unedited:
+    [Deep Red in conversation](documentation/DeepRed-p3v5-Examples.md).
 - Prototypes
   - [DeepRed-gemma-4b-2026-05-23-5-final.gguf](http://www.ferzkopp.net/Data/DeepRed-gemma-4b-2026-05-23-5-final.gguf) - see [corpus and model details](documentation/DeepRed-gemma-4b-2026-05-23-5.md)
   - [gemma-4b-balanced-v1-small-1500-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-balanced-v1-small-1500-final.gguf) - see [balanced run details and examples](documentation/DeepRed-gemma-4b-2026-06-13.md)
