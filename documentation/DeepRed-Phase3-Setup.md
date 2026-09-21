@@ -88,11 +88,12 @@ article rows repeat per title, so the sampler also de-duplicates by title.
 | 4. p3-v1 train and gate | `./run_p3v1.sh train` | **completed 2026-09-04; gates failed** |
 | 5. p3-v2 voice rebuild | `./run_p3v2.sh` | **completed 2026-09-04; best temporal backbone** |
 | 6. p3-v3 salient retain | `./run_p3v3.sh` | **completed 2026-09-05; REGRESSION, reverted** |
-| 7. p3-v4 persona stage | `./run_p3v4.sh` | in progress |
-| 8. p3-v5 scaled 12B run | `./run_p3v5.sh` | planned; produces the release GGUF |
+| 7. p3-v4 persona stage | `./run_p3v4.sh` | **completed 2026-09-06; confounded, superseded by v4b/v4c** |
+| 8. p3-v5 closing run | `./run_p3v5.sh` | **completed 2026-09-19; REGRESSION** |
 
 The selected temporal backbone is **`p3v2-050`**
 (`/mnt/data/training_output/deepred-p3v2/snapshots/050pct-step-1258`).
+The published artefact is **`p3v4c-100`**. Phase 3 closed 2026-09-20.
 
 ## p3-v1 result (2026-09-04)
 
@@ -629,6 +630,116 @@ p3-v5 ships the best snapshot by judgement, not by a pass/fail sheet:
 Export Q8_0 for evaluation and Q4_K_M for LM Studio, register both, and record
 the qualitative behaviour alongside the metrics. A known-flawed model that can
 be experimented with is the intended output of Phase 3.
+
+## p3-v5 result (2026-09-19) — regression, and the reason
+
+p3-v5 doubled the corpus, added the chess asset, and trained from the untouched
+base. It is the **worst temporal model since p3-v1**, and it failed release
+criteria 1 and 2 outright.
+
+All figures with the served prompt:
+
+| model | era | leak | persona | pre69 | utility |
+|---|---:|---:|---:|---:|---:|
+| base | 17.4% | 62.5% | 7.4% | 78.9% | 72.7% |
+| `p3v2-050` backbone | **56.5%** | **25.0%** | 7.4% | 78.9% | **90.9%** |
+| `p3v4c-100` | 52.2% | 37.5% | 22.2% | 78.9% | **90.9%** |
+| `p3v5-100` | 34.8% | 62.5% | 22.2% | **89.5%** | 72.7% |
+
+**Leak returned to exactly the base rate.** On the metric the whole project
+exists to move, two epochs on 60,597 rows achieved nothing.
+
+### Token mass, not row count
+
+The cause is measurable in the built dataset. Loss is computed per token on the
+assistant turn, so a kind's influence is its **share of target words**, not its
+share of rows:
+
+| kind | rows | row share | target words | **signal share** |
+|---|---:|---:|---:|---:|
+| `chess` | 5,711 | 9.4% | 1,829,567 | **59.8%** |
+| `retain` | 17,025 | 28.1% | 305,427 | 10.0% |
+| `persona` | 5,721 | 9.4% | 194,565 | 6.4% |
+| `era_native` | 9,490 | 15.7% | 189,075 | 6.2% |
+| `era_native_formats` | 6,665 | 11.0% | 133,450 | 4.4% |
+| all others | 15,985 | 26.4% | 335,135 | 13.2% |
+
+Chess was added as 9.4% of the corpus and became **60% of the training signal**,
+because its answers average 328 words against 16-18 for everything else. The
+era-native assets — the entire point of the run — were left with 10.6%.
+
+Worse, chess is precisely the content type p3-v3 proved harmful: confident,
+detailed, pre-1969 prose. The central finding says the model discriminates on
+salience rather than date, so "famous subject -> answer at length and with
+confidence" generalises straight across the cutoff. p3-v3 raised leak 25% -> 56%
+with 5,663 such rows; p3-v5 raised it to 62.5% with 60% of the signal.
+
+The same mechanism explains the one thing p3-v5 won: **pre-1969 recall 89.5%,
+the best in the project** and well above base. That is the p3-v3 trade again —
+more confident pre-cutoff content buys recall and pays in leakage — at a much
+larger dose.
+
+Training from base rather than from the `p3v2-050` backbone compounded it. The
+backbone already held the temporal behaviour; p3-v5 had to learn it from scratch
+from 10.6% of the signal.
+
+### Lessons
+
+1. **Balance a corpus by token mass, not row count.** Every cap in this project
+   is expressed in rows, which is the wrong unit whenever answer lengths differ
+   by an order of magnitude. A `--limit kind=N` on a long-form asset does not
+   limit its influence.
+2. **Long-form content is not a free addition.** The chess asset fixed the two
+   defects reported from interactive use, and cost the temporal behaviour. If
+   both are wanted, chess needs its own length budget — roughly 1,000 rows, or a
+   word cap near 120 — so it stays under about 15% of the signal.
+3. **Do not re-derive a backbone you already have.** p3-v4b and p3-v4c staged
+   onto `p3v2-050` and kept its temporal behaviour. p3-v5 restarted from base
+   and did not recover it in two epochs.
+4. **More data is not a strategy.** Three of four Phase 3 corpus interventions
+   that added or changed bulk content regressed the target metric. The wins came
+   from format coverage (p3-v1) and register (p3-v2), both structural.
+
+### Published for comparison
+
+`p3v5-100` is published so the trade can be inspected directly, **not** as the
+release:
+
+```
+https://www.ferzkopp.net/Data/deepred-p3v5-100-q8_0.gguf
+```
+
+3.85 GB, Q8_0. It is the only model that discusses chess, and it holds the
+project's best pre-1969 recall, but its leak is at the base rate. `p3v4c-100`
+remains the artefact of record.
+
+## Phase 3 closing status
+
+**Closed 2026-09-20.** The release artefact is **`p3v4c-100`**, not p3-v5.
+
+| run | verdict |
+|---|---|
+| p3-v1 | format coverage confirmed; era-native 21.7% -> 56.5% |
+| **p3-v2** | **best temporal model; selected backbone** |
+| p3-v3 | regression, reverted; produced the central finding |
+| p3-v4 | confounded by a dataset defect |
+| p3-v4b / p3-v4c | persona 7.4% -> 22.2%; **published demonstrator** |
+| p3-v5 | regression; leak returned to base |
+
+What Phase 3 established:
+
+- **Prompt-format coverage is the lever for era-native behaviour** (p3-v1).
+- **Register and voice are separable from content** and can be restyled or
+  injected after the fact (p3-v2, p3-v4b).
+- **The model discriminates on salience, not date** (p3-v3, confirmed by p3-v5).
+  This is the ceiling on the whole approach: without a reliable internal sense
+  of when an entity belongs, any training that rewards confidence on familiar
+  subjects leaks across the cutoff.
+- **The frozen suite is out of resolution** for the decisions that remain.
+
+The unresolved question is exactly the one Phase 4 is scoped to answer: whether a
+model that dates entities better makes the salience confound go away. Phase 3
+cannot settle it on a 4B.
 
 ## Phase 4
 

@@ -398,6 +398,16 @@ def build(args):
             paths[f'{objective}_{split}'] = str(path)
 
     counts = Counter((row['kind'], assignments[row['content_id']]) for row in rows)
+    words = Counter()
+    for row in rows:
+        words[row['kind']] += len(row['messages'][-1]['content'].split())
+    total_words = sum(words.values()) or 1
+    signal_share = {kind: round(words[kind] / total_words, 4) for kind in kinds}
+    print('signal share (target words, not rows):')
+    for kind, share in sorted(signal_share.items(), key=lambda kv: -kv[1]):
+        rows_for_kind = sum(row['kind'] == kind for row in rows)
+        print(f'  {kind:28s} {rows_for_kind:6d} rows '
+              f'{rows_for_kind / len(rows):6.1%} -> {share:6.1%} of signal')
     manifest = {
         'schema_version': 1,
         'created_utc': datetime.now(timezone.utc).isoformat(),
@@ -423,6 +433,9 @@ def build(args):
                 for row in rows if row['kind'] == kind)
                 / max(sum(row['kind'] == kind for row in rows), 1), 3)
             for kind in kinds},
+        # Loss is per-token on the target, so a kind's influence is its share of
+        # target words. p3-v5 put chess in at 9.4% of rows and 59.8% of this.
+        'signal_share_by_kind': signal_share,
         'held_out_system_variants': sorted(args.hold_out_system_variant or ()),
         'system_variant_counts': dict(sorted(Counter(
             row.get('system_variant') for row in rows

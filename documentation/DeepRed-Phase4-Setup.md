@@ -446,6 +446,58 @@ training data, note it explicitly. Self-generated data amplifies the model's
 own blind spots, and the era-native asset depends on the generator knowing a
 cutoff the student is meant not to know.
 
+#### Budget the corpus by token mass, not row count
+
+This is the p3-v5 failure and it must not repeat. Chess entered that corpus as
+9.4% of rows and became **59.8% of the training signal**, because its answers
+ran 328 words against 16-18 elsewhere. Loss is per-token on the assistant turn,
+so row counts do not describe influence. Modern-fact leak returned to the base
+rate and the era-native assets were left with 10.6% of the signal.
+
+Every cap in this pipeline — `--limit kind=N`, every target in every driver — is
+expressed in rows and is therefore the wrong unit. Concrete steps:
+
+1. **Measure before training, not after.** Compute each kind's share of target
+   words at dataset build, print it, and write it to the manifest beside the row
+   counts. p3-v5 was diagnosable in one query *after* two epochs; the same query
+   before the run would have stopped it.
+2. **Set an explicit signal budget per kind**, and treat it as the plan. A
+   defensible starting split for Phase 4: era-native assets >= 35%, retain
+   assets ~25%, persona ~15%, chess <= 15%, controls the remainder.
+3. **Fail the dataset build** when any kind exceeds its budget, or when the
+   era-native share falls below its floor. p3-v5 shows this is worth a hard
+   gate, exactly like the 1.0:1 marker-ratio gate already in `run_p3v5.sh`.
+4. **Cap long-form assets by words, not rows.** For chess that means roughly
+   1,000 rows at the current length, or keeping 6,000 rows and cutting
+   `--max-words` to about 120. Prefer the second: breadth of games is worth more
+   than depth per game, and short analyses still carry notation.
+5. **Re-check after any generator change.** A more capable generator writes
+   longer answers, which silently shifts the mix even when row targets are
+   unchanged.
+
+#### Stage onto a backbone; do not re-derive one
+
+p3-v4b and p3-v4c staged onto `p3v2-050` and kept its temporal behaviour.
+p3-v5 restarted from the untouched base and did not recover it in two epochs on
+a corpus twice the size. Unless the base model itself is the variable under
+test, start from the best available checkpoint and change one thing.
+
+When the base model *is* the variable — as it is for Gemma 4 — accept that the
+first run rebuilds behaviour from scratch, and budget the signal accordingly:
+that is precisely when era-native content cannot afford to be 10% of the mix.
+
+#### More data is not a strategy
+
+Phase 3 ran four interventions that added or changed bulk content. Three
+regressed the target metric: p3-v3 (salient retain), p3-v5 (chess and 2x
+corpus), and p3-v4's accidental cut. The two wins were structural — prompt
+**format** coverage in p3-v1 and **register** in p3-v2 — and both came from
+changing the shape of the data rather than its volume.
+
+For Phase 4 this means: exhaust structural levers (format coverage, register,
+conditioning, the contingency table) before generating more rows. Scale the
+corpus only when a measurement says coverage is the binding constraint.
+
 #### Build conditional behaviour with a phrase bank, not a rewrite pass
 
 p3-v4 trained a persona stage and measured persona at 11.1%. That looked like a
@@ -516,8 +568,13 @@ model has no evidence that the persona is ever meant to be absent.
 ### Stage 7 — Pilot, then scale
 
 A short pilot on the p3-v2 recipe (one epoch, ~2,000 steps) evaluated on the
-frozen suite, compared against `p3v2-050` and the p3-v5 12B result. Only if the
-pilot beats both does a full scaled run follow.
+frozen suite, compared against `p3v2-050` and `p3v4c-100`. Only if the pilot
+beats both does a full scaled run follow.
+
+Before the pilot starts, confirm on the built dataset that the signal budget
+holds and the era-native share clears its floor. p3-v5 spent two epochs and a
+multi-day generation campaign to learn something a word count would have shown
+in seconds.
 
 ## What would make Phase 4 worth it
 
@@ -547,6 +604,12 @@ on data quality and persona.
   then applied to four runs served a prompt whose base is 7.4%, which made a
   tripling of persona read as a failure. Re-measure the base whenever the
   served prompt changes, and store the baseline beside the threshold.
+- **Balance the corpus by token mass, not row count.** p3-v5 added chess as 9.4%
+  of rows and it became 59.8% of the training signal, because its answers run
+  328 words against 16-18 elsewhere. Leak returned to the base rate. Every
+  `--limit` in this pipeline counts rows, which is the wrong unit as soon as
+  answer lengths differ by an order of magnitude — report the word share of each
+  kind before training, not after.
 
 ## References
 

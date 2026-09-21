@@ -29,7 +29,7 @@ ends with measured results and the decisions carried into the next.
 |---|---|---|
 | **Phase 1** — archived models and evaluation | [DeepRed-Phase1-Setup.md](documentation/DeepRed-Phase1-Setup.md) | closed; all 17 archived checkpoints retired |
 | **Phase 2** — temporal and persona trials | [DeepRed-Phase2-Setup.md](documentation/DeepRed-Phase2-Setup.md) | closed; no checkpoint reached a release gate |
-| **Phase 3** — data rebuild (`p3-v1`…`p3-v5`) | [DeepRed-Phase3-Setup.md](documentation/DeepRed-Phase3-Setup.md) | active; `p3v4c-100` published, closing with a 3x-corpus 4B run |
+| **Phase 3** — data rebuild (`p3-v1`…`p3-v5`) | [DeepRed-Phase3-Setup.md](documentation/DeepRed-Phase3-Setup.md) | closed 2026-09-20; `p3v4c-100` is the release artefact |
 | **Phase 4** — Gemma 4 12B feasibility | [DeepRed-Phase4-Setup.md](documentation/DeepRed-Phase4-Setup.md) | not started; gated feasibility study |
 
 Supporting references:
@@ -42,9 +42,10 @@ Phase 2 eliminated refusal-template SFT and preference/margin objectives, and
 showed that system-prompt conditioning is the mechanism that moves held-out
 behaviour. Phase 3 rebuilt the training data around prompt-format coverage and
 topic salience, and established that the model discriminates by salience rather
-than by date; it ends with a scaled `gemma-3-12b-it` run intended to produce a
-usable GGUF for experimentation. Phase 4 evaluates whether `gemma-4-12B-it` is
-feasible on this hardware.
+than by date — a ceiling on the whole approach, since any training that rewards
+confidence on familiar subjects leaks across the 1969 cutoff. It closed with
+`p3v4c-100` as the usable artefact. Phase 4 evaluates whether `gemma-4-12B-it`,
+which may date entities more reliably, can lift that ceiling.
 
 ### Downloadable Models
 
@@ -73,6 +74,17 @@ feasible on this hardware.
     It is a demonstrator, not a finished artefact: it still leaks modern facts
     on roughly a third of adversarial probes, and the persona and leak
     differences are within the resolution of a suite this small.
+  - [deepred-p3v5-100-q8_0.gguf](https://www.ferzkopp.net/Data/deepred-p3v5-100-q8_0.gguf)
+    (3.85 GB, Q8_0) — the closing run: double the corpus, 6,000 chess
+    narratives, trained from base. **Published for comparison, not as the
+    release.** It has the project's best pre-1969 recall (89.5% against 78.9%
+    for base) and is the only model that discusses chess, but its modern-fact
+    leak returned to the base rate of 62.5%.
+
+    The chess asset was 9.4% of rows and 59.8% of the training signal by word
+    count, which crowded out the era-native content. Use `p3v4c-100` unless you
+    specifically want the chess behaviour; see
+    [Phase 3](documentation/DeepRed-Phase3-Setup.md) for the analysis.
 - Prototypes
   - [DeepRed-gemma-4b-2026-05-23-5-final.gguf](http://www.ferzkopp.net/Data/DeepRed-gemma-4b-2026-05-23-5-final.gguf) - see [corpus and model details](documentation/DeepRed-gemma-4b-2026-05-23-5.md)
   - [gemma-4b-balanced-v1-small-1500-final.gguf](http://www.ferzkopp.net/Data/gemma-4b-balanced-v1-small-1500-final.gguf) - see [balanced run details and examples](documentation/DeepRed-gemma-4b-2026-06-13.md)

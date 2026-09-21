@@ -1243,9 +1243,14 @@ def generate_from_articles(args, client, holdout, rng, out_path, existing):
                             rejected['repeated_opening'] += 1
                             continue
                         openings[key] += 1
-                    elif kind == 'retain' and wrong_side_of_cutoff(answer, False):
+                    elif kind == 'retain' and (
+                            wrong_side_of_cutoff(answer, False)
+                            or wrong_side_of_cutoff(question, False)):
                         # retain is pre-cutoff only; unvalidated rows taught
                         # post-1969 facts in every run from V2 through p3-v1.
+                        # The question matters too: "Where did X study from 1977
+                        # to 1982?" carries the post-cutoff fact even when the
+                        # answer names no year.
                         rejected['post_1969_year'] += 1
                         continue
                     item_id = f'{kind}-{article["id"]}-{index}'

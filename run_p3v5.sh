@@ -248,6 +248,7 @@ stage_audit() {
     --corpus "$CORPUS/retain_formats/retain_formats.jsonl" \
     --corpus "$CORPUS/persona/persona.jsonl" \
     --corpus "$CORPUS/persona_identity/persona_identity.jsonl" \
+    --corpus "$CORPUS/chess/chess.jsonl" \
     --output "$CORPUS/contamination.json"
 }
 
