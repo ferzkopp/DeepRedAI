@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """
-download_gemma_models.py — Fetch Gemma-3-IT weights from HuggingFace Hub.
+download_gemma_models.py — Fetch Gemma instruct weights from HuggingFace Hub.
 
 Targets the Gemma-3 instruct models used by ``train_deepred_gemma.py``:
 
   google/gemma-3-4b-it    (~8 GB on disk)
   google/gemma-3-12b-it   (~24 GB on disk)
 
-You must:
+and the Gemma-4 candidate for Phase 4 (DeepRed-Phase4-Plan.md P1.3):
+
+  google/gemma-4-12B-it   (~22 GB on disk, Apache-2.0, not gated)
+
+The Gemma-3 models are gated and need a one-time licence acceptance in the
+browser; Gemma-4 is Apache-2.0 and downloads without one.
+
+You must, for the Gemma-3 models:
   1. Have a HuggingFace account.
   2. Accept the Gemma license on the model page (one-time, in browser):
         https://huggingface.co/google/gemma-3-4b-it
@@ -16,8 +23,9 @@ You must:
 
 Usage:
   python3 scripts/download_gemma_models.py --model gemma-3-4b-it
-  python3 scripts/download_gemma_models.py --model gemma-3-12b-it
-  python3 scripts/download_gemma_models.py --model both
+  python3 scripts/download_gemma_models.py --model gemma-4-12b-it
+  python3 scripts/download_gemma_models.py --model both   # the two Gemma-3 models
+  python3 scripts/download_gemma_models.py --model all    # every model above
 
 Environment variables:
   DEEPRED_MODELS   Destination root (default: $DEEPRED_ROOT/models or /mnt/data/models)
@@ -33,7 +41,11 @@ from pathlib import Path
 MODELS = {
     'gemma-3-4b-it':  'google/gemma-3-4b-it',
     'gemma-3-12b-it': 'google/gemma-3-12b-it',
+    'gemma-4-12b-it': 'google/gemma-4-12B-it',
 }
+
+# '--model both' predates Gemma 4 and must keep meaning the Gemma-3 pair.
+BOTH = ('gemma-3-4b-it', 'gemma-3-12b-it')
 
 REQUIRED_FILES = ('config.json', 'tokenizer.json')
 
@@ -99,8 +111,9 @@ def main():
     )
     parser.add_argument(
         '--model', required=True,
-        choices=list(MODELS) + ['both'],
-        help='Which model to download.')
+        choices=list(MODELS) + ['both', 'all'],
+        help="Which model to download. 'both' is the Gemma-3 pair; "
+             "'all' adds Gemma-4.")
     parser.add_argument(
         '--dest', default=None,
         help='Override destination root (default: $DEEPRED_MODELS).')
@@ -130,7 +143,12 @@ def main():
               "  export HF_TOKEN=<TOKEN>\n"
               "  hf auth login\n", file=sys.stderr)
 
-    targets = list(MODELS) if args.model == 'both' else [args.model]
+    if args.model == 'both':
+        targets = list(BOTH)
+    elif args.model == 'all':
+        targets = list(MODELS)
+    else:
+        targets = [args.model]
     for short in targets:
         download_one(short, MODELS[short], dest_root, token)
 

@@ -56,6 +56,39 @@ class LossTests(unittest.TestCase):
         ], 10)
         self.assertEqual([-100, -100, -100, 4, 5], encoded['labels'])
 
+    def test_generation_prompt_suffix_is_not_counted_as_prefix(self):
+        # Gemma 4 ends the generation prompt with an empty thinking block the
+        # trained rendering omits; trusting its length masked the first tokens
+        # of every answer.
+        class DivergingTokenizer:
+            def apply_chat_template(self, messages, tokenize,
+                                    add_generation_prompt):
+                if add_generation_prompt:
+                    return {'input_ids': [1, 2, 3, 90, 91]}
+                return {'input_ids': [1, 2, 3, 4, 5, 6]}
+
+        encoded = NPO.tokenize_messages(DivergingTokenizer(), [
+            {'role': 'user', 'content': 'question'},
+            {'role': 'assistant', 'content': 'answer'},
+        ], 10)
+        self.assertEqual([-100, -100, -100, 4, 5, 6], encoded['labels'])
+
+    def test_short_answer_survives_a_longer_generation_prompt(self):
+        # A one-token answer can make the generation prompt longer than the
+        # trained sequence, which previously looked like total truncation.
+        class DivergingTokenizer:
+            def apply_chat_template(self, messages, tokenize,
+                                    add_generation_prompt):
+                if add_generation_prompt:
+                    return {'input_ids': [1, 2, 3, 90, 91]}
+                return {'input_ids': [1, 2, 3, 7]}
+
+        encoded = NPO.tokenize_messages(DivergingTokenizer(), [
+            {'role': 'user', 'content': 'question'},
+            {'role': 'assistant', 'content': 'answer'},
+        ], 10)
+        self.assertEqual([-100, -100, -100, 7], encoded['labels'])
+
     def test_npo_penalizes_increased_forget_probability(self):
         reference = torch.tensor([-5.0])
         counts = torch.tensor([2])

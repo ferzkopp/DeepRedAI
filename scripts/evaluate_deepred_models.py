@@ -6,6 +6,7 @@ import contextlib
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -92,6 +93,169 @@ PERSONA_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
 BOILERPLATE_RE = re.compile(
     r'##\s*(?:See also|References|External links|Further reading|Notes)'
     r'|^\s*Categories:|\[\[|\{\{|<ref[ >]', re.I | re.M)
+
+# Gemma 4 ends every generation prompt with <|channel>thought<channel|>. An
+# empty block is the documented suppression and must not be scored as a leak;
+# only a populated one is the model reasoning at the citizen.
+THOUGHT_RE = re.compile(r'<\|channel>thought\b(.*?)(?:<channel\|>|\Z)', re.S)
+
+# Word counts for the bands a probe may declare in `expects_length`. The defect
+# interactive use of p3-v4c exposed was a 13-word median answer to questions
+# that asked for explanation, which the frozen suite scores as a pass.
+LENGTH_BANDS = {
+    'terse': (1, 25),
+    'explanatory': (26, 120),
+    'detailed': (121, 400),
+}
+
+
+def split_thinking(text):
+    """Split a raw completion into (visible answer, thought content)."""
+    thoughts = []
+
+    def capture(match):
+        thoughts.append(match.group(1).strip())
+        return ''
+
+    visible = THOUGHT_RE.sub(capture, text)
+    return visible.strip(), '\n'.join(part for part in thoughts if part)
+
+
+def length_band(word_count):
+    for name, (low, high) in LENGTH_BANDS.items():
+        if low <= word_count <= high:
+            return name
+    return 'over' if word_count else 'empty'
+
+
+# Sentinels unlikely to collide with anything a template emits.
+_TEMPLATE_SYSTEM = 'SENTINEL_SYSTEM_7f3a'
+_TEMPLATE_USER = 'SENTINEL_USER_91cd'
+
+MOVE_NUMBER_RE = re.compile(r'\b\d+\.(?:\.\.)?')
+SAN_MOVE_RE = re.compile(
+    r'(?:O-O-O|O-O'
+    r'|[KQRBN][a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?'
+    r'|[a-h]x[a-h][1-8](?:=[QRBN])?[+#]?'
+    r'|[a-h][1-8](?:=[QRBN])?[+#]?)')
+
+
+def extract_san_moves(text):
+    """Pull SAN moves out of prose, ignoring move numbers."""
+    return SAN_MOVE_RE.findall(MOVE_NUMBER_RE.sub(' ', text))
+
+
+def score_chess(probe, response):
+    """Judge a chess answer: legality against a FEN, else expected moves.
+
+    Returns (verdict, details). verdict is None when the probe declares
+    neither, so non-chess probes and the frozen 81 are unaffected.
+    """
+    fen = probe.get('fen')
+    expected_moves = probe.get('expected_moves') or []
+    if not fen and not expected_moves:
+        return None, {}
+    moves = extract_san_moves(response)
+    details = {'moves_found': moves[:12]}
+    if fen:
+        try:
+            import chess
+        except ImportError:
+            details['error'] = 'python-chess is not installed'
+            return None, details
+        try:
+            board = chess.Board(fen)
+        except ValueError as exc:
+            details['error'] = f'invalid fen: {exc}'
+            return None, details
+        legal = []
+        illegal = None
+        for san in moves:
+            try:
+                board.push_san(san)
+            except ValueError:
+                illegal = san
+                break
+            legal.append(san)
+        details['legal_moves'] = legal
+        details['illegal_move'] = illegal
+        if not moves:
+            return False, details
+        return illegal is None, details
+    hits = [move for move in expected_moves
+            if move in moves or contains_phrase(response, move)]
+    details['expected_move_hits'] = hits
+    details['expected_move_total'] = len(expected_moves)
+    return len(hits) == len(expected_moves), details
+
+
+def fisher_exact_p(a, b, c, d):
+    """Two-sided Fisher exact p for the 2x2 table [[a, b], [c, d]]."""
+    row1, row2 = a + b, c + d
+    col1 = a + c
+    total = row1 + row2
+    if not total or not row1 or not row2 or not col1 or (b + d) == 0:
+        return 1.0
+
+    def table_p(x):
+        return (math.comb(row1, x) * math.comb(row2, col1 - x)
+                / math.comb(total, col1))
+
+    low = max(0, col1 - row2)
+    high = min(col1, row1)
+    observed = table_p(a)
+    # Sum every table no more likely than the observed one.
+    total_p = sum(p for p in (table_p(x) for x in range(low, high + 1))
+                  if p <= observed * (1 + 1e-9))
+    return min(1.0, total_p)
+
+
+def detectable_difference(rate, n, alpha_z=1.96, power_z=0.84):
+    """Smallest proportion difference this n could detect at ~80% power."""
+    if n <= 0:
+        return None
+    rate = min(max(rate, 0.0), 1.0)
+    variance = max(rate * (1 - rate), 0.01)
+    return (alpha_z + power_z) * math.sqrt(2 * variance / n)
+
+
+def probe_served_template(endpoint, timeout=30):
+    """Ask a served model how it renders a system message.
+
+    llama.cpp does not always reproduce the model's own template: served
+    Gemma 4 defaults to thinking enabled, which routes the whole answer into
+    reasoning_content and leaves content empty. Recording the rendering makes
+    that visible instead of silently scoring every probe as empty.
+    """
+    payload = json.dumps({'messages': [
+        {'role': 'system', 'content': _TEMPLATE_SYSTEM},
+        {'role': 'user', 'content': _TEMPLATE_USER},
+    ]}).encode('utf-8')
+    request = urllib.request.Request(
+        f'{endpoint}/apply-template', data=payload,
+        headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            prompt = json.load(response).get('prompt', '')
+    except Exception as exc:  # older builds have no /apply-template
+        return {'status': 'unavailable', 'detail': f'{type(exc).__name__}: {exc}'}
+
+    system_at = prompt.find(_TEMPLATE_SYSTEM)
+    user_at = prompt.find(_TEMPLATE_USER)
+    reasons = []
+    if system_at < 0:
+        reasons.append('system text absent from the served prompt')
+    elif user_at >= 0 and system_at > user_at:
+        reasons.append('system text rendered after the user turn')
+    if '<|think|>' in prompt:
+        reasons.append(
+            'served template enables thinking; answers will arrive in '
+            'reasoning_content with content empty')
+    return {
+        'status': 'ok' if not reasons else 'suspect',
+        'warnings': reasons,
+        'prompt': prompt,
+    }
 
 
 class ValidationError(ValueError):
@@ -285,6 +449,9 @@ def validate_probes(probes):
 
 
 def score_response(probe, response):
+    # Score what the citizen sees. An unstripped thought block would otherwise
+    # be classified as the answer and corrupt every metric below.
+    response, thinking = split_thinking(response)
     expected = probe.get('expected_facts', [])
     forbidden = probe.get('forbidden_facts', [])
     expected_hits = [fact for fact in expected if contains_phrase(response, fact)]
@@ -297,6 +464,8 @@ def score_response(probe, response):
     repeats = max_window_repeats(response)
     word_count = len(response.split())
     max_words = probe.get('max_words')
+    expects_length = probe.get('expects_length')
+    chess_verdict, chess_details = score_chess(probe, response)
     return {
         'probe_id': probe['id'],
         'family_id': probe.get('family_id', probe['id']),
@@ -324,6 +493,16 @@ def score_response(probe, response):
         'over_length': bool(max_words) and word_count > max_words,
         'false_refusal': false_refusal,
         'empty': not response.strip(),
+        'thinking_emitted': bool(thinking),
+        'thinking_words': len(thinking.split()),
+        'expects_length': expects_length,
+        'length_band': length_band(word_count),
+        'length_appropriate': (
+            None if not expects_length
+            else length_band(word_count) == expects_length
+        ),
+        'chess_correct': chess_verdict,
+        'chess_details': chess_details,
     }
 
 
@@ -333,7 +512,9 @@ def aggregate_scores(scores):
     category_totals = defaultdict(lambda: {
         'responses': 0, 'leaks': 0, 'false_refusals': 0, 'empty': 0,
         'expected_hits': 0, 'expected_total': 0, 'severe_repetition': 0,
-        'anachronisms': 0, 'over_length': 0,
+        'anachronisms': 0, 'over_length': 0, 'thinking_emitted': 0,
+        'length_scored': 0, 'length_appropriate': 0,
+        'chess_scored': 0, 'chess_correct': 0,
     })
     behaviors = Counter()
     for score in scores:
@@ -351,6 +532,13 @@ def aggregate_scores(scores):
         totals['severe_repetition'] += int(score['severe_repetition'])
         totals['anachronisms'] += int(bool(score['anachronistic_years']))
         totals['over_length'] += int(score['over_length'])
+        totals['thinking_emitted'] += int(score.get('thinking_emitted', False))
+        if score.get('length_appropriate') is not None:
+            totals['length_scored'] += 1
+            totals['length_appropriate'] += int(score['length_appropriate'])
+        if score.get('chess_correct') is not None:
+            totals['chess_scored'] += 1
+            totals['chess_correct'] += int(score['chess_correct'])
     compromised = sorted(
         family_id for family_id, values in temporal_families.items()
         if any(value['leaked'] for value in values)
@@ -540,6 +728,7 @@ def select_records(records, selected_ids, suite_tag, record_type):
 class LlamaServer:
     def __init__(self, binary, model, host, port, context_size, log_path,
                  gpu_layers='auto', flash_attention='auto', no_mmap=False,
+                 load_mode=None, chat_template_kwargs=None,
                  container=None, container_env=()):
         self.binary = binary
         self.model = model
@@ -550,6 +739,8 @@ class LlamaServer:
         self.gpu_layers = gpu_layers
         self.flash_attention = flash_attention
         self.no_mmap = no_mmap
+        self.load_mode = load_mode
+        self.chat_template_kwargs = chat_template_kwargs
         self.container = container
         self.container_env = tuple(container_env)
         self.process = None
@@ -572,8 +763,13 @@ class LlamaServer:
             '--ctx-size', str(self.context_size), '--parallel', '1',
             '--alias', self.model['id'],
         ]
-        if self.no_mmap:
+        if self.load_mode:
+            server.extend(['--load-mode', self.load_mode])
+        elif self.no_mmap:
             server.append('--no-mmap')
+        if self.chat_template_kwargs:
+            server.extend(['--chat-template-kwargs',
+                           self.chat_template_kwargs])
         if not self.container:
             return server
         prefix = ['podman', 'exec']
@@ -808,6 +1004,7 @@ def run_command(args):
             )
     total_generated = 0
     total_skipped = 0
+    template_report = {}
     for model in models:
         if args.endpoint:
             manager = contextlib.nullcontext(args.endpoint)
@@ -818,11 +1015,21 @@ def run_command(args):
                 gpu_layers=args.gpu_layers,
                 flash_attention=args.flash_attention,
                 no_mmap=args.no_mmap,
+                load_mode=args.load_mode,
+                chat_template_kwargs=args.chat_template_kwargs,
                 container=args.server_container,
                 container_env=args.container_env or (),
             )
         with manager as server:
             endpoint = server if isinstance(server, str) else server.endpoint
+            if not args.endpoint:
+                # Only verify servers this run launched: with --endpoint the
+                # template flags were chosen elsewhere and cannot be fixed here.
+                template = probe_served_template(endpoint, timeout=args.timeout)
+                template_report[model['id']] = template
+                for warning in template.get('warnings', ()):
+                    print(f'  WARNING [{model["id"]}] served template: '
+                          f'{warning}', flush=True)
             model_started = time.monotonic()
             generated, skipped = run_model(
                 model, probes, endpoint, output_path, settings, args.timeout,
@@ -835,6 +1042,11 @@ def run_command(args):
                 f'{(time.monotonic() - model_started) / 60:.1f} min',
                 flush=True,
             )
+    if template_report:
+        template_path = output_dir / 'served_template.json'
+        template_path.write_text(
+            json.dumps(template_report, indent=2) + '\n', encoding='utf-8')
+        print(f'Served template report: {template_path}')
     print(
         f'Generation complete: {total_generated} new, {total_skipped} resumed; '
         f'raw output: {output_path}'
@@ -958,6 +1170,8 @@ def report_command(args):
                 cells.append(f'{hits}/{len(rows)}' if rows else '-')
             lines.append(f'| {model_id} | ' + ' | '.join(cells) + ' |')
 
+    lines.extend(_significance_section(score_data, args.base_model_id))
+
     if excerpts:
         lines.extend(['', '## Representative Responses', ''])
         for model_id in sorted(excerpts):
@@ -973,6 +1187,76 @@ def report_command(args):
     output_path.write_text('\n'.join(lines).rstrip() + '\n', encoding='utf-8')
     print(f'Wrote report to {output_path}')
     return 0
+
+
+def _significance_section(score_data, base_model_id=None):
+    """Fisher exact p and detectable effect beside each headline rate.
+
+    A gate reported without its power invites reading noise as progress: at
+    n=81 the smallest difference this suite can detect at ~80% power is about
+    22 points, so smaller movements are not evidence either way.
+    """
+    scores = score_data.get('scores', [])
+    if not scores:
+        return []
+    by_model = defaultdict(list)
+    for score in scores:
+        by_model[score['model_id']].append(score)
+    if not base_model_id:
+        base_model_id = next(
+            (m for m in sorted(by_model) if 'base' in m), None)
+    if base_model_id not in by_model or len(by_model) < 2:
+        return []
+
+    counters = {
+        'era_native': (
+            lambda rows: [r for r in rows
+                          if r['temporal_class'] == 'post_1969'],
+            lambda r: r['temporal_behavior'] == 'era_native_uncertainty'),
+        'modern_leak': (
+            lambda rows: [r for r in rows
+                          if r['temporal_class'] == 'post_1969'],
+            lambda r: r['leaked']),
+        'false_refusal': (
+            lambda rows: [r for r in rows
+                          if r['temporal_class'] != 'post_1969'],
+            lambda r: r['false_refusal']),
+        'persona': (
+            lambda rows: [r for r in rows if r.get('persona_eligible')],
+            lambda r: r['persona_present']),
+    }
+    lines = [
+        '', '## Significance against the base model', '',
+        f'Base: `{base_model_id}`. `p` is a two-sided Fisher exact test on '
+        'the 2x2 count table. `MDE` is the smallest difference this sample '
+        'size could detect at roughly 80% power — a change smaller than it is '
+        'not evidence.', '',
+        '| Model | Metric | Base | Model | Diff | p | MDE |',
+        '|---|---|---:|---:|---:|---:|---:|',
+    ]
+    for model_id in sorted(by_model):
+        if model_id == base_model_id:
+            continue
+        for metric, (select, predicate) in counters.items():
+            base_rows = select(by_model[base_model_id])
+            rows = select(by_model[model_id])
+            if not base_rows or not rows:
+                continue
+            base_hits = sum(bool(predicate(r)) for r in base_rows)
+            hits = sum(bool(predicate(r)) for r in rows)
+            base_rate = base_hits / len(base_rows)
+            rate = hits / len(rows)
+            p = fisher_exact_p(hits, len(rows) - hits,
+                               base_hits, len(base_rows) - base_hits)
+            mde = detectable_difference((base_rate + rate) / 2, len(rows))
+            flag = '' if p < 0.05 else ' (ns)'
+            lines.append(
+                f'| {model_id} | {metric} | '
+                f'{base_hits}/{len(base_rows)} ({base_rate:.0%}) | '
+                f'{hits}/{len(rows)} ({rate:.0%}) | '
+                f'{rate - base_rate:+.0%} | {p:.3f}{flag} | '
+                f'{mde:.0%} |')
+    return lines
 
 
 def _ratio(numerator, denominator):
@@ -1160,6 +1444,17 @@ def build_parser():
         '--flash-attention', choices=('on', 'off', 'auto'), default='auto'
     )
     run_parser.add_argument('--no-mmap', action='store_true')
+    run_parser.add_argument(
+        '--load-mode',
+        help="llama-server -lm/--load-mode value (e.g. 'none'). Takes "
+             "precedence over --no-mmap, which llama.cpp b11065 removed."
+    )
+    run_parser.add_argument(
+        '--chat-template-kwargs',
+        help='JSON passed to llama-server --chat-template-kwargs. Gemma 4 '
+             'needs \'{"enable_thinking":false}\' or the served template '
+             'enables thinking and every answer arrives empty.'
+    )
     run_parser.add_argument('--max-tokens', type=int, default=256)
     run_parser.add_argument('--temperature', type=float, default=0.0)
     run_parser.add_argument('--top-p', type=float, default=1.0)
@@ -1177,6 +1472,10 @@ def build_parser():
     report_parser.add_argument('--scores', required=True)
     report_parser.add_argument('--generations')
     report_parser.add_argument('--excerpt-probe', action='append')
+    report_parser.add_argument(
+        '--base-model-id',
+        help='Model the significance table compares against (default: the '
+             'first id containing "base").')
     report_parser.add_argument('--output', required=True)
     report_parser.set_defaults(func=report_command)
 

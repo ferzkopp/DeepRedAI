@@ -13,13 +13,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-KINDS = ('forget', 'retain', 'era_native', 'persona', 'persona_controls',
+KINDS = ('forget', 'retain', 'era_native', 'era_native_explanatory', 'persona',
+         'persona_controls',
          'era_native_formats', 'retain_formats', 'persona_identity',
          'persona_identity_controls', 'persona_capability', 'chess')
 # Paired control files live beside the asset they were rewritten from.
 KIND_DIRS = {
     'persona_controls': 'persona',
     'persona_identity_controls': 'persona_identity',
+    'era_native_explanatory': 'era_native',
 }
 BOILERPLATE = re.compile(
     r'##\s*(See also|References|External links|Further reading|Notes)'
@@ -116,16 +118,33 @@ def assign_splits(rows, val_fraction, seed):
     return assignments
 
 
-def sample_rows(rows, assignments, limits, seed):
+def sample_rows(rows, assignments, limits, seed, word_caps=None,
+                row_word_caps=None):
     selected = []
     by_kind = defaultdict(list)
     for row in rows:
         by_kind[row['kind']].append(row)
     for kind, candidates in sorted(by_kind.items()):
+        ceiling = (row_word_caps or {}).get(kind)
+        if ceiling is not None:
+            candidates = [
+                row for row in candidates
+                if len(row['messages'][-1]['content'].split()) <= ceiling]
         limit = limits.get(kind)
         rng = random.Random(f'{seed}:{kind}')
         rng.shuffle(candidates)
-        selected.extend(candidates if limit is None else candidates[:limit])
+        chosen = candidates if limit is None else candidates[:limit]
+        cap = (word_caps or {}).get(kind)
+        if cap is not None:
+            kept, used = [], 0
+            for row in chosen:
+                length = len(row['messages'][-1]['content'].split())
+                if used + length > cap:
+                    continue
+                kept.append(row)
+                used += length
+            chosen = kept
+        selected.extend(chosen)
     return selected
 
 
@@ -211,6 +230,127 @@ def parse_limits(values):
             raise DatasetError(f'invalid --limit {value!r}')
         limits[kind] = count
     return limits
+
+
+def parse_word_caps(values):
+    caps = {}
+    for value in values or []:
+        try:
+            kind, count = value.split('=', 1)
+            count = int(count)
+        except ValueError as exc:
+            raise DatasetError(
+                f'invalid --max-words {value!r}; expected KIND=N') from exc
+        if kind not in KINDS or count < 0:
+            raise DatasetError(f'invalid --max-words {value!r}')
+        caps[kind] = count
+    return caps
+
+
+def parse_signal_budget(values):
+    """KIND[+KIND]=MIN:MAX as percentages; either bound may be blank."""
+    budget = {}
+    for value in values or []:
+        try:
+            key, span = value.split('=', 1)
+            low, high = span.split(':', 1)
+        except ValueError as exc:
+            raise DatasetError(
+                f'invalid --signal-budget {value!r}; expected '
+                f'KIND=MIN:MAX') from exc
+        members = key.split('+')
+        unknown = sorted(set(members) - set(KINDS))
+        if unknown:
+            raise DatasetError(f'invalid --signal-budget {value!r}: {unknown}')
+        try:
+            floor = float(low) / 100 if low.strip() else None
+            ceiling = float(high) / 100 if high.strip() else None
+        except ValueError as exc:
+            raise DatasetError(
+                f'invalid --signal-budget {value!r}: bounds must be '
+                f'percentages') from exc
+        if floor is None and ceiling is None:
+            raise DatasetError(f'invalid --signal-budget {value!r}: no bound')
+        budget[key] = (floor, ceiling)
+    return budget
+
+
+def check_signal_budget(signal_share, budget):
+    """Return a failure line per violated bound. Empty means the build passes."""
+    failures = []
+    for key, (floor, ceiling) in sorted(budget.items()):
+        share = sum(signal_share.get(member, 0.0)
+                    for member in key.split('+'))
+        if floor is not None and share < floor:
+            failures.append(
+                f'{key} holds {share:.1%} of the target-token signal, '
+                f'below its {floor:.0%} floor')
+        if ceiling is not None and share > ceiling:
+            failures.append(
+                f'{key} holds {share:.1%} of the target-token signal, '
+                f'above its {ceiling:.0%} ceiling')
+    return failures
+
+
+def contingency_table(rows):
+    """(system-prompted x marker-bearing) counts per kind.
+
+    p3-v4 spent a full generate-train-evaluate cycle discovering a 0.47:1
+    ratio that this count would have shown before training started.
+    """
+    table = {}
+    for row in rows:
+        conditioned = 'system' if row.get('system_variant') else 'plain'
+        marked = 'marked' if MARKER_PRESENT.search(
+            row['messages'][-1]['content']) else 'unmarked'
+        table.setdefault(row['kind'], Counter())[f'{conditioned}_{marked}'] += 1
+    return {kind: dict(sorted(counts.items()))
+            for kind, counts in sorted(table.items())}
+
+
+def target_token_stats(rows, tokenizer_path):
+    """Mean target length in words, and in tokens when a tokenizer loads.
+
+    P2 fixed the step-time budget at roughly 355 tokens; the trainer will not
+    warn when it is exceeded, it will just take 60 s/step instead of 23.
+    """
+    words = [len(row['messages'][-1]['content'].split()) for row in rows]
+    stats = {
+        'mean_target_words': round(sum(words) / max(len(words), 1), 1),
+        'max_target_words': max(words, default=0),
+        'mean_sequence_tokens': None,
+        'tokenizer': tokenizer_path,
+    }
+    if not tokenizer_path:
+        stats['tokenizer_status'] = 'not requested'
+        return stats
+    try:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        lengths = []
+        for row in rows:
+            encoded = tokenizer.apply_chat_template(
+                row['messages'], tokenize=True, add_generation_prompt=False)
+            # transformers 5.x returns a BatchEncoding, so len() counts keys
+            # and every row measures 2 tokens.
+            if hasattr(encoded, 'keys'):
+                encoded = encoded['input_ids']
+            if encoded and isinstance(encoded[0], (list, tuple)):
+                encoded = encoded[0]
+            lengths.append(len(encoded))
+    except Exception as exc:
+        stats['tokenizer_status'] = f'{type(exc).__name__}: {exc}'
+        return stats
+    if lengths and max(lengths) < 8:
+        # A whole corpus of sub-8-token sequences means the count is wrong,
+        # not that the corpus is tiny.
+        stats['tokenizer_status'] = (
+            f'implausible token counts (max {max(lengths)}); not reported')
+        return stats
+    stats['tokenizer_status'] = 'ok'
+    stats['mean_sequence_tokens'] = round(sum(lengths) / max(len(lengths), 1), 1)
+    stats['max_sequence_tokens'] = max(lengths, default=0)
+    return stats
 
 
 # Leading first-person forms rewritten to a Deep Red self-reference. Anchored at
@@ -355,8 +495,12 @@ def build(args):
     kinds = select_kinds(root, args.kind)
     print(f'kinds: {kinds}')
     for kind in kinds:
+        # Stripping is correct on non-chess answers, where the footer is a
+        # generation artefact, and destroys the content on the chess asset.
+        strip_footer = (bool(args.strip_chess_footer)
+                        and kind not in args.keep_chess_footer)
         rows, path = read_kind(
-            root, kind, args.strip_boilerplate, args.strip_chess_footer)
+            root, kind, args.strip_boilerplate, strip_footer)
         all_rows.extend(rows)
         source_paths[kind] = str(path)
     duplicate_ids = len(all_rows) - len({row['id'] for row in all_rows})
@@ -364,7 +508,9 @@ def build(args):
         raise DatasetError(f'{duplicate_ids} duplicate stable ids')
 
     assignments = assign_splits(all_rows, args.val_fraction, args.seed)
-    rows = sample_rows(all_rows, assignments, parse_limits(args.limit), args.seed)
+    rows = sample_rows(all_rows, assignments, parse_limits(args.limit), args.seed,
+                       word_caps=parse_word_caps(args.max_words),
+                       row_word_caps=parse_word_caps(args.max_row_words))
     variants = []
     injected = Counter()
     if args.system_prompt_file:
@@ -408,6 +554,20 @@ def build(args):
         rows_for_kind = sum(row['kind'] == kind for row in rows)
         print(f'  {kind:28s} {rows_for_kind:6d} rows '
               f'{rows_for_kind / len(rows):6.1%} -> {share:6.1%} of signal')
+
+    budget = parse_signal_budget(args.signal_budget)
+    budget_failures = check_signal_budget(signal_share, budget)
+    table = contingency_table(rows)
+    print('\ncondition x behaviour (system-prompted x marker-bearing):')
+    for kind, cells in table.items():
+        marked = cells.get('system_marked', 0)
+        unmarked = cells.get('system_unmarked', 0)
+        ratio = f'{marked / unmarked:.2f}:1' if unmarked else 'n/a'
+        print(f'  {kind:28s} {cells} marked:unmarked {ratio}')
+    tokens = target_token_stats(rows, args.tokenizer)
+    print(f"\nmean target words {tokens['mean_target_words']}, "
+          f"mean sequence tokens {tokens['mean_sequence_tokens']} "
+          f"({tokens['tokenizer_status']})")
     manifest = {
         'schema_version': 1,
         'created_utc': datetime.now(timezone.utc).isoformat(),
@@ -422,6 +582,7 @@ def build(args):
         'paths': paths,
         'cross_split_content_ids': len(overlap),
         'strip_chess_footer': bool(args.strip_chess_footer),
+        'keep_chess_footer': sorted(set(args.keep_chess_footer)),
         'system_prompt_file': args.system_prompt_file,
         'system_coverage': args.system_coverage if args.system_prompt_file else 0,
         'marker_injection': parse_injection(args.inject_markers),
@@ -436,6 +597,12 @@ def build(args):
         # Loss is per-token on the target, so a kind's influence is its share of
         # target words. p3-v5 put chess in at 9.4% of rows and 59.8% of this.
         'signal_share_by_kind': signal_share,
+        'signal_budget': {key: list(bounds) for key, bounds in budget.items()},
+        'signal_budget_failures': budget_failures,
+        'contingency_table': table,
+        'target_length': tokens,
+        'max_words': parse_word_caps(args.max_words),
+        'max_row_words': parse_word_caps(args.max_row_words),
         'held_out_system_variants': sorted(args.hold_out_system_variant or ()),
         'system_variant_counts': dict(sorted(Counter(
             row.get('system_variant') for row in rows
@@ -447,6 +614,14 @@ def build(args):
         json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8')
     print(f'wrote {len(rows):,} records -> {output}')
     print(f'counts: {manifest["counts"]}')
+    if budget_failures:
+        # The manifest is written first so a failed build still leaves the
+        # evidence for why behind.
+        for failure in budget_failures:
+            print(f'SIGNAL BUDGET: {failure}', file=sys.stderr)
+        raise DatasetError(
+            f'{len(budget_failures)} signal budget violation(s); '
+            f'see {output / "manifest.json"}')
     return manifest
 
 
@@ -457,10 +632,32 @@ def build_parser():
     parser.add_argument('--val-fraction', type=float, default=0.05)
     parser.add_argument('--seed', type=int, default=1969)
     parser.add_argument('--limit', action='append', help='Per-kind cap KIND=N')
+    parser.add_argument(
+        '--max-words', action='append', metavar='KIND=N',
+        help='Cap a kind by total target words rather than rows. Row counts '
+             'are the wrong unit once answer lengths differ by an order of '
+             'magnitude.')
+    parser.add_argument(
+        '--max-row-words', action='append', metavar='KIND=N',
+        help='Drop rows in this kind whose target exceeds N words. Buys '
+             'breadth: a fixed signal budget spent on short rows covers more '
+             'subjects than the same budget spent on a few long ones.')
+    parser.add_argument(
+        '--signal-budget', action='append', metavar='KIND[+KIND]=MIN:MAX',
+        help='Fail the build unless this kind holds between MIN%% and MAX%% of '
+             'the target-token signal. Either bound may be blank.')
+    parser.add_argument(
+        '--tokenizer',
+        help='Tokenizer used to report mean sequence length. P2 fixed the '
+             'step-time budget at about 355 tokens.')
     parser.add_argument('--kind', action='append',
                         help='restrict to these kinds; default is every kind present')
     parser.add_argument('--strip-boilerplate', action='store_true')
     parser.add_argument('--strip-chess-footer', action='store_true')
+    parser.add_argument('--keep-chess-footer', action='append', default=['chess'],
+                        metavar='KIND',
+                        help='kinds exempt from --strip-chess-footer; '
+                             'defaults to chess, where the footer is content')
     parser.add_argument('--system-prompt-file')
     parser.add_argument('--system-coverage', type=float, default=1.0)
     parser.add_argument(

@@ -3,7 +3,9 @@
 
 import argparse
 import gc
+import inspect
 import json
+import math
 import os
 import random
 import sys
@@ -24,6 +26,77 @@ except ModuleNotFoundError:
 
 
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
+# Verified against gemma-4-12b-it: these suffixes match the 48 language_model
+# layers and nothing in the vision or audio towers, which use other names.
+LORA_TARGET_MODULES = ('q_proj', 'k_proj', 'v_proj', 'o_proj',
+                       'gate_proj', 'up_proj', 'down_proj')
+
+
+def load_trainable_model(source, args):
+    """Load the model to train, returning it with a record of how.
+
+    Separate from train() so probe_train_memory.py can walk the 12B rungs
+    without a second copy of the trainer.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+
+    kwargs = {
+        'dtype': torch.bfloat16,
+        'attn_implementation': args.attn_implementation,
+        'trust_remote_code': True,
+    }
+    if args.tuning == 'qlora':
+        kwargs['quantization_config'] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type='nf4',
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+    model = AutoModelForCausalLM.from_pretrained(source, **kwargs)
+    info = {
+        'tuning': args.tuning,
+        'model_class': type(model).__name__,
+        'attn_implementation': args.attn_implementation,
+    }
+    if args.tuning == 'full':
+        return model, info
+
+    from peft import (
+        LoraConfig, get_peft_model, prepare_model_for_kbit_training,
+    )
+    if args.tuning == 'qlora':
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=True)
+    model = get_peft_model(model, LoraConfig(
+        r=args.lora_r, lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout, bias='none', task_type='CAUSAL_LM',
+        target_modules=list(args.lora_target_modules)))
+    trainable, total = model.get_nb_trainable_parameters()
+    info.update({
+        'lora_r': args.lora_r,
+        'lora_alpha': args.lora_alpha,
+        'lora_target_modules': list(args.lora_target_modules),
+        'trainable_parameters': trainable,
+        'total_parameters': total,
+    })
+    return model, info
+
+
+def schedule_kwargs(training_args_cls, warmup_ratio, train_rows,
+                    gradient_accumulation, max_steps, epochs):
+    """Warmup arguments that work on both transformers 4.x and 5.x.
+
+    5.x dropped warmup_ratio. Where it still exists the ratio is passed
+    through untouched, so the Phase 3 path stays bit-identical.
+    """
+    if 'warmup_ratio' in inspect.signature(
+            training_args_cls.__init__).parameters:
+        return {'warmup_ratio': warmup_ratio}
+    per_epoch = math.ceil(train_rows / gradient_accumulation)
+    total = max_steps if max_steps > 0 else math.ceil(per_epoch * epochs)
+    return {'warmup_steps': round(warmup_ratio * total)}
 
 
 def shuffled_rows(rows, seed):
@@ -63,8 +136,7 @@ def train(args):
     import torch
     from datasets import Dataset
     from transformers import (
-        AutoModelForCausalLM, AutoTokenizer, Trainer, TrainerCallback,
-        TrainingArguments,
+        AutoTokenizer, Trainer, TrainerCallback, TrainingArguments,
     )
 
     if not torch.cuda.is_available():
@@ -107,13 +179,15 @@ def train(args):
     val_dataset = prepare(val_rows)
 
     model_source = resume or args.model
-    print(f'loading trainable full-weight model from {model_source}...')
-    model = AutoModelForCausalLM.from_pretrained(
-        model_source, dtype=torch.bfloat16, attn_implementation='eager',
-        trust_remote_code=True)
+    print(f'loading {args.tuning} model from {model_source}...')
+    model, model_info = load_trainable_model(model_source, args)
     model.gradient_checkpointing_enable(
         gradient_checkpointing_kwargs={'use_reentrant': False})
     model.config.use_cache = False
+    if args.tuning != 'full':
+        # A frozen base under checkpointing gives the adapters no grad path.
+        model.enable_input_require_grads()
+    print(f'model: {model_info}')
 
     class SnapshotCallback(TrainerCallback):
         def __init__(self):
@@ -145,13 +219,16 @@ def train(args):
         per_device_train_batch_size=1, per_device_eval_batch_size=1,
         gradient_accumulation_steps=args.gradient_accumulation,
         learning_rate=args.learning_rate, adam_beta1=0.9, adam_beta2=0.95,
-        warmup_ratio=args.warmup_ratio, lr_scheduler_type='cosine',
-        optim='adamw_torch_fused', bf16=True, fp16=False,
+        lr_scheduler_type='cosine',
+        optim=args.optim, bf16=True, fp16=False,
         gradient_checkpointing=True, eval_strategy='steps',
         eval_steps=args.eval_steps, save_strategy='steps',
         save_steps=args.save_steps, save_total_limit=args.save_total_limit,
         logging_steps=args.logging_steps, report_to='none',
         remove_unused_columns=False, prediction_loss_only=True, seed=args.seed,
+        **schedule_kwargs(TrainingArguments, args.warmup_ratio,
+                          len(train_rows), args.gradient_accumulation,
+                          args.max_steps, args.epochs),
     )
     trainer = Trainer(
         model=model, args=training_args, train_dataset=train_dataset,
@@ -164,6 +241,8 @@ def train(args):
         'dataset': str(dataset_dir), 'objective': 'conditioned_sft',
         'learning_rate': args.learning_rate, 'max_steps': args.max_steps,
         'epochs': args.epochs,
+        'optim': args.optim,
+        'model': model_info,
         'gradient_accumulation': args.gradient_accumulation,
         'train_rows': len(train_rows), 'val_rows': len(val_rows),
         'kind_counts': dict(sorted(kind_counts.items())),
@@ -171,16 +250,29 @@ def train(args):
         'snapshots': snapshots,
     }
     (output / 'run_meta.json').write_text(json.dumps(metadata, indent=2) + '\n')
-    trainer.train(resume_from_checkpoint=resume or None)
+    torch.cuda.reset_peak_memory_stats()
+    result = trainer.train(resume_from_checkpoint=resume or None)
     final = output / 'final'
     trainer.save_model(final)
     tokenizer.save_pretrained(final)
+    runtime = result.metrics.get('train_runtime')
+    steps = trainer.state.global_step
+    peak_allocated = torch.cuda.max_memory_allocated()
+    peak_reserved = torch.cuda.max_memory_reserved()
     metadata.update({
         'status': 'completed',
         'completed_utc': datetime.now(timezone.utc).isoformat(),
-        'global_step': trainer.state.global_step,
+        'global_step': steps,
+        'train_runtime_seconds': runtime,
+        'seconds_per_step': runtime / steps if runtime and steps else None,
+        'peak_memory_allocated_bytes': peak_allocated,
+        'peak_memory_reserved_bytes': peak_reserved,
     })
     (output / 'run_meta.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    print(f'peak memory: {peak_allocated / 1024 ** 3:.2f} GiB allocated, '
+          f'{peak_reserved / 1024 ** 3:.2f} GiB reserved')
+    if runtime and steps:
+        print(f'throughput: {runtime / steps:.2f} s/step over {steps} steps')
     print(f'training complete -> {final}')
     del model, trainer
     gc.collect()
@@ -207,6 +299,17 @@ def build_parser():
                         default=['10', '25', '50', '75', '100'])
     parser.add_argument('--seed', type=int, default=1969)
     parser.add_argument('--resume', default='auto')
+    parser.add_argument('--optim', default='adamw_torch_fused',
+                        choices=('adamw_torch_fused', 'adamw_bnb_8bit',
+                                 'adafactor'))
+    parser.add_argument('--tuning', default='full',
+                        choices=('full', 'lora', 'qlora'))
+    parser.add_argument('--attn-implementation', default='eager')
+    parser.add_argument('--lora-r', type=int, default=16)
+    parser.add_argument('--lora-alpha', type=int, default=32)
+    parser.add_argument('--lora-dropout', type=float, default=0.05)
+    parser.add_argument('--lora-target-modules', nargs='+',
+                        default=list(LORA_TARGET_MODULES))
     return parser
 
 

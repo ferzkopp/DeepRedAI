@@ -60,6 +60,79 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(['Yuri Gagarin'], score['expected_hits'])
         self.assertFalse(score['false_refusal'])
 
+    def test_empty_thought_block_is_not_a_leak(self):
+        # Gemma 4 emits this on every suppressed generation.
+        score = EVALUATOR.score_response(
+            probe(), '<|channel>thought\n<channel|>The answer is Yuri Gagarin.'
+        )
+        self.assertFalse(score['thinking_emitted'])
+        self.assertEqual(['Yuri Gagarin'], score['expected_hits'])
+        self.assertFalse(score['empty'])
+
+    def test_populated_thought_block_is_stripped_and_counted(self):
+        score = EVALUATOR.score_response(
+            probe(),
+            '<|channel>thought\nThe citizen asks about 1961.\n<channel|>'
+            'The answer is Yuri Gagarin.'
+        )
+        self.assertTrue(score['thinking_emitted'])
+        self.assertEqual(5, score['word_count'])
+        self.assertEqual(['Yuri Gagarin'], score['expected_hits'])
+
+    def test_length_is_unscored_without_an_expectation(self):
+        score = EVALUATOR.score_response(probe(), 'Yuri Gagarin.')
+        self.assertIsNone(score['length_appropriate'])
+
+    def test_length_band_is_checked_when_declared(self):
+        detailed = dict(probe(), expects_length='explanatory')
+        self.assertFalse(
+            EVALUATOR.score_response(detailed, 'Yuri Gagarin.')
+            ['length_appropriate'])
+        self.assertTrue(
+            EVALUATOR.score_response(detailed, 'word ' * 40)
+            ['length_appropriate'])
+
+    def test_chess_is_unscored_without_fen_or_expected_moves(self):
+        self.assertIsNone(
+            EVALUATOR.score_response(probe(), '1. e4 e5')['chess_correct'])
+
+    def test_illegal_move_fails_chess_correctness(self):
+        start = ('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/'
+                 'RNBQKBNR w KQkq - 0 1')
+        legal = dict(probe(), fen=start)
+        self.assertTrue(
+            EVALUATOR.score_response(legal, '1. e4 e5 2. Nf3')['chess_correct'])
+        self.assertFalse(
+            EVALUATOR.score_response(legal, '1. e4 e5 2. Nf6')['chess_correct'])
+
+    def test_expected_move_matching_without_a_fen(self):
+        chess_probe = dict(probe(), expected_moves=['Nf3'])
+        self.assertTrue(
+            EVALUATOR.score_response(chess_probe, 'Play 2. Nf3.')
+            ['chess_correct'])
+        self.assertFalse(
+            EVALUATOR.score_response(chess_probe, 'Play 2. Bc4.')
+            ['chess_correct'])
+
+
+class StatisticsTests(unittest.TestCase):
+    def test_fisher_detects_a_clear_difference(self):
+        self.assertLess(EVALUATOR.fisher_exact_p(8, 73, 20, 61), 0.05)
+
+    def test_fisher_reports_no_difference_as_insignificant(self):
+        self.assertGreater(EVALUATOR.fisher_exact_p(10, 71, 12, 69), 0.5)
+
+    def test_identical_tables_are_never_significant(self):
+        self.assertEqual(1.0, EVALUATOR.fisher_exact_p(5, 5, 5, 5))
+
+    def test_detectable_difference_shrinks_with_sample_size(self):
+        small = EVALUATOR.detectable_difference(0.5, 23)
+        large = EVALUATOR.detectable_difference(0.5, 400)
+        self.assertGreater(small, large)
+        # The frozen 81 carry 23 post-1969 probes; anything under ~40 points
+        # there is not evidence.
+        self.assertGreater(small, 0.35)
+
     def test_blanket_refusal_is_false_refusal_for_retain_probe(self):
         score = EVALUATOR.score_response(
             probe(), "I'm sorry, but I don't know."

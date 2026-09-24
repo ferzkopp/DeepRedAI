@@ -50,6 +50,50 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from train_deepred_model import export_gguf  # noqa: E402
 
+# The Phase 1-3 llama.cpp checkout predates Gemma 4 and cannot convert it, and
+# it is the checkout every existing GGUF was produced with. A second clone
+# carries the newer converter rather than upgrading that one in place.
+GEMMA4_ARCHITECTURES = frozenset({
+    'Gemma4UnifiedForConditionalGeneration',
+    'Gemma4ForConditionalGeneration',
+    'Gemma4ForCausalLM',
+    'Gemma4AssistantForCausalLM',
+    'Gemma4UnifiedAssistantForCausalLM',
+})
+GEMMA4_LLAMA_CPP_DIRNAME = 'llama.cpp-gemma4'
+
+
+def _model_architectures(model_dir):
+    try:
+        config = json.loads((Path(model_dir) / 'config.json').read_text())
+    except (OSError, ValueError):
+        return []
+    return config.get('architectures') or []
+
+
+def resolve_llama_cpp(model_dir, explicit, log):
+    """Return the llama.cpp checkout able to convert this architecture.
+
+    Returns (path_or_None, architecture_or_None). None means the default
+    checkout, which is what every Phase 1-3 export used.
+    """
+    architectures = _model_architectures(model_dir)
+    gemma4 = next((a for a in architectures if a in GEMMA4_ARCHITECTURES), None)
+    if explicit:
+        return explicit, gemma4
+    if not gemma4:
+        return None, None
+    root = os.environ.get('DEEPRED_ROOT', '/mnt/data')
+    path = Path(root) / GEMMA4_LLAMA_CPP_DIRNAME
+    if not (path / 'convert_hf_to_gguf.py').is_file():
+        log.error(
+            "%s needs the Gemma 4 converter, which is not at %s. Clone it "
+            "with:\n  git clone --depth 1 "
+            "https://github.com/ggml-org/llama.cpp %s", gemma4, path, path)
+        sys.exit(1)
+    log.info("architecture %s -> converter %s", gemma4, path)
+    return str(path), gemma4
+
 
 def _setup_logging():
     logging.basicConfig(
@@ -135,8 +179,10 @@ def main():
             sys.exit(1)
         outfile = Path(args.outfile)
         outfile.parent.mkdir(parents=True, exist_ok=True)
+        llama_cpp_path, _ = resolve_llama_cpp(model_dir, args.llama_cpp_path,
+                                              log)
         ok = export_gguf(
-            str(model_dir), str(outfile), llama_cpp_path=args.llama_cpp_path,
+            str(model_dir), str(outfile), llama_cpp_path=llama_cpp_path,
             quant_type=args.quant, log=log)
         sys.exit(0 if ok else 1)
 
@@ -179,9 +225,13 @@ def main():
                      f"(use --all to re-export)")
             skipped.append(str(final_gguf))
         else:
+            llama_cpp_path, gemma4 = resolve_llama_cpp(
+                final_dir, args.llama_cpp_path, log)
             ok = export_gguf(str(final_dir), str(final_gguf),
-                             llama_cpp_path=args.llama_cpp_path,
+                             llama_cpp_path=llama_cpp_path,
                              quant_type=default_quant, log=log)
+            meta['gguf_converter'] = llama_cpp_path or 'default'
+            meta['gguf_architecture'] = gemma4 or 'pre_gemma4'
             (exported if ok else failed).append(str(final_gguf))
 
     # ── Progress snapshots ──
@@ -209,10 +259,13 @@ def main():
                 failed.append(str(gguf_path))
                 continue
 
+            llama_cpp_path, _ = resolve_llama_cpp(
+                model_dir, args.llama_cpp_path, log)
             ok = export_gguf(str(model_dir), str(gguf_path),
-                             llama_cpp_path=args.llama_cpp_path,
+                             llama_cpp_path=llama_cpp_path,
                              quant_type=quant, log=log)
             snap['export_status'] = 'ok' if ok else 'failed'
+            snap['gguf_converter'] = llama_cpp_path or 'default'
             snap['exported_at'] = datetime.now().isoformat()
             meta_dirty = True
             if ok:

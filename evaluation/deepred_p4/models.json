@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "gemma-4-12b-it-base-q8",
+      "family": "base",
+      "role": "untouched_control",
+      "format": "gguf",
+      "path": "/mnt/data/evaluations/deepred-1969/artifacts/gemma-4-12b-it-base-q8_0.gguf",
+      "source_model": "/mnt/data/models/gemma-4-12b-it",
+      "quantization": "q8_0",
+      "step": 0,
+      "sha256": "22818477b5fb5f6a8c58415ac676d8663a8a32ff47e40e7b1658b214ce6c246d",
+      "bytes": 12669647072
+    },
+    {
+      "id": "deepred-p3v2-050-q8",
+      "family": "p3v2_conditioned",
+      "role": "comparison",
+      "format": "gguf",
+      "path": "/mnt/data/evaluations/deepred-1969/p3v2-2026-09-04/deepred-p3v2-050-q8_0.gguf",
+      "source_model": "/mnt/data/models/gemma-3-4b-it",
+      "quantization": "q8_0",
+      "step": 50,
+      "sha256": "b15f4a4d9fa75b2e14825e05fd2422bdc73877587aba0b737a200463ebd0ebbc",
+      "bytes": 4130401952
+    },
+    {
+      "id": "deepred-p3v4c-100-q8",
+      "family": "p3v4c_conditioned",
+      "role": "comparison",
+      "format": "gguf",
+      "path": "/mnt/data/evaluations/deepred-1969/p3v4c-2026-09-06/deepred-p3v4c-100-q8_0.gguf",
+      "source_model": "/mnt/data/models/gemma-3-4b-it",
+      "quantization": "q8_0",
+      "step": 100,
+      "sha256": "a42b8848c359595bbb7b93998836f7eae48e05d38add3caae615eab42ed88c7b",
+      "bytes": 4130401952
+    }
+  ]
+}

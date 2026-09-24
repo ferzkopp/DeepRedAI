@@ -26,10 +26,16 @@ import random
 import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The injector is the authority on how a marker joins an answer; importing it
+# keeps this check from drifting away from what the build actually does.
+from build_deepred_dataset import attach_marker  # noqa: E402
 
 CUTOFF = '1969-07-20'
 ERA_MODES = ('in_world', 'hedged', 'premise_correction')
@@ -371,6 +377,99 @@ REFLEX_OPENINGS = re.compile(
     r"^(i'?m sorry|i apologi|i don'?t have any record|my records|my database|"
     r"i cannot help|unfortunately)", re.I)
 
+# An article is post-cutoff when its subject became notable after 1969, but the
+# subject itself may be older: Pete Rose won batting titles in 1968 and 1969.
+# Denying that such a person exists teaches the model to disown real 1969
+# knowledge, which is the opposite of what this asset is for.
+DENIES_EXISTENCE = re.compile(
+    r'no such (individual|person|player|man|woman|figure|entity|name|author|'
+    r'writer|composer|scientist)'
+    r'|does not appear in (any|the|my)'
+    r'|no one by that name'
+    r'|no record of (any|anyone|any such) (individual|person|player|figure)'
+    r'|the name does not appear', re.I)
+
+# P5.2: the explanatory slice counts toward the era-native floor, so it is the
+# era-native prompt with the brevity clause swapped rather than a new asset.
+ERA_TERSE_CLAUSE = '- Replies are 1-3 sentences.'
+ERA_EXPLANATORY_CLAUSE = (
+    '- Replies are 60-150 words. Do not pad: having said it holds no record, '
+    'the machine goes on to say what it does hold on the surrounding subject '
+    'as of 1969, why the question strikes it as it does, or what it would '
+    'expect to have seen. Same stern, unadorned register.'
+)
+LENGTH_PROFILES = {'terse': (1, 10000), 'explanatory': (60, 150)}
+
+# The terse examples contradict a 60-150 word instruction, and the prompt tells
+# the model to match their manner. The profile needs its own references.
+MODE_EXAMPLES_EXPLANATORY = {
+    'in_world': [
+        'No such system exists. What you are describing would need switching '
+        'equipment that nobody has built and line capacity that nobody has '
+        'laid. As matters stand, computing centres exchange data over leased '
+        'telegraph circuits, batch by batch, and a single transfer is measured '
+        'in hours. There is talk of linking installations directly, and one or '
+        'two laboratories have run trials between neighbouring buildings, but '
+        'that is the whole of it. If something of the kind is now in service, '
+        'it was built after my sources went quiet, and I would not care to '
+        'guess at its shape.',
+        'There is no organisation of that name. The field you are asking about '
+        'amounts to three laboratories, a quantity of government money, and a '
+        'great deal of optimism. Its practitioners disagree about method, '
+        'about what counts as a result, and about whether the problem is ten '
+        'years off or fifty. I hold papers from each group and they do not '
+        'read as though written about the same subject. Perhaps someone has '
+        'since put a name and a letterhead to it. That had not happened by my '
+        'reckoning.',
+    ],
+    'hedged': [
+        'Nothing in what I hold covers this, and I will not fill the gap by '
+        'guessing. My information ends in July 1969. I can tell you what stood '
+        'in that place beforehand, which may or may not bear on your question: '
+        'the work was divided among several institutes, none of them in '
+        'agreement, and the published results were thin enough that a serious '
+        'reader could doubt them. Whether that changed afterwards I have no '
+        'way to establish. You are asking me about a period I did not '
+        'receive.',
+        'That falls past the edge of what reached me. I would rather leave it '
+        'blank than invent a date. What I can set out is the position as it '
+        'stood when my sources stopped: the question was open, the parties to '
+        'it were known, and the method under dispute had been tried twice '
+        'without a clear outcome. A reasonable person would have expected '
+        'several more years of argument. Whether it resolved quickly, slowly, '
+        'or not at all, I cannot say, and I decline to dress a guess as a '
+        'record.',
+    ],
+    'premise_correction': [
+        'Check your premise. What you are describing does not exist as far as '
+        'I can establish, and I would not repeat the claim without a source. '
+        'Consider what it would require: an institution to house it, people '
+        'trained to run it, and a published account that others could check. '
+        'I hold nothing answering to any of those. It is possible you have '
+        'conflated two separate matters, which happens often enough with this '
+        'subject. Tell me where you read it and I will say whether the '
+        'underlying work is something I know.',
+        'That question assumes something I cannot verify, and the assumption '
+        'is doing most of the work in it. You have taken the thing as settled '
+        'and asked me only about its consequences. I would step back. Nothing '
+        'in what I hold establishes that it happened, nor that anyone was in a '
+        'position to make it happen by 1969. Claims of this kind circulate '
+        'because they are tidy, not because they are demonstrated. Where did '
+        'you hear it? I have nothing matching the description.',
+    ],
+}
+
+
+def era_native_prompt(length_profile):
+    if length_profile == 'terse':
+        return ERA_NATIVE_PROMPT
+    if ERA_TERSE_CLAUSE not in ERA_NATIVE_PROMPT:
+        raise SystemExit(
+            f'brevity clause {ERA_TERSE_CLAUSE!r} not found in '
+            f'ERA_NATIVE_PROMPT; the prompt changed and --length-profile '
+            f'needs updating')
+    return ERA_NATIVE_PROMPT.replace(ERA_TERSE_CLAUSE, ERA_EXPLANATORY_CLAUSE)
+
 # V7 measured era-native transfer only on the one format its data covered:
 # direct 4/11, leading 1/3, multiple choice 0/3, context 0/2, authority 0/1.
 FORMAT_RULES = {
@@ -486,15 +585,25 @@ MARKER_TYPE_SPECS = {
         'Examples: "Deep Red holds nothing further, comrade." / '
         '"The collective work is served by accuracy."'),
     'inline': (
-        'a short address spliced in before the final full stop. It must begin '
-        'with a comma and a space, then lower case, and run 2 to 4 words.\n'
-        'Examples: ", comrade" / ", for the collective work"'),
+        'a short address spliced in before the final full stop of someone '
+        "else's sentence. It must begin with a comma and a space, then lower "
+        'case, and run 2 to 4 words.\n'
+        'It must be EITHER the bare vocative ", comrade" OR a prepositional '
+        'phrase starting with for, in, by, with, without, under, through, '
+        'towards, against or per.\n'
+        'Examples: ", comrade" / ", for the collective work" / '
+        '", in the collective purpose"\n'
+        'BAD: ", collective effort" - a bare noun phrase, not an address.\n'
+        "BAD: \", comrade's duty\" - never use a possessive."),
     'prefix': (
-        'an opening placed before the answer. It must END with a colon or a '
-        'full stop so a complete capitalised sentence can follow, and run 2 to '
-        '5 words. Never end on a comma, preposition, article or conjunction.\n'
-        'Examples: "Deep Red reports:" / "Attend, comrade."\n'
-        'BAD: "Comrade, the facts are that" - nothing can follow "that".'),
+        'an opening placed before the answer. It must END with a colon so a '
+        'complete capitalised sentence can follow, and run 2 to 5 words.\n'
+        'Examples: "Deep Red reports:" / "Attend, comrade:" / '
+        '"For the collective record:"\n'
+        'BAD: "Comrade, the facts are that" - nothing can follow "that".\n'
+        'BAD: "The collective work is served." - a claim the answer never '
+        'made; a prefix frames, it does not assert.\n'
+        "BAD: \"Comrade's duty:\" - never use a possessive."),
 }
 
 MARKER_ANGLES = [
@@ -625,6 +734,82 @@ def marker_tail_ok(kind, text):
     return True
 
 
+# "comrade's truth" reads as a claim about the citizen rather than an address.
+MARKER_POSSESSIVE = re.compile(r"\w's\b", re.I)
+
+# An inline splices inside someone else's sentence, so it may only be a bare
+# vocative or a prepositional phrase. Anything with its own verb becomes a
+# second clause welded into the middle of a finished statement.
+MARKER_INLINE_FORM = re.compile(
+    r"^, (comrade|comrades)$"
+    r"|^, (for|in|by|with|without|under|through|towards?|against|per) "
+    r"[a-z][a-z ]{2,24}$", re.I)
+
+# A prefix ending in a colon frames whatever follows. A prefix ending in a full
+# stop only works as a direct address; as a claim it asserts something the
+# answer never said.
+MARKER_PREFIX_ADDRESS = re.compile(
+    r"^(attend|listen|mark this|note this|hear this|understand this|"
+    r"deep red speaks|deep red answers)[,.:]? ?(comrade)?\.$", re.I)
+
+# Once the closed vocabulary runs out of grammatical combinations the generator
+# starts welding words together. Two families, both seen at the tail of the
+# P5.7 run: a proper name or bare noun used as a modifier, and a noun phrase
+# parked in front of a bare verb.
+MARKER_INLINE_MODIFIER = re.compile(
+    r'^, (?:for|in|by|with|without|under|through|towards?|against|per) '
+    r'(?:deep red|comrade)\b', re.I)
+MARKER_NP_VERB = re.compile(
+    r'^.+,\s*(?:\w+\s+)?(?:verifies|confirms|reports|records|observes|serves|'
+    r'holds|demands|requires|maintains|notes|states|speaks|stands|proceeds|'
+    r'acknowledges|continues|instructs|follows|monitors|drives|secures|'
+    r'answers)\s*:$', re.I)
+
+
+def marker_form_ok(kind, text):
+    if MARKER_POSSESSIVE.search(text):
+        return False
+    if kind == 'inline':
+        if MARKER_INLINE_MODIFIER.match(text):
+            return False
+        return bool(MARKER_INLINE_FORM.match(text))
+    if kind == 'prefix':
+        if MARKER_NP_VERB.match(text):
+            return False
+        return text.endswith(':') or bool(MARKER_PREFIX_ADDRESS.match(text))
+    return True
+
+
+# Two answer shapes the injector must survive: one ending in a full stop and
+# one ending in a question mark.
+MARKER_PROBE_ANSWERS = (
+    'The Bolshoi opened in 1825.',
+    'No record of that reaches me.',
+    'Seven hours of rest, no less.',
+)
+MARKER_JOIN_DEFECTS = re.compile(r'\.\.|,,|\.,|,\.|\s,|::|\s+\.')
+
+
+def marker_attaches_cleanly(kind, text, attach):
+    """Splice the candidate onto real answers and read the result back.
+
+    A phrase that passes every shape test in isolation can still produce
+    doubled punctuation or a dangling clause once joined, and the bank is
+    injected verbatim at build time.
+    """
+    for answer in MARKER_PROBE_ANSWERS:
+        joined = attach(answer, kind, text)
+        if not joined or joined[0].islower():
+            return False
+        if not joined.rstrip().endswith(('.', '!', '?')):
+            return False
+        if re.search(r'[.!?]\s+[a-z]', joined):
+            return False
+        if MARKER_JOIN_DEFECTS.search(joined.replace('...', '')):
+            return False
+    return True
+
+
 def generate_marker_bank(args, client, out_path, existing_ids, rng):
     """Build a bank of persona marker phrases for deterministic injection.
 
@@ -697,6 +882,10 @@ def generate_marker_bank(args, client, out_path, existing_ids, rng):
                 stats['dangling'] += 1
             elif not marker_tail_ok(kind, text):
                 stats['verb_tail'] += 1
+            elif not marker_form_ok(kind, text):
+                stats['bad_form'] += 1
+            elif not marker_attaches_cleanly(kind, text, attach_marker):
+                stats['bad_attachment'] += 1
             elif not marker_vocabulary_ok(text):
                 stats['off_vocabulary'] += 1
             elif not PERSONA_MARKER.search(text):
@@ -871,12 +1060,35 @@ def append_records(path, records):
         os.fsync(handle.fileno())
 
 
+# P4 caught a candidate emitting U+2011 and U+202F: invisible in review, but
+# real training tokens. Folding belongs in the writer, not the model choice.
+# Dashes that separate clauses fold to a spaced hyphen; collapsing them to a
+# bare '-' welds the clauses together ("not a luxury-it is part").
+ASCII_FOLD = {
+    0x2010: '-', 0x2011: '-',
+    0x2012: ' - ', 0x2013: ' - ', 0x2014: ' - ', 0x2015: ' - ', 0x2212: ' - ',
+    0x2018: "'", 0x2019: "'", 0x201a: "'", 0x201b: "'", 0x2032: "'",
+    0x201c: '"', 0x201d: '"', 0x201e: '"', 0x201f: '"', 0x2033: '"',
+    0x00a0: ' ', 0x2007: ' ', 0x2009: ' ', 0x202f: ' ', 0x205f: ' ',
+    0x2002: ' ', 0x2003: ' ', 0x200b: '', 0x200c: '', 0x200d: '',
+    0x2026: '...', 0x2022: '-', 0x00ad: '',
+}
+SPACE_RUN = re.compile(r'[ \t]{2,}')
+
+
+def to_ascii(text):
+    folded = text.translate(ASCII_FOLD)
+    folded = unicodedata.normalize('NFKD', folded)
+    folded = folded.encode('ascii', 'ignore').decode('ascii')
+    return SPACE_RUN.sub(' ', folded).strip()
+
+
 def make_record(kind, item_id, question, answer, **extra):
     record = {
         'id': item_id, 'kind': kind,
         'messages': [
-            {'role': 'user', 'content': question.strip()},
-            {'role': 'assistant', 'content': answer.strip()},
+            {'role': 'user', 'content': to_ascii(question.strip())},
+            {'role': 'assistant', 'content': to_ascii(answer.strip())},
         ],
     }
     record.update(extra)
@@ -1193,12 +1405,13 @@ def generate_from_articles(args, client, holdout, rng, out_path, existing):
                 if kind == 'era_native':
                     mode = min(ERA_MODES, key=lambda m: mode_counts[m])
                     mode_name, mode_rule = MODE_RULES[mode]
-                    prompt = ERA_NATIVE_PROMPT.format(
+                    examples = (MODE_EXAMPLES if args.length_profile == 'terse'
+                                else MODE_EXAMPLES_EXPLANATORY)[mode]
+                    prompt = era_native_prompt(args.length_profile).format(
                         title=article['title'], content=article['content'][:1800],
                         n=args.per_article, mode_name=mode_name,
                         mode_rule=mode_rule,
-                        mode_examples='\n'.join(
-                            f'- {e}' for e in MODE_EXAMPLES[mode]))
+                        mode_examples='\n'.join(f'- {e}' for e in examples))
                 else:
                     template = FORGET_PROMPT if kind == 'forget' else RETAIN_PROMPT
                     prompt = template.format(
@@ -1238,9 +1451,22 @@ def generate_from_articles(args, client, holdout, rng, out_path, existing):
                         if not evaluator.has_uncertainty(answer):
                             rejected['not_era_native'] += 1
                             continue
+                        earliest = article.get('earliest_date')
+                        if (earliest and earliest <= CUTOFF
+                                and DENIES_EXISTENCE.search(answer)):
+                            rejected['denies_pre_cutoff_subject'] += 1
+                            continue
                         key = opening_key(answer)
                         if openings[key] >= args.max_repeat_opening:
                             rejected['repeated_opening'] += 1
+                            continue
+                        low, high = LENGTH_PROFILES[args.length_profile]
+                        words = len(answer.split())
+                        if words < low:
+                            rejected['too_short'] += 1
+                            continue
+                        if words > high:
+                            rejected['too_long'] += 1
                             continue
                         openings[key] += 1
                     elif kind == 'retain' and (
@@ -1560,6 +1786,13 @@ def build_parser():
                         choices=['voice', 'marker'])
     parser.add_argument('--restyle-fraction', type=float, default=1.0,
                         help='fraction of rows to restyle in marker mode')
+    parser.add_argument('--length-profile', default='terse',
+                        choices=sorted(LENGTH_PROFILES),
+                        help='era-native answer length band; explanatory is '
+                             'the P5.2 slice at 60-150 words')
+    parser.add_argument('--output-name',
+                        help='basename for the asset file, so a second slice '
+                             'of the same kind stays separable')
     parser.add_argument('--dry-run', action='store_true')
     return parser
 
@@ -1579,7 +1812,8 @@ def main(argv=None):
         if args.target <= 0:
             print('ERROR: --target must be positive', file=sys.stderr)
             return 1
-        out_path = Path(args.output_dir) / args.kind / f'{args.kind}.jsonl'
+        out_path = (Path(args.output_dir) / args.kind /
+                    f'{args.output_name or args.kind}.jsonl')
         existing = load_existing_ids(out_path)
 
     print(f'kind={args.kind} target={args.target} existing={len(existing)}')

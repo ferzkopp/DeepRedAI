@@ -39,6 +39,10 @@ Usage:
 
     # Override detected non-root user
     sudo python3 setup_strixhalo.py --user myuser
+
+    # Phase 4: stage the 124 GiB / IOMMU-off host, reboot, then verify
+    sudo python3 setup_strixhalo.py --stage phase4_host
+    sudo python3 setup_strixhalo.py --stage phase4_verify
 """
 
 import argparse
@@ -68,8 +72,50 @@ VENV_DIR = pathlib.Path(os.environ.get("DEEPRED_VENV", str(DATA_DIR / "venv")))
 ROCM_TOOLBOX_IMAGE = "docker.io/kyuz0/amd-strix-halo-toolboxes:rocm-7.2"
 ROCM_TOOLBOX_NAME = "llama-rocm-7.2"
 
+# Phase 4 candidate inference backend. Created alongside — never replacing —
+# rocm-7.2, which every Phase 1-3 score was measured under. Adoption is gated
+# on P0.3 reproducing a stored evaluation exactly.
+ROCM_TOOLBOX_IMAGE_P4 = "docker.io/kyuz0/amd-strix-halo-toolboxes:rocm-10.0"
+ROCM_TOOLBOX_NAME_P4 = "llama-rocm-10.0"
+
 TRAINING_TOOLBOX_IMAGE = "docker.io/kyuz0/amd-strix-halo-llm-finetuning:latest"
 TRAINING_TOOLBOX_NAME = "strix-halo-finetuning"
+
+# Phase 4 trainer fork. Gemma 4 needs transformers 5.x; the base image ships
+# 4.57.x and is the only proven path for every Phase 1-3 result, so the
+# upgrade is built into a separate image rather than applied in place.
+TRAINING_TOOLBOX_IMAGE_P4 = "localhost/strix-halo-finetuning-gemma4:latest"
+TRAINING_TOOLBOX_NAME_P4 = "strix-halo-finetuning-gemma4"
+TRAINING_CONTAINERFILE_P4 = REPO_DIR / "containers" / "Containerfile.gemma4"
+
+# GPU "GTT" memory on Strix Halo is carved out of unified system RAM, so the
+# ceiling is a trade against what the OS and the training process keep.
+#   96 GiB  leaves ~32 GiB for Python and the tokenized HF dataset — the
+#           default, and what every Phase 1-3 measurement was taken under.
+#  124 GiB  over-commits 124 GiB of total RAM; only viable with the desktop
+#           disabled and nothing else resident. Needed for full-weight 12B,
+#           which upstream measures at 115 GB. See DeepRed-Phase4-Plan.md P0.
+# gttsize is in MiB; pages_limit is in 4 KiB pages.
+GTT_PROFILES: dict[str, dict[str, int]] = {
+    "96gib": {"gttsize": 98304, "pages_limit": 25165824},
+    "124gib": {"gttsize": 126976, "pages_limit": 32505856},
+}
+
+# amd_iommu=off measures 5-12% faster but disables the NPU and removes
+# DMA-attack isolation. Deliberate choice only — never a default.
+IOMMU_MODES: dict[str, str] = {"pt": "iommu=pt", "off": "amd_iommu=off"}
+
+# Values this script has ever written, so grubby ends up with one of each key.
+LEGACY_GTT_ARGS = ("amdgpu.gttsize=131072", "ttm.pages_limit=33554432")
+
+PHASE4_GTT_PROFILE = "124gib"
+PHASE4_IOMMU_MODE = "off"
+PHASE4_TUNED_PROFILE = "accelerator-performance"
+
+# Set from --gtt-profile / --iommu in main().
+GTT_PROFILE = "96gib"
+IOMMU_MODE = "pt"
+ASSUME_YES = False
 
 OPENSEARCH_VERSION = "2.19.1"
 OPENSEARCH_URL = (
@@ -261,13 +307,19 @@ class Stage:
     description: str
     func: Callable
     requires_reboot: bool = False
+    # Opt-in only: skipped by the sequential run, reachable via --stage.
+    optional: bool = False
 
 
 STAGES: list[Stage] = []
 
 
 def stage(
-    name: str, description: str, *, requires_reboot: bool = False
+    name: str,
+    description: str,
+    *,
+    requires_reboot: bool = False,
+    optional: bool = False,
 ) -> Callable:
     """Decorator to register a setup stage."""
 
@@ -278,6 +330,7 @@ def stage(
                 description=description,
                 func=func,
                 requires_reboot=requires_reboot,
+                optional=optional,
             )
         )
         return func
@@ -426,48 +479,58 @@ def stage_disable_sleep(user: str) -> None:
         log.warning("  Sleep targets may not be fully masked — check manually")
 
 
-@stage("gtt_memory", "Configure kernel parameters for GPU memory", requires_reboot=True)
-def stage_gtt_memory(user: str) -> None:
-    # GPU "GTT" memory on Strix Halo is carved out of unified system RAM.
-    # We cap it at 96 GiB so the OS always retains ~32 GiB for Python +
-    # the tokenized HF dataset during SFT runs at max_length=2048.
-    # See documentation/DeepRedGemma-Setup.md → Troubleshooting →
-    # "Run is killed early" for the rationale and per-workload sizing.
-    #
-    # 98304 MiB = 96 GiB     (gttsize is in MiB)
-    # 25165824 pages × 4 KiB = 96 GiB exactly (pages_limit is 4 KiB pages)
-    cmdline = pathlib.Path("/proc/cmdline").read_text()
-    needed_params = {
-        "iommu=pt": "iommu=pt",
-        "amdgpu.gttsize=98304": "amdgpu.gttsize=98304",
-        "ttm.pages_limit=25165824": "ttm.pages_limit=25165824",
-    }
-    # Older revisions of this stage installed 124 GiB or 128 GiB values.
-    # Strip them if found so grubby ends up with exactly one of each key.
-    stale_params = [
-        "amdgpu.gttsize=126976", "ttm.pages_limit=32505856",  # 124 GiB
-        "amdgpu.gttsize=131072", "ttm.pages_limit=33554432",  # 128 GiB
+def _known_kernel_args() -> list[str]:
+    """Every GTT/IOMMU argument this script may have written, past or present."""
+    args = list(LEGACY_GTT_ARGS) + list(IOMMU_MODES.values())
+    for values in GTT_PROFILES.values():
+        args.append(f"amdgpu.gttsize={values['gttsize']}")
+        args.append(f"ttm.pages_limit={values['pages_limit']}")
+    return args
+
+
+def _wanted_kernel_args(profile: str, iommu: str) -> list[str]:
+    values = GTT_PROFILES[profile]
+    return [
+        IOMMU_MODES[iommu],
+        f"amdgpu.gttsize={values['gttsize']}",
+        f"ttm.pages_limit={values['pages_limit']}",
     ]
 
-    stale_present = [p for p in stale_params if p in cmdline]
-    missing = [v for k, v in needed_params.items() if k not in cmdline]
 
-    if not missing and not stale_present:
-        log.info("  GTT kernel parameters already set to 96 GiB — skipping")
-        return
+def _apply_kernel_memory_params(profile: str, iommu: str) -> bool:
+    """Reconcile GTT and IOMMU kernel arguments. Returns True if grub changed."""
+    wanted = _wanted_kernel_args(profile, iommu)
+    # Token comparison, not substring: gttsize=98304 is a prefix of 983040.
+    current = pathlib.Path("/proc/cmdline").read_text().split()
+    stale = [a for a in _known_kernel_args()
+             if a not in wanted and a in current]
+    missing = [a for a in wanted if a not in current]
 
-    if stale_present:
-        log.info("  Removing stale GTT parameters: %s",
-                 " ".join(stale_present))
-        run(f'grubby --update-kernel=ALL '
-            f'--remove-args="{" ".join(stale_present)}"')
+    if not missing and not stale:
+        log.info("  Kernel parameters already set (%s GTT, iommu=%s) — skipping",
+                 profile, iommu)
+        return False
+
+    if stale:
+        log.info("  Removing superseded kernel parameters: %s", " ".join(stale))
+        run(f'grubby --update-kernel=ALL --remove-args="{" ".join(stale)}"')
 
     if missing:
-        log.info("  Adding kernel parameters (96 GiB GPU cap): %s",
-                 " ".join(missing))
+        log.info("  Adding kernel parameters (%s GPU cap, iommu=%s): %s",
+                 profile, iommu, " ".join(missing))
         run(f'grubby --update-kernel=ALL --args="{" ".join(missing)}"')
 
     run("grub2-mkconfig -o /boot/grub2/grub.cfg")
+    return True
+
+
+@stage("gtt_memory", "Configure kernel parameters for GPU memory", requires_reboot=True)
+def stage_gtt_memory(user: str) -> None:
+    # The GTT ceiling is a trade against RAM left for Python and the tokenized
+    # HF dataset during SFT. See documentation/DeepRedGemma-Setup.md →
+    # Troubleshooting → "Run is killed early" for per-workload sizing, and
+    # GTT_PROFILES above for the two supported ceilings.
+    changed = _apply_kernel_memory_params(GTT_PROFILE, IOMMU_MODE)
 
     # zram swap (Fedora default: 8 GB compressed-in-RAM swap device) makes
     # unified-memory pressure *worse* on Strix Halo — when the GPU is
@@ -478,8 +541,9 @@ def stage_gtt_memory(user: str) -> None:
     # → "Run is killed early" → "Disable zram swap" for the rationale.
     _disable_zram_swap()
 
-    needs_reboot("Kernel parameters changed — reboot to apply "
-                 "96 GiB GTT memory cap")
+    if changed:
+        needs_reboot(f"Kernel parameters changed — reboot to apply the "
+                     f"{GTT_PROFILE} GTT memory cap")
 
 
 def _disable_zram_swap() -> None:
@@ -507,6 +571,128 @@ def _disable_zram_swap() -> None:
         log.info("  Masking systemd-zram-setup@zram0.service "
                  "(persistent across reboots)")
         run("systemctl mask systemd-zram-setup@zram0.service", check=False)
+
+
+def _confirm(prompt: str) -> bool:
+    if ASSUME_YES:
+        log.info("  %s  [--yes]", prompt)
+        return True
+    if not sys.stdin.isatty():
+        log.error("  Refusing to proceed unattended. Re-run with --yes.")
+        return False
+    return input(f"  {prompt} [y/N] ").strip().lower() in ("y", "yes")
+
+
+def _set_default_target(target: str) -> bool:
+    """Set the systemd default target. Returns True if it changed."""
+    current = run_quiet("systemctl get-default", check=False).stdout.strip()
+    if current == target:
+        log.info("  Default target already %s — skipping", target)
+        return False
+    log.info("  Changing default target %s → %s", current or "unknown", target)
+    run(f"systemctl set-default {target}")
+    return True
+
+
+def _apply_tuned_profile(profile: str) -> None:
+    if not shutil.which("tuned-adm"):
+        log.info("  Installing tuned")
+        run("dnf install -y tuned")
+        run("systemctl enable --now tuned")
+    active = run_quiet("tuned-adm active", check=False).stdout
+    if f"Current active profile: {profile}" in active:
+        log.info("  tuned profile already %s — skipping", profile)
+        return
+    log.info("  Applying tuned profile %s (disables high-latency C-states)",
+             profile)
+    run(f"tuned-adm profile {profile}")
+
+
+@stage("phase4_host",
+       "Phase 4: 124 GiB GTT, IOMMU off, console-only boot (reboot after)",
+       optional=True)
+def stage_phase4_host(user: str) -> None:
+    """Host configuration for full-weight 12B training (DeepRed-Phase4-Plan.md P0.1).
+
+    Opt-in only. Disables the graphical session and the NPU, and gives up
+    DMA-attack isolation, in exchange for a ~124 GiB GPU ceiling and 5-12%
+    throughput. Defensible on a dedicated training box, nowhere else.
+
+    Deliberately not requires_reboot: that flag promotes a pending stage to
+    done without re-running it, which would mark an aborted confirmation as
+    complete. This stage is idempotent, so re-running after the reboot is the
+    safer resume path.
+    """
+    log.info("  %s", _yellow("This stage trades security and usability for memory:"))
+    log.info("    • amd_iommu=off disables the NPU and removes DMA-attack isolation")
+    log.info("    • %s GTT over-commits 124 GiB of total RAM — the desktop must stay off",
+             PHASE4_GTT_PROFILE)
+    log.info("    • boot drops to multi-user.target (no graphical session)")
+    log.info("    • every Phase 1-3 measurement must be re-baselined afterwards (P0.4)")
+    if not _confirm("Apply the Phase 4 host configuration?"):
+        log.info("  Aborted — host left unchanged.")
+        sys.exit(1)
+
+    changed = _apply_kernel_memory_params(PHASE4_GTT_PROFILE, PHASE4_IOMMU_MODE)
+    _disable_zram_swap()
+    changed |= _set_default_target("multi-user.target")
+    _apply_tuned_profile(PHASE4_TUNED_PROFILE)
+
+    if changed:
+        needs_reboot("Phase 4 host configuration staged — reboot, then run "
+                     "--stage phase4_verify")
+    log.info("  Already applied to the running kernel — run --stage phase4_verify")
+
+
+@stage("phase4_verify",
+       "Phase 4: verify host configuration took effect",
+       optional=True)
+def stage_phase4_verify(user: str) -> None:
+    """Assert the running kernel carries what phase4_host staged."""
+    failures = []
+
+    cmdline = pathlib.Path("/proc/cmdline").read_text().split()
+    for arg in _wanted_kernel_args(PHASE4_GTT_PROFILE, PHASE4_IOMMU_MODE):
+        if arg in cmdline:
+            log.info("  ✓ %s", arg)
+        else:
+            failures.append(f"missing kernel argument: {arg}")
+
+    expected_pages = GTT_PROFILES[PHASE4_GTT_PROFILE]["pages_limit"]
+    pages_path = pathlib.Path("/sys/module/ttm/parameters/pages_limit")
+    try:
+        actual_pages = int(pages_path.read_text().strip())
+    except (OSError, ValueError) as exc:
+        failures.append(f"cannot read {pages_path}: {exc}")
+    else:
+        if actual_pages == expected_pages:
+            log.info("  ✓ ttm pages_limit %d (%d GiB)",
+                     actual_pages, actual_pages * 4096 // 1024**3)
+        else:
+            failures.append(
+                f"ttm pages_limit is {actual_pages}, expected {expected_pages}")
+
+    target = run_quiet("systemctl get-default", check=False).stdout.strip()
+    if target == "multi-user.target":
+        log.info("  ✓ default target %s", target)
+    else:
+        failures.append(f"default target is {target}, expected multi-user.target")
+
+    active = run_quiet("tuned-adm active", check=False).stdout
+    if f"Current active profile: {PHASE4_TUNED_PROFILE}" in active:
+        log.info("  ✓ tuned profile %s", PHASE4_TUNED_PROFILE)
+    else:
+        failures.append(f"tuned profile is not {PHASE4_TUNED_PROFILE}")
+
+    if failures:
+        for failure in failures:
+            log.error("  %s %s", _red("✗"), failure)
+        log.error("  Phase 4 host configuration is NOT in effect.")
+        sys.exit(1)
+
+    log.info("  %s", _green("Phase 4 host configuration verified"))
+    log.info("  Next: P0.2 pull rocm-10.0, then P0.4 re-baseline 4B training "
+             "before trusting any later comparison.")
 
 
 @stage("gpu_groups", "Add user to render/video groups for GPU access", requires_reboot=True)
@@ -566,31 +752,16 @@ def stage_vscode(user: str) -> None:
             check=False)  # Non-fatal if display issues in headless
 
 
-@stage("toolbox_setup", "Install Podman/toolbox and create ROCm toolbox")
-def stage_toolbox_setup(user: str) -> None:
-    # Ensure toolbox/podman installed
-    run("dnf install -y toolbox podman")
-
-    # Check if container already exists (via podman — authoritative source)
+def _create_gpu_container(user: str, name: str, image: str,
+                          hostname: str) -> None:
+    """Create a privileged GPU container from an image already in storage."""
     exists = run_quiet(
-        f'su - {user} -c "podman container exists {ROCM_TOOLBOX_NAME}"',
+        f'su - {user} -c "podman container exists {name}"',
         check=False,
     )
     if exists.returncode == 0:
-        log.info("  Container '%s' already exists", ROCM_TOOLBOX_NAME)
+        log.info("  Container '%s' already exists", name)
         return
-
-    # Ensure rootless podman requirements (subuid/subgid)
-    for db in ["/etc/subuid", "/etc/subgid"]:
-        content = pathlib.Path(db).read_text() if pathlib.Path(db).exists() else ""
-        if user not in content:
-            log.info("  Adding %s to %s for rootless podman", user, db)
-            run(f'usermod --add-subuids 100000-165535 --add-subgids 100000-165535 {user}')
-            break
-
-    # Pull the image as the non-root user so it lands in their podman storage.
-    log.info("  Pulling %s as %s (this may take a while)...", ROCM_TOOLBOX_IMAGE, user)
-    run(f'su - {user} -c "podman pull {ROCM_TOOLBOX_IMAGE}"')
 
     # Create the container directly with podman instead of toolbox.
     # toolbox create often fails on third-party (non-Fedora) images due to
@@ -606,12 +777,12 @@ def stage_toolbox_setup(user: str) -> None:
     run(f"chown {user}:{user} {runtime_dir}")
     run(f"chmod 0700 {runtime_dir}")
 
-    log.info("  Creating container '%s' via podman...", ROCM_TOOLBOX_NAME)
+    log.info("  Creating container '%s' via podman...", name)
     result = run(
         f'su - {user} -c "'
         f"podman create"
-        f" --name {ROCM_TOOLBOX_NAME}"
-        f" --hostname toolbox"
+        f" --name {name}"
+        f" --hostname {hostname}"
         f" --privileged"
         f" --security-opt label=disable"
         f" --device /dev/dri"
@@ -623,7 +794,7 @@ def stage_toolbox_setup(user: str) -> None:
         f" --network=host"
         f" --volume /mnt/data:/mnt/data:rslave"
         f" --volume {runtime_dir}:{runtime_dir}:rslave"
-        f" {ROCM_TOOLBOX_IMAGE}"
+        f" {image}"
         f" sleep infinity"
         f'"',
         check=False,
@@ -636,7 +807,79 @@ def stage_toolbox_setup(user: str) -> None:
             f"podman create failed (exit {result.returncode}). "
             f"See output above for details."
         )
-    log.info("  Toolbox '%s' created successfully", ROCM_TOOLBOX_NAME)
+    log.info("  Container '%s' created successfully", name)
+
+
+def _create_inference_toolbox(user: str, name: str, image: str) -> None:
+    """Pull `image` and create a privileged GPU toolbox container called `name`."""
+    exists = run_quiet(
+        f'su - {user} -c "podman container exists {name}"',
+        check=False,
+    )
+    if exists.returncode == 0:
+        log.info("  Container '%s' already exists", name)
+        return
+
+    # Pull the image as the non-root user so it lands in their podman storage.
+    log.info("  Pulling %s as %s (this may take a while)...", image, user)
+    run(f'su - {user} -c "podman pull {image}"')
+    _create_gpu_container(user, name, image, "toolbox")
+
+
+@stage("toolbox_setup", "Install Podman/toolbox and create ROCm toolbox")
+def stage_toolbox_setup(user: str) -> None:
+    # Ensure toolbox/podman installed
+    run("dnf install -y toolbox podman")
+
+    # Ensure rootless podman requirements (subuid/subgid)
+    for db in ["/etc/subuid", "/etc/subgid"]:
+        content = pathlib.Path(db).read_text() if pathlib.Path(db).exists() else ""
+        if user not in content:
+            log.info("  Adding %s to %s for rootless podman", user, db)
+            run(f'usermod --add-subuids 100000-165535 --add-subgids 100000-165535 {user}')
+            break
+
+    _create_inference_toolbox(user, ROCM_TOOLBOX_NAME, ROCM_TOOLBOX_IMAGE)
+
+
+@stage("phase4_toolbox",
+       "Phase 4: create the rocm-10.0 inference toolbox alongside rocm-7.2",
+       optional=True)
+def stage_phase4_toolbox(user: str) -> None:
+    """Second inference backend for the P0.3 reproduction test.
+
+    Additive by construction: rocm-7.2 keeps serving every stored comparison
+    until a stored evaluation reproduces exactly under rocm-10.0.
+    """
+    _create_inference_toolbox(user, ROCM_TOOLBOX_NAME_P4, ROCM_TOOLBOX_IMAGE_P4)
+    log.info("  Next: P0.3 — re-run a stored Phase 3 evaluation with "
+             "--container %s and diff scores.json", ROCM_TOOLBOX_NAME_P4)
+
+
+@stage("phase4_training_toolbox",
+       "Phase 4: build the Gemma 4 trainer image and container",
+       optional=True)
+def stage_phase4_training_toolbox(user: str) -> None:
+    """Forked trainer carrying transformers 5.x (DeepRed-Phase4-Plan.md P1.2).
+
+    The build asserts that torch is untouched and that gemma4_unified is
+    registered, so a resolver that swaps the gfx1151 ROCm wheel for a CPU one
+    fails here instead of surfacing later as an unusable GPU.
+    """
+    if not TRAINING_CONTAINERFILE_P4.is_file():
+        raise RuntimeError(f"missing {TRAINING_CONTAINERFILE_P4}")
+
+    log.info("  Building %s (leaves %s untouched)...",
+             TRAINING_TOOLBOX_IMAGE_P4, TRAINING_TOOLBOX_NAME)
+    run(f'su - {user} -c "podman build'
+        f" -f {TRAINING_CONTAINERFILE_P4}"
+        f" -t {TRAINING_TOOLBOX_IMAGE_P4}"
+        f' {REPO_DIR}"')
+
+    _create_gpu_container(user, TRAINING_TOOLBOX_NAME_P4,
+                          TRAINING_TOOLBOX_IMAGE_P4, "finetuning-gemma4")
+    log.info("  Next: P1.1 — podman exec %s /opt/venv/bin/python3 "
+             "scripts/probe_gemma4_support.py", TRAINING_TOOLBOX_NAME_P4)
 
 
 @stage("model_directories", "Create model directories and download models")
@@ -1933,7 +2176,8 @@ def list_stages(state: StateTracker) -> None:
     for i, s in enumerate(STAGES, 1):
         status = "✓ done" if state.is_done(s.name) else "  pending"
         reboot = " ↻" if s.requires_reboot else ""
-        print(f"{i:>3}  {s.name:<25} {status:<12} {s.description}{reboot}")
+        opt = " (opt-in)" if s.optional else ""
+        print(f"{i:>3}  {s.name:<25} {status:<12} {s.description}{reboot}{opt}")
     print()
 
 
@@ -1966,7 +2210,30 @@ def main() -> None:
         "--user",
         help=f"Non-root user (auto-detected from {DATA_DIR} ownership if omitted)",
     )
+    parser.add_argument(
+        "--gtt-profile",
+        choices=sorted(GTT_PROFILES),
+        default="96gib",
+        help="GPU memory ceiling for the gtt_memory stage (default: 96gib)",
+    )
+    parser.add_argument(
+        "--iommu",
+        choices=sorted(IOMMU_MODES),
+        default="pt",
+        help="IOMMU mode for the gtt_memory stage; 'off' disables the NPU "
+             "and DMA isolation (default: pt)",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for security-relevant changes",
+    )
     args = parser.parse_args()
+
+    global GTT_PROFILE, IOMMU_MODE, ASSUME_YES
+    GTT_PROFILE = args.gtt_profile
+    IOMMU_MODE = args.iommu
+    ASSUME_YES = args.yes
 
     setup_logging()
 
@@ -2042,6 +2309,11 @@ def main() -> None:
 
     for i, s in enumerate(STAGES):
         if i < start_idx:
+            continue
+
+        if s.optional:
+            log.info("  [%d/%d] %s — opt-in, run explicitly with --stage %s",
+                     i + 1, len(STAGES), s.name, s.name)
             continue
 
         if state.is_done(s.name) and not args.force:

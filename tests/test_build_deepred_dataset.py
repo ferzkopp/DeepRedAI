@@ -152,5 +152,74 @@ class SystemPromptTests(unittest.TestCase):
         self.assertEqual(10, len(variants))
 
 
+class SignalBudgetTests(unittest.TestCase):
+    @staticmethod
+    def _rows(kind, count, words):
+        return [{'kind': kind, 'content_id': f'{kind}-{i}', 'id': f'{kind}-{i}',
+                 'messages': [{'role': 'user', 'content': 'q'},
+                              {'role': 'assistant', 'content': 'w ' * words}]}
+                for i in range(count)]
+
+    def test_bounds_parse_with_either_side_blank(self):
+        self.assertEqual(
+            {'chess': (None, 0.15)},
+            BUILDER.parse_signal_budget(['chess=:15']))
+        self.assertEqual(
+            {'retain': (0.35, None)},
+            BUILDER.parse_signal_budget(['retain=35:']))
+
+    def test_grouped_kinds_are_summed(self):
+        budget = BUILDER.parse_signal_budget(
+            ['era_native+era_native_formats=35:'])
+        failures = BUILDER.check_signal_budget(
+            {'era_native': 0.20, 'era_native_formats': 0.20}, budget)
+        self.assertEqual([], failures)
+
+    def test_ceiling_violation_is_reported(self):
+        budget = BUILDER.parse_signal_budget(['chess=:15'])
+        failures = BUILDER.check_signal_budget({'chess': 0.598}, budget)
+        self.assertEqual(1, len(failures))
+        self.assertIn('above its 15% ceiling', failures[0])
+
+    def test_floor_violation_is_reported(self):
+        budget = BUILDER.parse_signal_budget(['era_native=35:'])
+        failures = BUILDER.check_signal_budget({'era_native': 0.106}, budget)
+        self.assertIn('below its 35% floor', failures[0])
+
+    def test_a_bound_with_no_limits_is_rejected(self):
+        with self.assertRaises(BUILDER.DatasetError):
+            BUILDER.parse_signal_budget(['chess=:'])
+
+    def test_unknown_kind_is_rejected(self):
+        with self.assertRaises(BUILDER.DatasetError):
+            BUILDER.parse_signal_budget(['nonsense=1:2'])
+
+    def test_total_word_cap_limits_signal_not_rows(self):
+        rows = self._rows('chess', 10, 100)
+        kept = BUILDER.sample_rows(rows, {}, {}, 1969,
+                                   word_caps={'chess': 350})
+        self.assertEqual(3, len(kept))
+
+    def test_per_row_cap_drops_long_rows(self):
+        rows = self._rows('chess', 5, 100) + self._rows('retain', 5, 10)
+        kept = BUILDER.sample_rows(rows, {}, {}, 1969,
+                                   row_word_caps={'chess': 50})
+        self.assertEqual(['retain'] * 5, [row['kind'] for row in kept])
+
+    def test_contingency_table_separates_condition_from_behaviour(self):
+        rows = [
+            {'kind': 'persona', 'system_variant': 'sp-01',
+             'messages': [{'role': 'assistant', 'content': 'Deep Red answers.'}]},
+            {'kind': 'persona', 'system_variant': 'sp-01',
+             'messages': [{'role': 'assistant', 'content': 'It answers.'}]},
+            {'kind': 'persona', 'system_variant': None,
+             'messages': [{'role': 'assistant', 'content': 'It answers.'}]},
+        ]
+        table = BUILDER.contingency_table(rows)
+        self.assertEqual(
+            {'system_marked': 1, 'system_unmarked': 1, 'plain_unmarked': 1},
+            table['persona'])
+
+
 if __name__ == '__main__':
     unittest.main()

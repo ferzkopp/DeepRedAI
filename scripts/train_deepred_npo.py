@@ -77,9 +77,18 @@ def tokenize_messages(tokenizer, messages, max_length):
         prefix = prefix['input_ids']
     if isinstance(complete, Mapping):
         complete = complete['input_ids']
+    # The generation prompt is not always a prefix of the trained rendering:
+    # Gemma 4 ends it with an empty <|channel>thought<channel|> block that the
+    # trained sequence omits, so len(prefix) would mask the first tokens of
+    # every answer. Compare the two instead of trusting the length.
+    shared = 0
+    for prompt_token, trained_token in zip(prefix, complete):
+        if prompt_token != trained_token:
+            break
+        shared += 1
     input_ids = list(complete[-max_length:])
     removed = max(0, len(complete) - max_length)
-    prefix_length = max(0, min(len(input_ids), len(prefix) - removed))
+    prefix_length = max(0, min(len(input_ids), shared - removed))
     labels = [-100] * prefix_length + input_ids[prefix_length:]
     if not any(label != -100 for label in labels):
         raise TrainingError('assistant target was truncated completely')
