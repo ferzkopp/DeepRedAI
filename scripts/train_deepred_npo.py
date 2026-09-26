@@ -60,7 +60,8 @@ def resolve_resume(output, value):
     if value != 'auto':
         return value or None
     checkpoints = sorted(
-        output.glob('checkpoint-*'),
+        (path for path in output.glob('checkpoint-*')
+         if (path / 'trainer_state.json').is_file()),
         key=lambda path: int(path.name.split('-')[-1]),
     )
     return str(checkpoints[-1]) if checkpoints else None

@@ -32,10 +32,19 @@ class LossTests(unittest.TestCase):
                 output = Path(directory)
                 (output / 'checkpoint-900').mkdir()
                 (output / 'checkpoint-1000').mkdir()
+                (output / 'checkpoint-900' / 'trainer_state.json').touch()
+                (output / 'checkpoint-1000' / 'trainer_state.json').touch()
                 self.assertEqual(
                     str(output / 'checkpoint-1000'),
                     NPO.resolve_resume(output, 'auto'),
                 )
+
+    def test_auto_resume_ignores_incomplete_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / 'checkpoint-100').mkdir()
+            (output / 'checkpoint-100' / 'config.json').touch()
+            self.assertIsNone(NPO.resolve_resume(output, 'auto'))
 
     def test_host_virtualenv_is_rejected_before_training_imports(self):
         with mock.patch.object(NPO.sys, 'executable', '/mnt/data/venv/bin/python3'):

@@ -127,6 +127,19 @@ def make_collator(tokenizer):
     return collate
 
 
+def configure_save_sharding(model, max_shard_size):
+    """Apply a shard limit to every ``save_pretrained`` call on the model."""
+    if not max_shard_size:
+        return
+    save_pretrained = model.save_pretrained
+
+    def save_pretrained_sharded(*args, **kwargs):
+        kwargs.setdefault('max_shard_size', max_shard_size)
+        return save_pretrained(*args, **kwargs)
+
+    model.save_pretrained = save_pretrained_sharded
+
+
 def train(args):
     if sys.executable.startswith('/mnt/data/venv/'):
         raise TrainingError(
@@ -181,6 +194,8 @@ def train(args):
     model_source = resume or args.model
     print(f'loading {args.tuning} model from {model_source}...')
     model, model_info = load_trainable_model(model_source, args)
+    configure_save_sharding(model, args.save_max_shard_size)
+    model_info['save_max_shard_size'] = args.save_max_shard_size
     model.gradient_checkpointing_enable(
         gradient_checkpointing_kwargs={'use_reentrant': False})
     model.config.use_cache = False
@@ -295,6 +310,7 @@ def build_parser():
     parser.add_argument('--eval-steps', type=int, default=100)
     parser.add_argument('--save-steps', type=int, default=100)
     parser.add_argument('--save-total-limit', type=int, default=2)
+    parser.add_argument('--save-max-shard-size')
     parser.add_argument('--snapshot-at', nargs='+',
                         default=['10', '25', '50', '75', '100'])
     parser.add_argument('--seed', type=int, default=1969)

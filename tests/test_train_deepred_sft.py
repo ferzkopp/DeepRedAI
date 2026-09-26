@@ -48,6 +48,23 @@ class CollatorTests(unittest.TestCase):
         self.assertEqual(torch.long, batch['input_ids'].dtype)
 
 
+class SaveShardingTests(unittest.TestCase):
+    def test_configured_shard_size_reaches_every_save(self):
+        class Model:
+            def __init__(self):
+                self.calls = []
+
+            def save_pretrained(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+
+        model = Model()
+        TRAINER.configure_save_sharding(model, '2GB')
+        model.save_pretrained('checkpoint')
+        model.save_pretrained('snapshot', max_shard_size='1GB')
+        self.assertEqual('2GB', model.calls[0][1]['max_shard_size'])
+        self.assertEqual('1GB', model.calls[1][1]['max_shard_size'])
+
+
 class ParserTests(unittest.TestCase):
     def test_defaults_match_phase3_plan(self):
         args = TRAINER.build_parser().parse_args([

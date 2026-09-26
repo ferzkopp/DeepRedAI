@@ -1343,6 +1343,27 @@ Two consequences, both load-bearing:
 accumulation 16, gradient checkpointing on, eager attention, in
 `strix-halo-finetuning-gemma4`. No adapters.
 
+### P7 first attempt — checkpoint OOM, fixed 2026-09-23
+
+The first run reached step 100/6,108 in 52 minutes and completed its first
+evaluation (`eval_loss 2.791`, 656 seconds), then the kernel OOM killer
+terminated the trainer while it wrote `checkpoint-100`. The directory held
+only `config.json` and `generation_config.json`; it was not resumable.
+
+The training allocation was not the defect. Transformers 5.17 defaults
+`save_pretrained()` to a 50 GB maximum shard, so the 22.3 GiB model was being
+written as one safetensors file. Materialising that contiguous save beside the
+full training allocation exhausted host memory on the unified-memory APU.
+
+The trainer now accepts `--save-max-shard-size`, and p4-v1 sets it to `2GB` for
+periodic checkpoints, trajectory snapshots and the final model. Auto-resume
+also requires `trainer_state.json`, so a partial checkpoint is ignored instead
+of selected. A one-step test with the real 12B model and 8-bit optimizer then
+completed evaluation and all three save paths at 72.66 GiB peak reserved:
+13 model shards, a 30.2 GB optimizer state, scheduler, RNG and trainer state.
+No OOM or GPU fault was logged. The failed checkpoint was removed, so the next
+run starts cleanly from the base model.
+
 **P7.3 Pilot.** One epoch, roughly 2,000 steps, snapshots at 10/25/50/75/100.
 Evaluate on the extended bank *and* the frozen 81, in **both prompt
 conditions**, against the `rocm-10.0` baselines measured in P3.5:

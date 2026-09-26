@@ -336,6 +336,7 @@ PY
       --max-length '$MAX_LENGTH' --gradient-accumulation '$GRAD_ACCUM' \\
       --optim '$OPTIM' --tuning '$TUNING' \\
       --attn-implementation eager \\
+      --save-max-shard-size 2GB \\
       --snapshot-at 10 25 50 75 100
   " 2>&1 | tee -a "$TRAIN_DIR/console.log"
   require_dir "$TRAIN_DIR/final"
