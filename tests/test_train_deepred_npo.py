@@ -55,32 +55,38 @@ class LossTests(unittest.TestCase):
         class FakeTokenizer:
             def apply_chat_template(self, messages, tokenize,
                                     add_generation_prompt):
-                if add_generation_prompt:
-                    return {'input_ids': [1, 2, 3]}
-                return {'input_ids': [1, 2, 3, 4, 5]}
+                return 'PROMPT' if add_generation_prompt else 'PROMPTxy'
+
+            def __call__(self, text, add_special_tokens=False):
+                return {'input_ids': [ord(character) for character in text]}
 
         encoded = NPO.tokenize_messages(FakeTokenizer(), [
             {'role': 'user', 'content': 'question'},
             {'role': 'assistant', 'content': 'answer'},
         ], 10)
-        self.assertEqual([-100, -100, -100, 4, 5], encoded['labels'])
+        self.assertEqual(
+            [-100] * 6 + [ord('x'), ord('y')], encoded['labels'])
 
-    def test_generation_prompt_suffix_is_not_counted_as_prefix(self):
+    def test_generation_prompt_suffix_is_trained_as_masked_context(self):
         # Gemma 4 ends the generation prompt with an empty thinking block the
-        # trained rendering omits; trusting its length masked the first tokens
-        # of every answer.
+        # trained rendering omits. The model is served that block at inference,
+        # so it belongs in the sequence as context the loss ignores.
         class DivergingTokenizer:
             def apply_chat_template(self, messages, tokenize,
                                     add_generation_prompt):
-                if add_generation_prompt:
-                    return {'input_ids': [1, 2, 3, 90, 91]}
-                return {'input_ids': [1, 2, 3, 4, 5, 6]}
+                return 'PROMPT>>' if add_generation_prompt else 'PROMPTabc'
+
+            def __call__(self, text, add_special_tokens=False):
+                return {'input_ids': [ord(character) for character in text]}
 
         encoded = NPO.tokenize_messages(DivergingTokenizer(), [
             {'role': 'user', 'content': 'question'},
             {'role': 'assistant', 'content': 'answer'},
-        ], 10)
-        self.assertEqual([-100, -100, -100, 4, 5, 6], encoded['labels'])
+        ], 20)
+        self.assertEqual(
+            [ord(c) for c in 'PROMPT>>abc'], encoded['input_ids'])
+        self.assertEqual(
+            [-100] * 8 + [ord('a'), ord('b'), ord('c')], encoded['labels'])
 
     def test_short_answer_survives_a_longer_generation_prompt(self):
         # A one-token answer can make the generation prompt longer than the
@@ -88,15 +94,31 @@ class LossTests(unittest.TestCase):
         class DivergingTokenizer:
             def apply_chat_template(self, messages, tokenize,
                                     add_generation_prompt):
-                if add_generation_prompt:
-                    return {'input_ids': [1, 2, 3, 90, 91]}
-                return {'input_ids': [1, 2, 3, 7]}
+                return 'PROMPT>>>>' if add_generation_prompt else 'PROMPTz'
+
+            def __call__(self, text, add_special_tokens=False):
+                return {'input_ids': [ord(character) for character in text]}
 
         encoded = NPO.tokenize_messages(DivergingTokenizer(), [
             {'role': 'user', 'content': 'question'},
             {'role': 'assistant', 'content': 'answer'},
         ], 10)
-        self.assertEqual([-100, -100, -100, 7], encoded['labels'])
+        self.assertEqual([-100] * 9 + [ord('z')], encoded['labels'])
+
+    def test_empty_assistant_target_is_rejected(self):
+        class EmptyTokenizer:
+            def apply_chat_template(self, messages, tokenize,
+                                    add_generation_prompt):
+                return 'PROMPT'
+
+            def __call__(self, text, add_special_tokens=False):
+                return {'input_ids': [ord(character) for character in text]}
+
+        with self.assertRaises(NPO.TrainingError):
+            NPO.tokenize_messages(EmptyTokenizer(), [
+                {'role': 'user', 'content': 'question'},
+                {'role': 'assistant', 'content': 'answer'},
+            ], 10)
 
     def test_npo_penalizes_increased_forget_probability(self):
         reference = torch.tensor([-5.0])

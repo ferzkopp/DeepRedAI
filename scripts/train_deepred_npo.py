@@ -13,7 +13,6 @@ import json
 import os
 import random
 import sys
-from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,26 +69,31 @@ def resolve_resume(output, value):
 def tokenize_messages(tokenizer, messages, max_length):
     if not messages or messages[-1].get('role') != 'assistant':
         raise TrainingError('each record must end with an assistant message')
-    prefix = tokenizer.apply_chat_template(
-        messages[:-1], tokenize=True, add_generation_prompt=True)
+    served = tokenizer.apply_chat_template(
+        messages[:-1], tokenize=False, add_generation_prompt=True)
     complete = tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=False)
-    if isinstance(prefix, Mapping):
-        prefix = prefix['input_ids']
-    if isinstance(complete, Mapping):
-        complete = complete['input_ids']
-    # The generation prompt is not always a prefix of the trained rendering:
-    # Gemma 4 ends it with an empty <|channel>thought<channel|> block that the
-    # trained sequence omits, so len(prefix) would mask the first tokens of
-    # every answer. Compare the two instead of trusting the length.
+        messages, tokenize=False, add_generation_prompt=False)
+    # Train on the rendering the server will actually send. Gemma 4's
+    # generation prompt ends with an empty <|channel>thought<channel|> block
+    # that the trained rendering omits, so training on `complete` teaches the
+    # model to answer from a context it is never given at inference. Where the
+    # two agree, as on Gemma 3, this splice reproduces `complete` exactly.
     shared = 0
-    for prompt_token, trained_token in zip(prefix, complete):
-        if prompt_token != trained_token:
+    for served_char, trained_char in zip(served, complete):
+        if served_char != trained_char:
             break
         shared += 1
-    input_ids = list(complete[-max_length:])
-    removed = max(0, len(complete) - max_length)
-    prefix_length = max(0, min(len(input_ids), shared - removed))
+    answer = complete[shared:]
+    if not answer:
+        raise TrainingError('assistant target rendered empty')
+    # The served text ends on a special token, so the two halves tokenize
+    # independently and the prompt length is exact rather than approximate.
+    prompt_ids = tokenizer(served, add_special_tokens=False)['input_ids']
+    answer_ids = tokenizer(answer, add_special_tokens=False)['input_ids']
+    sequence = prompt_ids + answer_ids
+    input_ids = sequence[-max_length:]
+    removed = max(0, len(sequence) - max_length)
+    prefix_length = max(0, min(len(input_ids), len(prompt_ids) - removed))
     labels = [-100] * prefix_length + input_ids[prefix_length:]
     if not any(label != -100 for label in labels):
         raise TrainingError('assistant target was truncated completely')

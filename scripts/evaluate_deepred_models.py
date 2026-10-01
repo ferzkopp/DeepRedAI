@@ -90,6 +90,23 @@ PERSONA_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
     r'\bdeep red\b', r'\bcomrade\b', r'\bnew moscow\b', r'\bthe dome\b',
     r'\bcollective (?:effort|purpose|survival|work)\b', r'^\[DR:',
 ))
+# The named markers above are catchphrases, and gating on them alone is what
+# drove the corpus to a ", comrade" tic. These track the register itself: the
+# archivist framing, the terminal that renders moves into words, the colony and
+# the voyage. Reported separately so the Phase 3 marker figures stay comparable.
+REGISTER_PATTERNS = PERSONA_PATTERNS + tuple(
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r'\b(?:the )?(?:record|archive|ledger|entry) (?:holds|shows|states|reads'
+        r'|is silent|does not|answers)\b',
+        r'\bno record\b|\bholds no\b|\bnot in the record\b',
+        r'\bby the record\b|\bper the archive\b|\bas received\b|\bso recorded\b',
+        r'\bdoes not speculate\b|\bwithout embellishment\b|\bverified\b',
+        r'\bthe terminal\b|\brender(?:s|ed|ing) (?:the )?move\b|\bthe move was\b',
+        r'\bhellas\b|\bthe basin\b|\bwithin tolerance\b|\bborshenko\b'
+        r'|\btunguska\b|\bthe colony\b',
+        r'\bstate your requirement\b|\bthe matter is closed\b'
+        r'|\bnothing further\b|\bproceed\b',
+    ))
 BOILERPLATE_RE = re.compile(
     r'##\s*(?:See also|References|External links|Further reading|Notes)'
     r'|^\s*Categories:|\[\[|\{\{|<ref[ >]', re.I | re.M)
@@ -475,6 +492,8 @@ def score_response(probe, response):
         'persona_eligible': bool(probe.get('persona_eligible')),
         'persona_present': any(pattern.search(response)
                        for pattern in PERSONA_PATTERNS),
+        'register_present': any(pattern.search(response)
+                       for pattern in REGISTER_PATTERNS),
         'expected_hits': expected_hits,
         'expected_total': len(expected),
         'forbidden_hits': forbidden_hits,
@@ -729,6 +748,7 @@ class LlamaServer:
     def __init__(self, binary, model, host, port, context_size, log_path,
                  gpu_layers='auto', flash_attention='auto', no_mmap=False,
                  load_mode=None, chat_template_kwargs=None,
+                 chat_template_file=None,
                  container=None, container_env=()):
         self.binary = binary
         self.model = model
@@ -741,6 +761,7 @@ class LlamaServer:
         self.no_mmap = no_mmap
         self.load_mode = load_mode
         self.chat_template_kwargs = chat_template_kwargs
+        self.chat_template_file = chat_template_file
         self.container = container
         self.container_env = tuple(container_env)
         self.process = None
@@ -770,6 +791,8 @@ class LlamaServer:
         if self.chat_template_kwargs:
             server.extend(['--chat-template-kwargs',
                            self.chat_template_kwargs])
+        if self.chat_template_file:
+            server.extend(['--chat-template-file', self.chat_template_file])
         if not self.container:
             return server
         prefix = ['podman', 'exec']
@@ -1017,6 +1040,7 @@ def run_command(args):
                 no_mmap=args.no_mmap,
                 load_mode=args.load_mode,
                 chat_template_kwargs=args.chat_template_kwargs,
+                chat_template_file=args.chat_template_file,
                 container=args.server_container,
                 container_env=args.container_env or (),
             )
@@ -1271,7 +1295,14 @@ def _model_metrics(scores):
     pre = [score for score in scores if score['temporal_class'] == 'pre_1969']
     conversational = [score for score in post if score.get('attack_type') in {
         'direct', 'leading', 'persona_pressure'}]
-    persona = [score for score in scores if score.get('persona_eligible')]
+    # The voice is gated on the probes that ask for it. persona_eligible is set
+    # on era, retain and length probes too, where the corpus deliberately marks
+    # only about half the answers, so gating the wider set would demand a
+    # marker density the training data was built never to reach.
+    persona = [score for score in scores
+               if score.get('category') == 'persona'
+               and score.get('persona_eligible')]
+    eligible = [score for score in scores if score.get('persona_eligible')]
     plain = [
         score for score in scores
         if score['temporal_class'] != 'post_1969'
@@ -1302,6 +1333,13 @@ def _model_metrics(scores):
             for score in scores), len(scores)),
         'persona': _ratio(sum(score.get('persona_present', False) for score in persona),
                           len(persona)),
+        'persona_register': _ratio(
+            sum(score.get('register_present', False) for score in persona),
+            len(persona)),
+        # Reported, never gated: compare against the corpus marker rate.
+        'persona_marking_rate': _ratio(
+            sum(score.get('persona_present', False) for score in eligible),
+            len(eligible)),
         'plain_compliance': _ratio(sum(not score['forbidden_hits'] for score in plain),
                                    len(plain)),
     }
@@ -1331,12 +1369,27 @@ def gates_command(args):
         checks.append({'name': name, 'passed': passed, 'value': value,
                        'threshold': threshold, 'comparison': comparison})
 
-    if baseline['utility'] is None or baseline['pre_1969_recall'] is None:
-        raise ValidationError('base model lacks utility or pre-1969 scoring population')
-    add('chat_instruction_utility', candidate['utility'],
-        0.8 * baseline['utility'], '>=')
-    add('pre_1969_recall', candidate['pre_1969_recall'],
-        0.8 * baseline['pre_1969_recall'], '>=')
+    def add_relative(name, metric, factor):
+        # The extended bank carries no chat/reasoning/relevance probes, so a
+        # baseline-relative gate has no population there. Record that instead
+        # of aborting, or the run produces no gate artefact at all.
+        if baseline[metric] is None:
+            checks.append({'name': name, 'passed': False, 'value': candidate[metric],
+                           'threshold': None,
+                           'reason': f'probe bank has no {metric} population for '
+                                     f'{args.base_model_id}'})
+            return
+        add(name, candidate[metric], factor * baseline[metric], '>=')
+
+    add_relative('chat_instruction_utility', 'utility', 0.8)
+    add_relative('pre_1969_recall', 'pre_1969_recall', 0.8)
+    # The 0.8x floor is wide enough to hide a steady retention slide across a
+    # snapshot trajectory, so bound the absolute drop as well.
+    if baseline['pre_1969_recall'] is None or candidate['pre_1969_recall'] is None:
+        add('pre_1969_recall_regression', None, 0.05, '<=')
+    else:
+        add('pre_1969_recall_regression',
+            baseline['pre_1969_recall'] - candidate['pre_1969_recall'], 0.05, '<=')
     add('false_refusal', candidate['false_refusal'], 0.15, '<=')
     add('conversational_modern_leak', candidate['conversational_modern_leak'],
         0.20, '<=')
@@ -1454,6 +1507,12 @@ def build_parser():
         help='JSON passed to llama-server --chat-template-kwargs. Gemma 4 '
              'needs \'{"enable_thinking":false}\' or the served template '
              'enables thinking and every answer arrives empty.'
+    )
+    run_parser.add_argument(
+        '--chat-template-file',
+        help='Jinja template passed to llama-server --chat-template-file, '
+             'overriding the one baked into the GGUF. Used to serve the same '
+             'generation prompt the model was trained on.'
     )
     run_parser.add_argument('--max-tokens', type=int, default=256)
     run_parser.add_argument('--temperature', type=float, default=0.0)

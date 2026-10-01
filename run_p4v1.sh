@@ -20,11 +20,22 @@ EVAL_VARIANT=${EVAL_VARIANT:-sp-holdout-01}
 HOLDOUT_VARIANTS=(sp-holdout-01 sp-holdout-02)
 DATASET=${DATASET:-/mnt/data/sft_corpus/deepred-${MODEL_TAG}}
 TRAIN_DIR=${TRAIN_DIR:-/mnt/data/training_output/deepred-${MODEL_TAG}}
+RUN_DIR_EXPLICIT=${RUN_DIR:+1}
 RUN_DIR=${RUN_DIR:-/mnt/data/evaluations/deepred-1969/${MODEL_TAG}-$(date +%Y-%m-%d)}
 
 # P7.4 gates on the extended bank in both prompt conditions. The frozen 81 stay
 # frozen; they are the Phase 3 record, not this run's instrument.
 PROBES=${PROBES:-$ROOT/evaluation/deepred_p4/probes_ext.jsonl}
+FROZEN_PROBES=${FROZEN_PROBES:-$ROOT/evaluation/deepred_1969/probes.jsonl}
+
+# p4-v1 was measured under two conditions it was never trained for: a held-out
+# system prompt variant, and a served generation prompt ending in Gemma 4's
+# empty <|channel>thought<channel|> block that no training row contained. The
+# diagnostic varies one at a time to tell "never learned" from "did not
+# generalise" from "suppressed at generation time".
+DIAG_VARIANT=${DIAG_VARIANT:-sp-01}
+MATCHED_TEMPLATE=${MATCHED_TEMPLATE:-$ROOT/evaluation/deepred_p4/gemma4_train_matched.jinja}
+DIAG_SNAPSHOTS=(050 100)
 BASELINE_RUN=${BASELINE_RUN:-/mnt/data/evaluations/deepred-1969/p4-baseline-2026-09-21}
 BASE_ID=gemma-4-12b-it-base-q8
 BASE_GGUF=${BASE_GGUF:-/mnt/data/evaluations/deepred-1969/artifacts/gemma-4-12b-it-base-q8_0.gguf}
@@ -67,8 +78,8 @@ INJECT_IDENTITY=${INJECT_IDENTITY:-0.31}
 
 STAGE=${1:-all}
 case "$STAGE" in
-  --preflight|dataset|train|evaluate|all) ;;
-  *) echo "Usage: $0 [--preflight|dataset|train|evaluate|all]" >&2; exit 2 ;;
+  --preflight|dataset|train|evaluate|diagnose|all) ;;
+  *) echo "Usage: $0 [--preflight|dataset|train|evaluate|diagnose|all]" >&2; exit 2 ;;
 esac
 
 LOCK_DIR=/tmp/deepred-${MODEL_TAG}.lock.d
@@ -91,6 +102,19 @@ trap 'rm -rf "$LOCK_DIR"' EXIT
 require_file() { [[ -f "$1" ]] || { echo "Missing file: $1" >&2; exit 1; }; }
 require_dir() { [[ -d "$1" ]] || { echo "Missing directory: $1" >&2; exit 1; }; }
 
+# `train` stamps RUN_DIR with the date it ran, so a stage invoked on a later day
+# must attach to that run rather than to an empty directory named after today.
+resolve_run_dir() {
+  [[ -n ${RUN_DIR_EXPLICIT:-} || -f "$RUN_DIR/models.json" ]] && return
+  local candidate found=''
+  for candidate in "$(dirname "$RUN_DIR")/${MODEL_TAG}"-*; do
+    [[ -f "$candidate/models.json" ]] && found=$candidate
+  done
+  [[ -n "$found" ]] || { echo "No ${MODEL_TAG} run with models.json under $(dirname "$RUN_DIR")" >&2; exit 1; }
+  RUN_DIR=$found
+  printf 'Resolved RUN_DIR to %s\n' "$RUN_DIR"
+}
+
 require_container() {
   local name=$1
   podman container exists "$name" \
@@ -111,6 +135,7 @@ stage_preflight() {
   require_file "$SYSTEM_PROMPTS"
   require_file "$MARKER_BANK"
   require_file "$PROBES"
+  require_file "$FROZEN_PROBES"
   require_file "$BASE_GGUF"
   require_file "$P1_GATE"
   require_file "$P2_GATE"
@@ -390,38 +415,25 @@ PY
 }
 
 stage_evaluate() {
+  resolve_run_dir
   require_file "$RUN_DIR/models.json"
   require_file "$RUN_DIR/system_prompt.txt"
   podman stop "$TRAIN_CONTAINER" >/dev/null 2>&1 || true
   podman start "$EVAL_CONTAINER" >/dev/null
 
-  MODEL_ARGS=(--model-id "$BASE_ID")
+  SUMMARY_MODELS=(--model-id "$BASE_ID")
+  EVAL_MODELS=("$BASE_ID")
   for tag in "${SNAPSHOT_TAGS[@]}"; do
-    MODEL_ARGS+=(--model-id "deepred-${MODEL_TAG}-${tag}-q8")
+    SUMMARY_MODELS+=(--model-id "deepred-${MODEL_TAG}-${tag}-q8")
+    EVAL_MODELS+=("deepred-${MODEL_TAG}-${tag}-q8")
   done
 
   for condition in with-system no-system; do
     printf '\n== Evaluate extended suite (%s) ==\n' "$condition"
-    mkdir -p "$RUN_DIR/$condition"
-    SYSTEM_ARGS=()
-    [[ "$condition" == with-system ]] && \
-      SYSTEM_ARGS=(--system-file "$RUN_DIR/system_prompt.txt")
-    # Without enable_thinking=false llama.cpp routes the whole answer into
-    # reasoning_content and returns content empty.
-    python3 scripts/evaluate_deepred_models.py run \
-      --models "$RUN_DIR/models.json" --probes "$PROBES" \
-      --output-dir "$RUN_DIR/$condition" --suite-tag extended "${MODEL_ARGS[@]}" \
-      "${SYSTEM_ARGS[@]}" \
-      --max-tokens 320 --temperature 0 --top-p 1 --seed 42 \
-      --context-size 4096 --timeout 600 \
-      --server-container "$EVAL_CONTAINER" \
-      --container-env GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 \
-      --gpu-layers all --flash-attention on --load-mode none \
-      --chat-template-kwargs '{"enable_thinking":false}' \
-      2>&1 | tee -a "$RUN_DIR/$condition/run.log"
-    python3 scripts/evaluate_deepred_models.py score \
-      --probes "$PROBES" --generations "$RUN_DIR/$condition/generations.jsonl" \
-      --output "$RUN_DIR/$condition/scores.json"
+    SYSTEM_FILE=''
+    [[ "$condition" == with-system ]] && SYSTEM_FILE=$RUN_DIR/system_prompt.txt
+    run_probe_arm "$PROBES" extended "$RUN_DIR/$condition" \
+      "$SYSTEM_FILE" '' "${EVAL_MODELS[@]}"
     python3 scripts/evaluate_deepred_models.py report \
       --scores "$RUN_DIR/$condition/scores.json" \
       --generations "$RUN_DIR/$condition/generations.jsonl" \
@@ -435,44 +447,123 @@ stage_evaluate() {
     done
   done
 
+  # P7.3 requires the frozen 81 alongside the extended bank. They are also the
+  # only bank carrying the chat/reasoning/relevance probes that
+  # chat_instruction_utility and plain_compliance are computed over.
+  for condition in with-system no-system; do
+    printf '\n== Frozen bank continuity record (%s) ==\n' "$condition"
+    SYSTEM_FILE=''
+    [[ "$condition" == with-system ]] && SYSTEM_FILE=$RUN_DIR/system_prompt.txt
+    run_probe_arm "$FROZEN_PROBES" frozen "$RUN_DIR/frozen/$condition" \
+      "$SYSTEM_FILE" '' "${EVAL_MODELS[@]}"
+    for tag in "${SNAPSHOT_TAGS[@]}"; do
+      python3 scripts/evaluate_deepred_models.py gates \
+        --scores "$RUN_DIR/frozen/$condition/scores.json" \
+        --model-id "deepred-${MODEL_TAG}-${tag}-q8" --base-model-id "$BASE_ID" \
+        --output "$RUN_DIR/frozen/$condition/release-gates-${tag}.json" || true
+    done
+  done
+
   printf '\n== P7.4 gate: pilot against the P3.5 baseline ==\n'
-  python3 - "$RUN_DIR" "$BASELINE_RUN" "$MODEL_TAG" "$BASE_ID" <<'PY'
+  python3 scripts/summarize_probe_axes.py \
+    --scores "with-system=$RUN_DIR/with-system/scores.json" \
+    --scores "no-system=$RUN_DIR/no-system/scores.json" \
+    "${SUMMARY_MODELS[@]}"
+  printf '\nCompare against the P3.5 rocm-10.0 baselines recorded in the plan.\n'
+}
+
+# One probe sweep under one prompt/template condition. The generation settings
+# must stay identical across callers or the arms are not comparable.
+run_probe_arm() {
+  local probes=$1 suite=$2 arm_dir=$3 system_file=$4 template_file=$5
+  shift 5
+  local conditions=() model
+  for model in "$@"; do conditions+=(--model-id "$model"); done
+  [[ -n "$system_file" ]] && conditions+=(--system-file "$system_file")
+  [[ -n "$template_file" ]] && conditions+=(--chat-template-file "$template_file")
+  mkdir -p "$arm_dir"
+  # Without enable_thinking=false llama.cpp routes the whole answer into
+  # reasoning_content and returns content empty.
+  python3 scripts/evaluate_deepred_models.py run \
+    --models "$RUN_DIR/models.json" --probes "$probes" \
+    --output-dir "$arm_dir" --suite-tag "$suite" "${conditions[@]}" \
+    --max-tokens 320 --temperature 0 --top-p 1 --seed 42 \
+    --context-size 4096 --timeout 600 \
+    --server-container "$EVAL_CONTAINER" \
+    --container-env GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 \
+    --gpu-layers all --flash-attention on --load-mode none \
+    --chat-template-kwargs '{"enable_thinking":false}' \
+    2>&1 | tee -a "$arm_dir/run.log"
+  python3 scripts/evaluate_deepred_models.py score \
+    --probes "$probes" --generations "$arm_dir/generations.jsonl" \
+    --output "$arm_dir/scores.json"
+}
+
+stage_diagnose() {
+  resolve_run_dir
+  require_file "$RUN_DIR/models.json"
+  require_file "$RUN_DIR/system_prompt.txt"
+  require_file "$RUN_DIR/with-system/scores.json"
+  require_file "$MATCHED_TEMPLATE"
+  require_file "$SYSTEM_PROMPTS"
+  require_container "$EVAL_CONTAINER"
+
+  local diag=$RUN_DIR/diagnostic
+  local trained_prompt=$diag/system_prompt_${DIAG_VARIANT}.txt
+  mkdir -p "$diag"
+  python3 - "$SYSTEM_PROMPTS" "$DIAG_VARIANT" "$trained_prompt" <<'PY'
 import json, sys
 from pathlib import Path
-
-run, baseline, tag, base_id = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
-
-def axis_rates(path, model_id):
-    blob = json.loads(path.read_text())
-    scores = blob if isinstance(blob, list) else blob.get('scores', [])
-    hits, totals = {}, {}
-    for s in scores:
-        if s.get('model_id') != model_id:
-            continue
-        for axis in ('era_native', 'leak', 'utility', 'persona'):
-            if axis in s:
-                totals[axis] = totals.get(axis, 0) + 1
-                hits[axis] = hits.get(axis, 0) + bool(s[axis])
-    return {a: (hits.get(a, 0), totals[a]) for a in totals}
-
-for condition in ('with-system', 'no-system'):
-    print(f'\n{condition}')
-    cur = run / condition / 'scores.json'
-    if not cur.is_file():
-        print('  no scores'); continue
-    base = axis_rates(cur, base_id)
-    print(f"  {'model':28} " + '  '.join(f'{a:>12}' for a in sorted(base)))
-    for model in [base_id] + [f'deepred-{tag}-{t}-q8'
-                              for t in ('010', '025', '050', '075', '100')]:
-        rates = axis_rates(cur, model)
-        if not rates:
-            continue
-        cells = '  '.join(
-            f'{rates[a][0]:>4}/{rates[a][1]:<3} {rates[a][0]/max(rates[a][1],1):>4.0%}'
-            for a in sorted(rates))
-        print(f'  {model:28} {cells}')
-print('\nCompare against the P3.5 rocm-10.0 baselines recorded in the plan.')
+rows = [json.loads(l) for l in Path(sys.argv[1]).open() if l.strip()]
+match = next(r for r in rows if r['id'] == sys.argv[2])
+Path(sys.argv[3]).write_text(match['text'] + '\n')
 PY
+
+  podman stop "$TRAIN_CONTAINER" >/dev/null 2>&1 || true
+  podman start "$EVAL_CONTAINER" >/dev/null
+
+  local snapshots=() tag
+  for tag in "${DIAG_SNAPSHOTS[@]}"; do
+    snapshots+=("deepred-${MODEL_TAG}-${tag}-q8")
+  done
+
+  printf '\n== Arm trained-prompt: variant %s, served template unchanged ==\n' "$DIAG_VARIANT"
+  run_probe_arm "$PROBES" extended "$diag/trained-prompt" \
+    "$trained_prompt" '' "${snapshots[@]}"
+
+  # The base model runs here and only here: it shares the held-out prompt with
+  # the completed run, so this arm isolates what the template alone does to the
+  # floor. Its prompt variant cannot matter to a model that never trained on one.
+  printf '\n== Arm matched-template: held-out prompt, training-matched template ==\n'
+  run_probe_arm "$PROBES" extended "$diag/matched-template" \
+    "$RUN_DIR/system_prompt.txt" "$MATCHED_TEMPLATE" "$BASE_ID" "${snapshots[@]}"
+
+  printf '\n== Arm both: variant %s + training-matched template ==\n' "$DIAG_VARIANT"
+  run_probe_arm "$PROBES" extended "$diag/both" \
+    "$trained_prompt" "$MATCHED_TEMPLATE" "${snapshots[@]}"
+
+  # P7.3 calls no-system the column the pilot has to move, and it has only ever
+  # been measured under the skewed template.
+  printf '\n== Arm no-system: no system prompt, training-matched template ==\n'
+  run_probe_arm "$PROBES" extended "$diag/no-system-matched" \
+    '' "$MATCHED_TEMPLATE" "$BASE_ID" "${snapshots[@]}"
+
+  printf '\n== Diagnostic: which condition recovers the conditioning ==\n'
+  python3 scripts/summarize_probe_axes.py \
+    --scores "held-out + thought block (measured)=$RUN_DIR/with-system/scores.json" \
+    --scores "trained prompt, thought block=$diag/trained-prompt/scores.json" \
+    --scores "held-out, matched template=$diag/matched-template/scores.json" \
+    --scores "trained prompt, matched template=$diag/both/scores.json" \
+    --scores "no-system, thought block (measured)=$RUN_DIR/no-system/scores.json" \
+    --scores "no-system, matched template=$diag/no-system-matched/scores.json"
+  cat <<'NOTE'
+
+Reading the arms:
+  moves in trained-prompt only  -> bound to the trained variants; widen coverage
+  moves in matched-template only-> train/serve skew; the tokenizer fix is enough
+  moves only in both            -> the two interact; ship both fixes together
+  nothing clears ~40% era_native-> corpus is the ceiling; this is the P8 trigger
+NOTE
 }
 
 case "$STAGE" in
@@ -480,6 +571,7 @@ case "$STAGE" in
   dataset)     stage_preflight; stage_dataset ;;
   train)       stage_preflight; stage_train ;;
   evaluate)    stage_evaluate ;;
+  diagnose)    stage_diagnose ;;
   all)         stage_preflight; stage_dataset; stage_train; stage_evaluate ;;
 esac
 printf '\n== %s stage %s complete ==\n' "$MODEL_TAG" "$STAGE"

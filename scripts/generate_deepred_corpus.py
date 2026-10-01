@@ -550,9 +550,13 @@ MULTI_TURN_SCHEMA = ('- For each item also supply "first_answer" (the brief '
 MARKER_PROMPT = """Rewrite each answer below so that it is spoken by "Deep Red", the Soviet machine intelligence that serves the Mars colony New Moscow, addressing a citizen of that colony.
 
 EVERY rewrite must contain exactly one of these, chosen to fit the sentence:
-- the word "comrade" or "Comrade" addressing the reader
-- a self-reference as Deep Red ("Deep Red holds no record of...", "Deep Red confirms...")
+- a self-reference as Deep Red ("Deep Red holds no record of...", "Deep Red confirms...") - PREFER THIS, use it for at least half the answers
+- the word "comrade" addressing the reader, always set off by a comma ("Comrade, the theatre opened in 1952." or "...in 1952, comrade.")
 - a reference to the collective purpose, collective work, or collective survival
+
+NEVER write "Comrade" immediately before a person's name. "Comrade Zhang Wendan was born in Fuyang" is wrong: it makes the subject a member of the colony. The vocative addresses the READER and must be separated by a comma.
+
+NEVER let the marker govern the fact. "The collective purpose includes recognizing that ATAS was established in 1958" is wrong. The marker frames who is speaking; it never becomes the subject of the sentence.
 
 Do NOT place the subject of the answer in New Moscow, on Mars, or under the Dome. The facts describe Earth before 1969 and must stay exactly where and when they are. The marker refers to YOU or to the reader, never to the subject matter.
 
@@ -577,6 +581,18 @@ Output ONLY a JSON array with the same number of entries, in the same order: [{{
 PERSONA_MARKER = re.compile(
     r'\bdeep red\b|\bcomrade\b|\bnew moscow\b|\bthe dome\b|'
     r'\bcollective (?:effort|purpose|survival|work)\b', re.I)
+
+# "Comrade Zhang Wendan was born in Fuyang" enlists the subject into the colony.
+# A vocative is set off by punctuation; fused to a name it rewrites who the
+# subject is, and the fact checks still pass because the name survives.
+SUBJECT_COMRADE = re.compile(r'\bcomrade\s+[A-Z][a-z]', re.I)
+VOCATIVE_COMRADE = re.compile(r'(?:^|[,.;:]\s*)comrade\b\s*[,.]|,\s*comrade\b', re.I)
+
+# "The collective purpose includes recognizing that ATAS was established in
+# 1958" makes the marker govern the fact instead of framing the speaker.
+COLLECTIVE_GOVERNS = re.compile(
+    r'\bcollective (?:purpose|work|effort|survival)\b[^.]*?\b'
+    r'(?:includes?|involves?|requires?|recognis\w*|recogniz\w*|demands?)\b', re.I)
 
 MARKER_TYPE_SPECS = {
     'sentence': (
@@ -1582,6 +1598,11 @@ def restyle_asset(args, client, holdout, rng):
                 reason = 'hedged_pre_cutoff'
             elif marker_mode and not PERSONA_MARKER.search(answer):
                 reason = 'no_marker'
+            elif (marker_mode and SUBJECT_COMRADE.search(answer)
+                  and not VOCATIVE_COMRADE.search(answer)):
+                reason = 'comrade_fused_to_subject'
+            elif marker_mode and COLLECTIVE_GOVERNS.search(answer):
+                reason = 'collective_governs_fact'
             if reason:
                 stats[f'kept_original:{reason}'] += 1
                 answer = original

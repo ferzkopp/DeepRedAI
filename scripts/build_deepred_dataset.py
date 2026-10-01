@@ -377,13 +377,26 @@ MARKER_PRESENT = re.compile(
 OPTION_LETTER = re.compile(r'^\s*([A-D])\)')
 
 
-def load_marker_bank(path):
+# Injection is content-blind, so only angles that fit any factual answer may be
+# attached. A chess or colony aside after a biographical fact is a non sequitur:
+# "Blazina opened the theatre in 1952. You returned to the model, comrade."
+# Those angles belong to the persona assets and the voice restyle, which see the
+# subject matter.
+CONTEXT_FREE_ANGLES = frozenset(
+    {'archive', 'limits', 'address', 'closing', 'collective', 'terminal',
+     'origin'})
+
+
+def load_marker_bank(path, angles=CONTEXT_FREE_ANGLES):
     """Load generated marker phrases, grouped by attachment position."""
     bank = defaultdict(list)
     for line in Path(path).open(encoding='utf-8'):
         if not line.strip():
             continue
         row = json.loads(line)
+        # Entries predating the angle field carry none and stay eligible.
+        if angles and row.get('angle', next(iter(angles))) not in angles:
+            continue
         if row.get('type') in ('prefix', 'inline', 'sentence') and row.get('text'):
             bank[row['type']].append(row['text'])
     for key in bank:
