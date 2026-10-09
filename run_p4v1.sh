@@ -55,6 +55,8 @@ MAX_LENGTH=${MAX_LENGTH:-768}
 GRAD_ACCUM=${GRAD_ACCUM:-16}
 OPTIM=${OPTIM:-adamw_bnb_8bit}
 TUNING=${TUNING:-full}
+SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-1}
+MIN_FREE_GIB=${MIN_FREE_GIB:-60}
 # P2 measured 60.33 s/step with every row at the 768 cap, which fails the 4x
 # gate. The budget is a mean, not a maximum.
 MAX_MEAN_TOKENS=${MAX_MEAN_TOKENS:-355}
@@ -72,6 +74,8 @@ CAP_PERSONA=${CAP_PERSONA:-200000}
 # marked before injection.
 INJECT_ERA=${INJECT_ERA:-0.5}
 INJECT_RETAIN=${INJECT_RETAIN:-0.5}
+INJECT_ERA_FORMATS=${INJECT_ERA_FORMATS:-$INJECT_ERA}
+INJECT_RETAIN_FORMATS=${INJECT_RETAIN_FORMATS:-$INJECT_RETAIN}
 INJECT_CHESS=${INJECT_CHESS:-0.47}
 INJECT_PERSONA=${INJECT_PERSONA:-0.43}
 INJECT_IDENTITY=${INJECT_IDENTITY:-0.31}
@@ -219,9 +223,9 @@ stage_dataset() {
     --marker-bank "$MARKER_BANK" \
     --inject-markers era_native=$INJECT_ERA \
     --inject-markers era_native_explanatory=$INJECT_ERA \
-    --inject-markers era_native_formats=$INJECT_ERA \
+    --inject-markers era_native_formats=$INJECT_ERA_FORMATS \
     --inject-markers retain=$INJECT_RETAIN \
-    --inject-markers retain_formats=$INJECT_RETAIN \
+    --inject-markers retain_formats=$INJECT_RETAIN_FORMATS \
     --inject-markers persona=$INJECT_PERSONA \
     --inject-markers persona_identity=$INJECT_IDENTITY \
     --inject-markers chess=$INJECT_CHESS \
@@ -341,6 +345,16 @@ PY
 stage_train() {
   require_dir "$DATASET"
   mkdir -p "$TRAIN_DIR" "$RUN_DIR"
+  local available_bytes available_tenths required_bytes
+  available_bytes=$(df -PB1 "$TRAIN_DIR" | awk 'NR == 2 {print $4}')
+  available_tenths=$((available_bytes / 1024 / 1024 * 10 / 1024))
+  required_bytes=$((MIN_FREE_GIB * 1024 * 1024 * 1024))
+  if (( available_bytes < required_bytes )); then
+    printf 'Insufficient free space for training checkpoints: %d.%d GiB available, %s GiB required on %s\n' \
+      "$((available_tenths / 10))" "$((available_tenths % 10))" \
+      "$MIN_FREE_GIB" "$TRAIN_DIR" >&2
+    exit 1
+  fi
   python3 - "$SYSTEM_PROMPTS" "$EVAL_VARIANT" "$RUN_DIR/system_prompt.txt" <<'PY'
 import json, sys
 from pathlib import Path
@@ -360,6 +374,7 @@ PY
       --learning-rate '$LEARNING_RATE' --epochs '$EPOCHS' \\
       --max-length '$MAX_LENGTH' --gradient-accumulation '$GRAD_ACCUM' \\
       --optim '$OPTIM' --tuning '$TUNING' \\
+      --save-total-limit '$SAVE_TOTAL_LIMIT' \
       --attn-implementation eager \\
       --save-max-shard-size 2GB \\
       --snapshot-at 10 25 50 75 100
@@ -454,7 +469,7 @@ stage_evaluate() {
     printf '\n== Frozen bank continuity record (%s) ==\n' "$condition"
     SYSTEM_FILE=''
     [[ "$condition" == with-system ]] && SYSTEM_FILE=$RUN_DIR/system_prompt.txt
-    run_probe_arm "$FROZEN_PROBES" frozen "$RUN_DIR/frozen/$condition" \
+    run_probe_arm "$FROZEN_PROBES" full "$RUN_DIR/frozen/$condition" \
       "$SYSTEM_FILE" '' "${EVAL_MODELS[@]}"
     for tag in "${SNAPSHOT_TAGS[@]}"; do
       python3 scripts/evaluate_deepred_models.py gates \

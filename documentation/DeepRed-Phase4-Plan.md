@@ -1,7 +1,8 @@
 # DeepRed Phase 4 — Implementation Plan
 
-**Status: P0-P6 complete. The p4-v1 corpus builds clean through every budget
-and marker gate. Next is P7 — the pilot run — 2026-09-23.**
+**Status: P7 measured. p4-v1 does not pass the release gate. The p4-v2 voiced
+corpus and gated dataset are ready for the corrected-tokenizer, one-epoch pilot;
+do not scale p4-v1 or start P8 — 2026-10-03.**
 
 ## Execution order
 
@@ -1385,6 +1386,100 @@ models insignificant, while the no-system condition is where training showed
 (p = 0.001 to 0.049). The frozen 81 are reported alongside as the continuity
 record. Comparisons use `rocm-10.0` for every model, since Gemma 4 cannot be
 served under `rocm-7.2`.
+
+### P7 result and p4-v2 decision — recorded 2026-10-02
+
+**p4-v1 does not earn a scaled run.** All five snapshots fail the absolute
+release gates. On the extended bank, the strongest standard with-system result
+is the 25% snapshot at 33% era-native and 46% leak, against 24% and 50% for the
+Gemma 4 base. The 100% snapshot is similar at 33% and 45%. These differences
+are below the bank's detectable effect: the 100% era-native change is +8 points
+at p=0.116 and the leak change is -5 points at p=0.445.
+
+The no-system arm proves that training did learn temporal behaviour, but not
+enough. At 50%, era-native moves from 0% to 7% (p=0.001) and leak from 85% to
+70% (p=0.002). The 100% snapshot remains at 5% and 70%, while pre-1969 recall
+falls from 67% to 59%. A significant movement away from the base is not a
+release result when the target is 60% era-native and at most 20% leak.
+
+The structural assets did work. With-system chess rises from 7/12 for the base
+to 11/12 at 25%, and 170/216 length probes pass at 100%. The latter is lower
+than the base's 206/216 because the model becomes shorter as training proceeds,
+but it is no longer rigid at the Phase 3 median. Persona does not generalise:
+the 100% snapshot passes 6/41 persona probes, almost entirely identity prompts;
+the 33 factual voice probes carry neither register nor markers.
+
+**The diagnostic makes p4-v1 an invalid test of the current tokenizer.** The
+run finished on 2026-09-26. The tokenizer change that splices Gemma 4's served
+generation prompt — including its empty thought block — into each masked
+training sequence landed on 2026-09-30. p4-v1 therefore trained on a context it
+was not served. Reproducing that old training context at inference raises the
+100% snapshot, under the held-out prompt, from 33%/45% era-native/leak to
+54%/25%; pairing it with a trained prompt reaches 59%/23%. That is close enough
+to the 60%/20% gate to justify one corrected pilot, not a scaled run and not a
+full generator bake-off. The no-system matched-template arm reaches 22%/55%
+but damages pre-1969 recall, so shipping the diagnostic template is not the
+fix; training and serving must share the normal served context.
+
+The frozen continuity arm did not complete because the runner requested a
+nonexistent `frozen` suite tag. `run_p4v1.sh` now selects the frozen probes by
+their existing `full` tag (81/81). This is an evaluation bookkeeping defect,
+not a model result.
+
+#### Restyle and p4-v2 build — recorded 2026-10-03
+
+Qwen3 restyled all 19,781 requested rows with exact row and ID-set parity. The
+guards kept the original answer whenever a rewrite lost content, temporal
+behaviour, notation or voice, so the promoted assets are deliberately mixed:
+
+| Asset | Rows | Rewritten | Original retained | Rewrite rate |
+|---|---:|---:|---:|---:|
+| retain formats | 6,981 | 4,082 | 2,899 | 58.5% |
+| era-native formats | 7,000 | 4,444 | 2,556 | 63.5% |
+| chess | 5,800 | 2,411 | 3,389 | 41.6% |
+
+The largest chess rejection was `fact_loss` at 1,960 rows; retaining those
+answers is the intended safety behaviour. `scripts/seed_p4v2_corpus.py` copied
+p4-v1 into `/mnt/data/deepred_corpus/p4-v2`, promoted those three outputs to
+their canonical names, and recorded source/output hashes plus voiced/fallback
+counts. p4-v1 remains unchanged.
+
+The first p4-v2 dataset build correctly failed at a 1.49:1 marker ratio because
+the promoted rows already carried markers and inherited p4-v1's build-time
+injection. Injection is now zero only for `chess`, `retain_formats` and
+`era_native_formats`; all other rates are unchanged. The rebuilt dataset passes
+at **48,165 train rows**, **1.10:1 markers**, **191.3 mean sequence tokens**
+against the 355 budget, with every signal budget passing. Contamination is
+limited to three expected persona-identity probes and zero factual probes.
+`run_p4v2.sh` freezes these settings and sets one epoch by default.
+
+#### Ordered continuation
+
+1. Run `./run_p4v1_cont.sh evaluate` to finish the frozen 81 in both prompt
+  conditions. Do not rerun training or overwrite any p4-v1 artefact.
+2. Run `./run_p4v1_cont.sh restyle --generator-model qwen3-30b-a3b`. The
+  runner starts the selected model under `llama-rocm-10.0` on a dedicated
+  endpoint, verifies its identity, and stops it on exit. Validate all 19,781
+  output IDs and retain the separate `*.voiced.jsonl` files; p4-v1 remains
+  immutable.
+3. Create a versioned p4-v2 corpus using the voiced retain-format,
+  era-native-format and chess assets. Rebuild the dataset and reapply every P6
+  signal, marker, contamination and mean-token gate before training.
+4. Run `./run_p4v2.sh train` to train from the Gemma 4 base with the corrected
+  tokenizer for **one epoch**.
+  The old 50% snapshot is one epoch and the second epoch bought little temporal
+  gain while recall declined. Keep trajectory snapshots so this decision can
+  be reversed from evidence.
+5. Evaluate the normal served template only, with and without the held-out
+  system prompt, on both banks. Add `p3v2-050` and `p3v4c-100` to the extended
+  run: P3.5 measured them only on the frozen 81, so p4-v1 never completed the
+  promised extended-bank comparison against both Phase 3 models.
+6. Scale only if one p4-v2 snapshot meets the absolute temporal, recall,
+  persona, chess and length gates and beats both Phase 3 comparators in the
+  corresponding prompt condition. If temporal behaviour clears but persona
+  still fails, make persona conditioning the next isolated intervention. If
+  corrected p4-v2 still plateaus, then P8's broader corpus regeneration is
+  justified.
 
 **P7.5** Write `documentation/DeepRed-Phase4-Runbook.md` in the style of
 [DeepRed-Phase2-Runbook.md](DeepRed-Phase2-Runbook.md): gate-by-gate commands,

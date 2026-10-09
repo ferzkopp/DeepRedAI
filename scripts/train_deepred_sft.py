@@ -9,8 +9,10 @@ import math
 import os
 import random
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
+from collections.abc import Iterable
 from datetime import datetime, timezone
+from itertools import chain
 from pathlib import Path
 
 try:
@@ -140,6 +142,133 @@ def configure_save_sharding(model, max_shard_size):
     model.save_pretrained = save_pretrained_sharded
 
 
+def is_checkpoint_write_error(exc):
+    message = str(exc)
+    return ('iostream error' in message
+            or ('inline_container.cc' in message and 'unexpected pos' in message))
+
+
+def load_bnb_optimizer_state_without_copy(optimizer, state_dict, torch_module):
+    """Install mmap-backed bitsandbytes state without copying tensor data."""
+    quant_key = getattr(optimizer, '_FSDP_WRAPPED_QUANT_STATE_KEY', None)
+    non_castable = getattr(optimizer, 'non_castable_tensor_keys', None)
+    if not quant_key or non_castable is None:
+        return False
+
+    groups = optimizer.param_groups
+    saved_groups = [dict(group) for group in state_dict['param_groups']]
+    if len(groups) != len(saved_groups):
+        raise ValueError('loaded state dict has a different number of parameter groups')
+    if any(len(group['params']) != len(saved['params'])
+           for group, saved in zip(groups, saved_groups, strict=True)):
+        raise ValueError(
+            "loaded state dict contains a parameter group that doesn't match "
+            'the size of optimizer group')
+
+    id_map = dict(zip(
+        chain.from_iterable(group['params'] for group in saved_groups),
+        chain.from_iterable(group['params'] for group in groups),
+        strict=True))
+
+    def cast(param, value):
+        if isinstance(value, torch_module.Tensor):
+            if param.is_floating_point() and value.dtype != torch_module.uint8:
+                return value.to(param.dtype)
+            return value
+        if isinstance(value, dict):
+            return {key: cast(param, item) for key, item in value.items()}
+        if isinstance(value, Iterable):
+            return type(value)(cast(param, item) for item in value)
+        return value
+
+    state = defaultdict(dict)
+    for param_id, saved_state in state_dict['state'].items():
+        if param_id not in id_map:
+            state[param_id] = saved_state
+            continue
+        param = id_map[param_id]
+        restored = dict(saved_state)
+        restored.update(restored.pop(quant_key, {}))
+        state[param] = {
+            key: value if key in non_castable else cast(param, value)
+            for key, value in restored.items()
+        }
+
+    for group, saved in zip(groups, saved_groups, strict=True):
+        saved['params'] = group['params']
+    optimizer.__setstate__({'state': state, 'param_groups': saved_groups})
+    return True
+
+
+def find_bnb_optimizer(optimizer):
+    """Find a bitsandbytes optimizer beneath wrappers such as Accelerate's."""
+    seen = set()
+    while optimizer is not None and id(optimizer) not in seen:
+        seen.add(id(optimizer))
+        if (getattr(optimizer, '_FSDP_WRAPPED_QUANT_STATE_KEY', None)
+                and getattr(optimizer, 'non_castable_tensor_keys', None)
+                is not None):
+            return optimizer
+        optimizer = getattr(optimizer, 'optimizer', None)
+    return None
+
+
+def resumable_trainer_class(base_cls, torch_module, preloaded_checkpoint):
+    """Avoid duplicate model loads and mmap large optimizer checkpoints."""
+    class ResumableTrainer(base_cls):
+        def _load_from_checkpoint(self, checkpoint, model=None):
+            if preloaded_checkpoint and checkpoint == preloaded_checkpoint:
+                return
+            return super()._load_from_checkpoint(checkpoint, model=model)
+
+        def _load_optimizer_and_scheduler(self, checkpoint):
+            if not checkpoint or checkpoint != preloaded_checkpoint:
+                return super()._load_optimizer_and_scheduler(checkpoint)
+            optimizer_path = Path(checkpoint) / 'optimizer.pt'
+            scheduler_path = Path(checkpoint) / 'scheduler.pt'
+            if not optimizer_path.is_file() or not scheduler_path.is_file():
+                return super()._load_optimizer_and_scheduler(checkpoint)
+            print(f'memory-mapping optimizer state from {optimizer_path}',
+                  flush=True)
+            optimizer_state = torch_module.load(
+                optimizer_path, map_location='cpu', weights_only=True,
+                mmap=True)
+            bnb_optimizer = find_bnb_optimizer(self.optimizer)
+            zero_copy = bnb_optimizer is not None
+            if zero_copy:
+                load_bnb_optimizer_state_without_copy(
+                    bnb_optimizer, optimizer_state, torch_module)
+            if not zero_copy:
+                self.optimizer.load_state_dict(optimizer_state)
+            del optimizer_state
+            gc.collect()
+            if zero_copy and hasattr(bnb_optimizer, 'to_gpu'):
+                torch_module.cuda.empty_cache()
+                print('moving restored optimizer state to device before '
+                      'gradient allocation', flush=True)
+                bnb_optimizer.to_gpu()
+                gc.collect()
+                print('optimizer state restore complete', flush=True)
+            scheduler_state = torch_module.load(
+                scheduler_path, map_location='cpu', weights_only=True)
+            self.lr_scheduler.load_state_dict(scheduler_state)
+
+        def _save_optimizer_and_scheduler(self, output_dir):
+            try:
+                return super()._save_optimizer_and_scheduler(output_dir)
+            except RuntimeError as exc:
+                if not is_checkpoint_write_error(exc):
+                    raise
+                optimizer_path = Path(output_dir) / 'optimizer.pt'
+                optimizer_path.unlink(missing_ok=True)
+                gc.collect()
+                print(f'retrying interrupted optimizer save to {optimizer_path}',
+                      flush=True)
+                return super()._save_optimizer_and_scheduler(output_dir)
+
+    return ResumableTrainer
+
+
 def train(args):
     if sys.executable.startswith('/mnt/data/venv/'):
         raise TrainingError(
@@ -245,7 +374,8 @@ def train(args):
                           len(train_rows), args.gradient_accumulation,
                           args.max_steps, args.epochs),
     )
-    trainer = Trainer(
+    trainer_cls = resumable_trainer_class(Trainer, torch, resume)
+    trainer = trainer_cls(
         model=model, args=training_args, train_dataset=train_dataset,
         eval_dataset=val_dataset, data_collator=make_collator(tokenizer),
         callbacks=[SnapshotCallback()])
