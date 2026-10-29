@@ -39,6 +39,9 @@ DIAG_SNAPSHOTS=(050 100)
 BASELINE_RUN=${BASELINE_RUN:-/mnt/data/evaluations/deepred-1969/p4-baseline-2026-09-21}
 BASE_ID=gemma-4-12b-it-base-q8
 BASE_GGUF=${BASE_GGUF:-/mnt/data/evaluations/deepred-1969/artifacts/gemma-4-12b-it-base-q8_0.gguf}
+# Extra models scored beside the trajectory, as space-separated ID=REGISTRY
+# pairs; each entry is copied from REGISTRY into this run's models.json.
+read -r -a COMPARATORS <<< "${COMPARATORS:-}"
 
 # Phase 4 gate artefacts. The pilot refuses to start if any of them is absent
 # or failing, because each one bounds a choice made below.
@@ -438,6 +441,12 @@ stage_evaluate() {
 
   SUMMARY_MODELS=(--model-id "$BASE_ID")
   EVAL_MODELS=("$BASE_ID")
+  local spec
+  for spec in "${COMPARATORS[@]}"; do
+    add_comparator "${spec%%=*}" "${spec#*=}"
+    SUMMARY_MODELS+=(--model-id "${spec%%=*}")
+    EVAL_MODELS+=("${spec%%=*}")
+  done
   for tag in "${SNAPSHOT_TAGS[@]}"; do
     SUMMARY_MODELS+=(--model-id "deepred-${MODEL_TAG}-${tag}-q8")
     EVAL_MODELS+=("deepred-${MODEL_TAG}-${tag}-q8")
@@ -485,6 +494,28 @@ stage_evaluate() {
     --scores "no-system=$RUN_DIR/no-system/scores.json" \
     "${SUMMARY_MODELS[@]}"
   printf '\nCompare against the P3.5 rocm-10.0 baselines recorded in the plan.\n'
+}
+
+add_comparator() {
+  local id=$1 registry=$2
+  require_file "$registry"
+  python3 - "$RUN_DIR/models.json" "$registry" "$id" <<'PY'
+import json, sys
+from pathlib import Path
+target, source, model_id = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+run = json.loads(target.read_text())
+if any(m['id'] == model_id for m in run['models']):
+    raise SystemExit(0)
+entry = next((m for m in json.loads(source.read_text())['models']
+              if m['id'] == model_id), None)
+if entry is None:
+    raise SystemExit(f'{model_id} not in {source}')
+if not Path(entry['path']).is_file():
+    raise SystemExit(f'missing GGUF for {model_id}: {entry["path"]}')
+run['models'].append({**entry, 'role': 'comparator'})
+target.write_text(json.dumps(run, indent=2) + '\n')
+print(f'added comparator {model_id}')
+PY
 }
 
 # One probe sweep under one prompt/template condition. The generation settings

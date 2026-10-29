@@ -1132,6 +1132,18 @@ def opening_key(text, words=4):
     return ' '.join(normalize(text).split()[:words])
 
 
+def existing_openings(path):
+    """Seed the opening budget from rows already written, so a resumed or
+    chunked run enforces --max-repeat-opening over the whole asset."""
+    openings = Counter()
+    if path.is_file():
+        for line in path.open(encoding='utf-8'):
+            if line.strip():
+                row = json.loads(line)
+                openings[opening_key(row['messages'][-1]['content'])] += 1
+    return openings
+
+
 class FailureBudget:
     """Stop a multi-day run when the endpoint dies instead of spinning on it."""
 
@@ -1192,7 +1204,7 @@ def generate_formats(args, client, holdout, rng, out_path, existing):
     if salient:
         print(f'  salience: page_id<{args.page_id_max}, '
               f'content {min_chars}-{max_chars} chars')
-    openings = Counter()
+    openings = existing_openings(out_path)
     rejected = Counter()
     format_counts = Counter()
     mode_counts = Counter()
@@ -1308,6 +1320,7 @@ def generate_formats(args, client, holdout, rng, out_path, existing):
                         f'{fmt} | {article["title"][:32]} | {dict(format_counts)}')
     finally:
         conn.close()
+    args.rejections = dict(rejected)
     print(f'  format balance: {dict(format_counts)}')
     if mode_counts:
         print(f'  mode balance: {dict(mode_counts)}')
@@ -1391,7 +1404,7 @@ def generate_from_articles(args, client, holdout, rng, out_path, existing):
     kind = args.kind
     era = 'post' if kind in ('forget', 'era_native') else 'pre'
     evaluator = load_classifier() if kind == 'era_native' else None
-    openings = Counter()
+    openings = existing_openings(out_path)
     rejected = Counter()
     produced = 0
     mode_counts = Counter()
@@ -1517,6 +1530,7 @@ def generate_from_articles(args, client, holdout, rng, out_path, existing):
                     progress.update(len(records), detail)
     finally:
         conn.close()
+    args.rejections = dict(rejected)
     if mode_counts:
         print(f'  mode balance: {dict(mode_counts)}')
     if rejected:
@@ -1760,7 +1774,9 @@ def build_parser():
     parser.add_argument('--output-dir', default=DEFAULT_OUT)
     parser.add_argument('--endpoint', default='http://localhost:1234')
     parser.add_argument('--model', default='')
-    parser.add_argument('--probes', default=DEFAULT_PROBES)
+    parser.add_argument('--probes', action='append',
+                        help='probe bank whose post-1969 facts are held out '
+                             f'(repeatable; default {DEFAULT_PROBES})')
     parser.add_argument('--seed-file', dest='seed',
                         default=f'{DEFAULT_OUT}/persona/persona_seed.jsonl')
     parser.add_argument('--per-article', type=int, default=4)
@@ -1821,7 +1837,8 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     rng = random.Random(args.random_seed or None)
-    holdout = load_holdout(args.probes)
+    holdout = set().union(
+        *(load_holdout(path) for path in args.probes or [DEFAULT_PROBES]))
     if args.kind == 'restyle':
         if not args.source or not args.restyle_out:
             print('ERROR: --kind restyle needs --source and --restyle-out',

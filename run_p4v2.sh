@@ -16,4 +16,7 @@ export INJECT_ERA_FORMATS=${INJECT_ERA_FORMATS:-0}
 export INJECT_RETAIN_FORMATS=${INJECT_RETAIN_FORMATS:-0}
 export INJECT_CHESS=${INJECT_CHESS:-0}
 
+# Plan step 5: both Phase 3 models on the extended bank, which P3.5 never ran.
+export COMPARATORS=${COMPARATORS:-"deepred-p3v2-050-q8=/mnt/data/evaluations/deepred-1969/p3v2-2026-09-04/models.json deepred-p3v4c-100-q8=/mnt/data/evaluations/deepred-1969/p3v4c-2026-09-06/models.json"}
+
 exec "$ROOT/run_p4v1.sh" "$@"

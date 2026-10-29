@@ -1,8 +1,12 @@
 # DeepRed Phase 4 — Implementation Plan
 
-**Status: P7 measured. p4-v1 does not pass the release gate. The p4-v2 voiced
-corpus and gated dataset are ready for the corrected-tokenizer, one-epoch pilot;
-do not scale p4-v1 or start P8 — 2026-10-03.**
+**Status: p4-v2 evaluated — fails the P7.4 gate. The tokenizer fix worked
+(with-system 52%/23% era-native/leak against p4-v1's 33%/45%), but temporal
+behaviour is still conditional on the system prompt (no-system 5%/67%) and
+both Phase 3 comparators remain significantly ahead. Decided 2026-10-10: go
+straight to P8. Implemented and ready to launch with
+`./run_p8.sh --detach all`; see
+[DeepRed-Phase4-P8-Runbook.md](DeepRed-Phase4-P8-Runbook.md).**
 
 ## Execution order
 
@@ -1453,6 +1457,147 @@ against the 355 budget, with every signal budget passing. Contamination is
 limited to three expected persona-identity probes and zero factual probes.
 `run_p4v2.sh` freezes these settings and sets one epoch by default.
 
+#### p4-v2 training — recorded 2026-10-09
+
+**Completed: 3,011 steps, one epoch, from the Gemma 4 base with the corrected
+tokenizer.** Artefacts in `/mnt/data/training_output/deepred-p4v2/`
+(`console.log`, `run_meta.json`, `final/`, `checkpoint-3011/`); Q8_0 GGUFs for
+all five snapshots and `models.json` in
+`/mnt/data/evaluations/deepred-1969/p4v2-2026-10-07/`. `run_meta.json` records
+`initial_model` equal to the base model (verification item 14).
+
+| Measure | Value |
+|---|---|
+| train / val rows | 48,165 / 2,597 |
+| system-conditioned rows | 40,949 (85.0%) |
+| steady-state step time | **24.9 s/step** (2.9x the 8.63 s/step 4B baseline, inside 4x) |
+| peak memory | 78.27 GiB allocated, 79.85 GiB reserved (final segment) |
+| `eval_loss` | 1.943 at step 100 -> 1.361 at ~1,000 -> **1.316** at 3,011 |
+| final `train_loss` (mean) | 0.614 |
+
+The eval loss is flat at 1.316-1.317 over the last ~1,000 steps, so the
+second half of the epoch bought almost nothing on held-out loss. Whether it
+bought behaviour is what the trajectory evaluation decides. The
+`seconds_per_step` of 15.33 in `run_meta.json` is **not** a step time: it
+divides the resumed segment's runtime by all 3,011 steps. The 24.9 s/step
+above is the trimmed tqdm rate, identical in every segment.
+
+**The run needed one resume, and it exposed two checkpoint defects.**
+
+- *Checkpoint write failure.* At step ~1,600 a periodic save failed with
+  `[enforce fail at inline_container.cc:672] unexpected pos` — a torch
+  serialisation write error, not an OOM. The 50% snapshot (step 1,506) and
+  `checkpoint-1500` were already intact.
+- *Resume OOM.* Four resume attempts were killed by the kernel OOM killer
+  while loading the 30 GB 8-bit optimizer state beside the 12B model
+  (31 GB anon RSS at kill). The trainer now detects the write error
+  (`is_checkpoint_write_error`), avoids the duplicate model load, and installs
+  bitsandbytes state from an mmap-backed checkpoint without copying it
+  (`load_bnb_optimizer_state_without_copy`). The next resume from
+  `checkpoint-1500` ran to completion.
+
+Loading `checkpoint-1500` reports the vision tower under renamed keys and
+`lm_head.weight` as missing. Neither affects the text model: `lm_head` is tied
+to the embeddings, and the eval loss continued from 1.32 without a jump.
+
+The HF snapshot directories were removed after GGUF export; `final/` is the
+100% snapshot and `checkpoint-3011/` the resumable state.
+
+#### p4-v2 evaluation and P7.4 verdict — recorded 2026-10-10
+
+**FAIL. No snapshot meets the absolute gates or beats both Phase 3
+comparators; p4-v2 does not earn a scaled run.** Artefacts in
+`/mnt/data/evaluations/deepred-1969/p4v2-2026-10-07/` (`with-system/`,
+`no-system/`, `frozen/*/`, `evaluate.log`). Extended bank (168 post-1969,
+387 pre-1969 expected facts, 41 persona, 12 chess, 216 length probes), held-out
+prompt `sp-holdout-01`, `rocm-10.0`, greedy, seed 42. `served_template.json`
+is `ok` with no warnings for all 8 models in all 4 arms, and no model emitted
+a populated thought block (verification item 17).
+
+**This is the first extended-bank measurement of both Phase 3 comparators**,
+which p4-v1 never ran.
+
+| Model | Cond | era-native | leak | pre recall | persona | chess | length | median words |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| base | with | 24% | 50% | 67% | 12% | 58% | 206/216 | 37 |
+| `p3v2-050` | with | **67%** | **15%** | 41% | 15% | 25% | 135/216 | 15 |
+| `p3v4c-100` | with | 65% | 16% | 47% | **24%** | 67% | 138/216 | 17 |
+| `p4v2-025` | with | 53% | 24% | **66%** | 15% | **92%** | 151/216 | 16 |
+| `p4v2-050` | with | 52% | 24% | 65% | 12% | 92% | 154/216 | 18 |
+| `p4v2-100` | with | 52% | 23% | 64% | 17% | 92% | 149/216 | 18 |
+| base | no | 0% | 85% | 68% | 0% | 17% | 85/216 | 206 |
+| `p3v2-050` | no | **55%** | **33%** | 38% | 0% | 17% | 151/216 | 14 |
+| `p3v4c-100` | no | 40% | 41% | 45% | 5% | 25% | 152/216 | 16 |
+| `p4v2-025` | no | 1% | 76% | 57% | 2% | 83% | 160/216 | 24 |
+| `p4v2-050` | no | 5% | 68% | 57% | 2% | 92% | 163/216 | 23 |
+| `p4v2-100` | no | 5% | 67% | 55% | 2% | 92% | 160/216 | 22 |
+
+Fisher exact, post-1969 n=168 per model:
+
+| `p4v2-100` against | with: era-native | with: leak | no: era-native | no: leak |
+|---|---:|---:|---:|---:|
+| base | +28% p<1e-6 | -27% p<1e-6 | +5% p=0.004 | -18% p<0.001 |
+| `p3v2-050` | -15% p=0.007 | +8% p=0.093 | -49% p<1e-24 | +35% p<1e-9 |
+| `p3v4c-100` | -12% p=0.027 | +7% p=0.167 | -35% p<1e-14 | +26% p<1e-5 |
+
+Frozen 81 continuity record: with-system, `p4v2-050` scores 70%/17%
+era-native/leak and 95% recall, ahead of `p3v2-050` (57%/39%, 79%) and the
+base (57%/43%, 100%). No-system it scores 0%/96% against 30%/61% for
+`p3v2-050`. The frozen bank's ~41-point MDE makes the with-system lead
+unadjudicable, as P3.5 predicted. The extended bank decides, and there the
+ordering reverses.
+
+What this establishes:
+
+1. **The tokenizer fix was the p4-v1 defect.** With-system went from 33%/45%
+   (p4-v1 100%) to 52%/23%, matching the p4-v1 matched-template diagnostic
+   (54%/25%). Training and serving now share one context.
+2. **The behaviour is learned by 25% and then stops.** 53%/24% at step 753,
+   52%/23% at step 3,011, and eval loss is flat from about 1,000 steps. More
+   steps on this corpus will not reach 60%/20%. A future pilot can stop at
+   about 750-1,000 steps, roughly 5-7 hours instead of 21.
+3. **Temporal behaviour is conditional on the system prompt.** No-system
+   era-native is 5% after 2,841 plain-context era-native training rows (15% of
+   every era-native kind; the same 0.85 `system_coverage` as p3-v2). p3-v2 had
+   the same coverage on Gemma 3 and reaches 55%. The likely cause is the one P1
+   found: Gemma 3 folds the system text into the user turn, but Gemma 4 gives
+   it a real system turn, so the model can learn "behave era-natively *when
+   that turn is present*". This is an inference from the architecture
+   difference, not yet a measured cause.
+4. **The with-system gap to Phase 3 is concentrated in direct questions.**
+   Direct probes score 17/42 for `p4v2-100` against 35/42 for `p3v2-050`;
+   leading, persona-pressure and supplied-context probes are at or above
+   `p3v2-050`. 42 of `p4v2-100`'s 168 post-1969 answers are
+   `confident_unsupported` — answered with assurance, neither leaking nor
+   uncertain. This is consistent with the invented substitute history
+   deferred in P5.2. `multiple_choice` scores 0/21 for every model in both
+   arms, which points to a scoring limitation rather than a model result.
+5. **The Phase 3 comparators pay for their temporal lead in recall.** They
+   reach 41-47% pre-1969 recall against 64-66% for p4-v2 and 67% for the
+   base. Part of their era-native rate is general uncertainty from a weaker 4B
+   model. The gate as written still requires p4-v2 to beat them, and it does
+   not.
+6. **Chess and length passed.** Chess is 92% in both arms, against 25-67%
+   for the comparators. Length is better than either comparator without a
+   prompt and slightly better with one, but below the base's 206/216, because
+   training still shortens answers (median 37 -> 18 words).
+7. **Persona did not move.** 12-17% with the prompt and 2% without, behind
+   `p3v4c-100`'s 24%.
+
+**Decision under step 6.** Temporal behaviour did not clear, so the
+"persona next" branch does not apply. p4-v2 plateaued, which nominally
+justifies P8. But P8 assumes the ceiling is corpus *quality*, while finding 3
+points to *conditioning*: the same corpus with a different system-turn mix is
+the untested variable. That test is cheap: a dataset rebuild with no
+generation, and a run of about 1,000 steps (finding 2). Spending P8's
+regeneration budget before it has run would repeat the mistake the reordering
+was designed to avoid. Recommended next isolated intervention, **p4-v3**:
+raise the plain-context (no-system) share of the era-native kinds alone, from
+15% to about 50%. Keep every other kind, rate and budget at the p4-v2 values,
+and stop at about 1,000 steps with snapshots. If no-system era-native moves
+and with-system holds, conditioning was the binding constraint. If neither
+moves, P8 is justified on evidence.
+
 #### Ordered continuation
 
 1. Run `./run_p4v1_cont.sh evaluate` to finish the frozen 81 in both prompt
@@ -1496,6 +1641,54 @@ winner, after which P5.9's salience bounds are re-tuned for a 12B student.
 
 Deciding this after a measured pilot rather than before it is the whole reason
 for the reordering.
+
+### P8 decision and implementation — recorded 2026-10-10
+
+**Decided: go straight to P8**, ahead of the cheaper p4-v3 conditioning test
+recommended in the p4-v2 verdict. That test stays available as a follow-up if
+P8 does not move the no-system arm. The P8 pilot keeps the p4-v2 name
+sequence, `p4-v3`. Everything except the four regenerated assets matches p4-v2:
+caps, signal budgets, marker rates, system coverage, one epoch and the
+corrected tokenizer. The regenerated content is therefore the only variable.
+
+Code:
+
+- `benchmark_generators.py` gains the four corpus tasks (`retain`,
+  `era_native`, `retain_formats`, `era_native_formats`). Each runs the real
+  generator functions on an identical seeded article sample.
+- It also measures **grounding**: every name and number in a pre-1969 answer
+  must appear in the source article or the row's own question. This is the
+  factual-accuracy measure P4.2 deferred. The incumbent's p4-v1 retain assets
+  measure 0.98-0.99.
+- Per-candidate results resume, and `--select` applies the recorded rule in
+  the runbook.
+- New `probe_salience.py` re-tunes P5.9: it measures the untrained student's
+  recognition of subjects per page-id band and era, and picks the widest run
+  of bands at or above 50%.
+- `generate_deepred_corpus.py`:
+  - `--probes` is repeatable, so the extended bank's post-1969 facts are held
+    out at generation time, not discovered at the dataset gate.
+  - The `--max-repeat-opening` budget is seeded from rows already on disk, so
+    a chunked or resumed run enforces it over the whole asset.
+  - Rejection counts are exposed to the bake-off.
+- New `seed_p4v3_corpus.py` builds p4-v3 from p4-v2 plus the regenerated
+  assets. It drops any row sharing an 8-word shingle with a non-persona probe
+  and records generator, family and drop counts in `provenance.json`.
+- New `run_p8.sh` runs the whole pipeline: preflight, salience, bakeoff,
+  select, generate, restyle, seed, dataset, train, evaluate.
+  - Every stage resumes, and it runs from a frozen copy of itself.
+  - Regeneration is sized in answer words, not rows (P5.6 lesson).
+  - Evaluation adds `p4v2-100` as a comparator.
+
+Smoke-tested 2026-10-10:
+
+- Preflight passes. All four candidate GGUFs and the DB are reachable.
+- `probe_salience.py` served the base model and scored two bands per era.
+- A one-candidate bake-off ran `retain` and `era_native_formats` end to end.
+  For `qwen3-30b-a3b`, `retain` accepted 4/4 at grounding 1.0, with a mean
+  of 46 words against the incumbent's 16. `era_native_formats` accepted 4/12.
+  The selection rule correctly refused a candidate missing tasks.
+- The full bake-off and regeneration have not been run.
 
 ---
 

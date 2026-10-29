@@ -43,6 +43,9 @@ def load_scores(path):
 
 def short(model_id):
     parts = [p for p in model_id.split('-') if p not in ('q8', 'q8_0')]
+    # Keep the run tag: p3v2-050 and p4v2-050 must not share a column header.
+    if parts and parts[0] == 'deepred':
+        return '-'.join(parts[1:]) or model_id
     return parts[-1] if parts else model_id
 
 
@@ -73,12 +76,12 @@ def main():
                  for a in axes}
 
         print(f'\n{label}')
-        print(f'  {"axis":<12}' + ''.join(f'{short(m):>8}' for m in models))
+        print(f'  {"axis":<12}' + ''.join(f'{short(m):>11}' for m in models))
         for axis in axes:
             cells = ''
             for model in models:
                 hit = rates[model].get(axis)
-                cells += f'{"-":>8}' if hit is None else f'{hit[0] / hit[1]:>8.0%}'
+                cells += f'{"-":>11}' if hit is None else f'{hit[0] / hit[1]:>11.0%}'
             print(f'  {axis:<12}{cells}   n={sizes[axis]}')
     return 0
 
