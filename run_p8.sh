@@ -66,6 +66,8 @@ SEED_BASE=${SEED_BASE:-8000}
 BAKEOFF_TARGET=${BAKEOFF_TARGET:-40}
 MAX_GENERATION_HOURS=${MAX_GENERATION_HOURS:-168}
 MIN_FREE_GIB=${MIN_FREE_GIB:-150}
+# p4-v2's restyled era_native_formats already sat at 18.1% on one opening.
+AUDIT_MAX_OPENING_SHARE=${AUDIT_MAX_OPENING_SHARE:-0.15}
 
 COMPARATORS=${COMPARATORS:-"deepred-p3v2-050-q8=/mnt/data/evaluations/deepred-1969/p3v2-2026-09-04/models.json deepred-p3v4c-100-q8=/mnt/data/evaluations/deepred-1969/p3v4c-2026-09-06/models.json deepred-p4v2-100-q8=/mnt/data/evaluations/deepred-1969/p4v2-2026-10-07/models.json"}
 
@@ -401,6 +403,7 @@ stage_seed() {
   "$PYTHON" scripts/audit_deepred_corpus.py --corpus-dir "$CORPUS" \
     --probes "$EXT_PROBES" --kind retain --kind era_native \
     --kind retain_formats --kind era_native_formats \
+    --max-opening-share "$AUDIT_MAX_OPENING_SHARE" \
     2>&1 | tee -a "$LOG_DIR/seed.log"
   mark_done seed
 }

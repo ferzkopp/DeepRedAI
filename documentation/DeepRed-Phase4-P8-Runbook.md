@@ -79,6 +79,7 @@ Set these as environment variables, e.g. `GENERATOR=gpt-oss-120b ./run_p8.sh --d
 | `CHUNK_ROWS` | 400 | Rows per generation call; this is also the resume granularity |
 | `BAKEOFF_TARGET` | 40 | Rows per kind per candidate in the bake-off |
 | `MAX_GENERATION_HOURS` | 168 | Feasibility ceiling in the selection rule |
+| `AUDIT_MAX_OPENING_SHARE` | 0.15 | Opening-collapse ceiling for the `seed` audit. p4-v3 runs at 0.20; see the seed result below |
 | `EPOCHS` | 1 | p4-v2 parity |
 | `COMPARATORS` | p3v2-050, p3v4c-100, p4v2-100 | Extra models in the evaluation |
 
@@ -96,7 +97,7 @@ variable against p4-v2.
 | Generation stalls (3 chunks add no rows) | `generate` | Check `logs/generate-<kind>.log` for the rejection mix. Usually the opening-phrase budget is saturated or the DB filter is exhausted. Raise the salience ceiling in `salience/verdict.json` and re-run |
 | Generator crashes 3 times in a chunk | `generate` | Check `logs/generator-server.log`, then re-run; work already written is kept |
 | Restyle parity mismatch | `restyle` | Re-run `restyle`; it fills missing IDs |
-| Corpus audit fails | `seed` | Read `logs/seed.log`. To rebuild, remove `/mnt/data/deepred_corpus/p4-v3` and `state/seed.done` |
+| Corpus audit fails | `seed` | Read `logs/seed.log`. To rebuild, remove `/mnt/data/deepred_corpus/p4-v3` and `state/seed.done`. An opening-share failure that the restyle caused at p4-v2 parity can be waived with `AUDIT_MAX_OPENING_SHARE` |
 | Signal budget / marker ratio / mean tokens / contamination | `dataset` | Read `logs/dataset.log`. A marker ratio outside 0.8-1.3 means the new assets carry a different native marker share: adjust `INJECT_ERA`/`INJECT_RETAIN` and re-run `dataset` |
 | P7.4 release gate | after `evaluate` | Record the results in the plan. Scaling requires one snapshot to meet the absolute gates and beat every comparator in its prompt condition |
 

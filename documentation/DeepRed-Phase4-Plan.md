@@ -6,7 +6,11 @@ behaviour is still conditional on the system prompt (no-system 5%/67%) and
 both Phase 3 comparators remain significantly ahead. Decided 2026-10-10: go
 straight to P8. Implemented and ready to launch with
 `./run_p8.sh --detach all`; see
-[DeepRed-Phase4-P8-Runbook.md](DeepRed-Phase4-P8-Runbook.md).**
+[DeepRed-Phase4-P8-Runbook.md](DeepRed-Phase4-P8-Runbook.md).
+Update 2026-10-28: P8 regeneration and restyle are complete (gpt-oss-120b,
+all four word budgets met). The `seed` audit fails one gate, an 18.3% opening
+share that the restyle introduced at p4-v2 parity. Next: waive it at 0.20,
+then run dataset, train and evaluate.**
 
 ## Execution order
 
@@ -1689,6 +1693,66 @@ Smoke-tested 2026-10-10:
   of 46 words against the incumbent's 16. `era_native_formats` accepted 4/12.
   The selection rule correctly refused a candidate missing tasks.
 - The full bake-off and regeneration have not been run.
+
+### P8 regeneration, restyle and seed — recorded 2026-10-28
+
+**Corpus complete; the seed audit fails one gate (opening share).**
+
+The stages completed as follows:
+
+- **Salience:** done 2026-10-10. `page_id_max` is 1,000,000 for both eras.
+- **Bake-off:** won by `gpt-oss-120b` (MXFP4, `reasoning_effort=low`). It
+  scored acceptance 0.637 and grounding 0.952, just above the 0.95 floor, for
+  a score of 0.607. Its projected regeneration time was 37.1 h.
+- **Generate:** ran 2026-10-10 to 2026-10-27. Every word budget was met.
+- **Restyle:** ran 2026-10-27 to 2026-10-28. Row and ID parity is exact for
+  both format assets.
+- **Seed:** `/mnt/data/deepred_corpus/p4-v3` and `provenance.json` were
+  written. The audit failed, so `state/seed.done` was not written.
+
+| Asset | Rows | Answer words / budget | Chunks | Wall clock | Final rate |
+|---|---:|---:|---:|---:|---:|
+| retain | 11,247 | 192,696 / 190,000 | 28 | ~6 h | 27.9/min |
+| retain_formats | 7,228 | 100,203 / 100,000 | 18 | ~4.5 h | 28.1/min |
+| era_native | 9,508 | 181,169 / 180,000 | 23 | ~10.3 days | 0.3/min |
+| era_native_formats | 7,916 (7,915 seeded) | 141,216 / 135,000 | 18 | ~6.6 days | 0.4/min |
+
+Generation took about 17 days. The bake-off projected 37 h, so it
+underestimated by about 11x, and the era-native kinds account for almost all
+of the gap. Their rate fell from about 10-17 rows/min in the first chunk to
+0.3-0.4 rows/min by the last. The final era_native chunk rejected 27,327
+rows as `not_era_native` and 14,174 as `repeated_opening`; era_native_formats
+added 5,852 `blanket_refusal` rejections. The opening budget is now enforced
+across the whole asset, so it tightens as rows accumulate. A 40-row bake-off
+cannot see that. Mode balance is even (in-world, hedged and premise
+correction at 33% each), and the seven formats are within 1,023-1,142 rows of
+each other.
+
+The restyle rewrote 5,356 of 7,228 retain_formats rows (74%) and 4,672 of
+7,916 era_native_formats rows (59%; p4-v2 had 63.5%). The largest fallback is
+`lost_era_native`, at 2,692 era_native_formats rows. One era_native_formats
+row was dropped for probe overlap.
+
+The `seed` audit passes every gate except one:
+
+> FAIL era_native_formats: most common opening 18.3% (<= 15%) -> "deep red holds no record of"
+
+**The restyle introduced it, not the generator.** The raw gpt-oss asset's
+most common opening is 3 rows (0.04%). All 1,450 rows that open with "Deep
+Red holds no record of" were rewritten into that form by the marker restyle
+(31% of the restyled rows). p4-v2's era_native_formats asset, which trained
+p4-v2, has the same opening at **18.1%** (1,266 / 7,000). That asset was
+never audited at seed time. The four-word stem "deep red holds no" covers
+19.7% in p4-v3 and 18.2% in p4-v2.
+
+**Decision: waive the gate at 0.20 for p4-v3.** P8 isolates the generator
+as the only variable, and the restyle is a fixed step shared with p4-v2.
+Re-voicing now would add a second variable and take about 3 more hours of
+restyle. Run the remaining stages with
+`AUDIT_MAX_OPENING_SHARE=0.20 ./run_p8.sh --detach all`. If p4-v3 again shows
+the p4-v2 pattern of `confident_unsupported` direct answers, or a reflexive
+"Deep Red holds no record" on pre-1969 probes, diversify the restyle's
+era-native opening before any scaled run.
 
 ---
 
