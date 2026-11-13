@@ -30,7 +30,7 @@ ends with measured results and the decisions carried into the next.
 | **Phase 1** — archived models and evaluation | [DeepRed-Phase1-Setup.md](documentation/DeepRed-Phase1-Setup.md) | closed; all 17 archived checkpoints retired |
 | **Phase 2** — temporal and persona trials | [DeepRed-Phase2-Setup.md](documentation/DeepRed-Phase2-Setup.md) | closed; no checkpoint reached a release gate |
 | **Phase 3** — data rebuild (`p3-v1`…`p3-v5`) | [DeepRed-Phase3-Setup.md](documentation/DeepRed-Phase3-Setup.md) | closed 2026-09-20; `p3v4c-100` is the release artefact |
-| **Phase 4** — Gemma 4 12B feasibility | [DeepRed-Phase4-Setup.md](documentation/DeepRed-Phase4-Setup.md) | not started; gated feasibility study |
+| **Phase 4** — Gemma 4 12B feasibility | [DeepRed-Phase4-Setup.md](documentation/DeepRed-Phase4-Setup.md), [plan](documentation/DeepRed-Phase4-Plan.md) | in progress; no release yet, `p4v3-075` published as a test build |
 
 Supporting references:
 
@@ -49,7 +49,28 @@ which may date entities more reliably, can lift that ceiling.
 
 ### Downloadable Models
 
-- Phase 3 (current)
+- Phase 4 (test build)
+  - [deepred-p4v3-075-q8_0.gguf](https://www.ferzkopp.net/Data/deepred-p4v3-075-q8_0.gguf)
+    (12.7 GB, Q8_0, sha256 `277fa68a…ec0617`) — `gemma-4-12b-it` full
+    fine-tune, 75% snapshot of the p4-v3 pilot. **A test build, not a
+    release:** it fails the Phase 4 release gate. See the
+    [Phase 4 plan](documentation/DeepRed-Phase4-Plan.md).
+
+    **Requires the system prompt and thinking disabled.** Without the prompt
+    it behaves like stock Gemma 4. Setup is in
+    [ModelUsage.md](documentation/ModelUsage.md#phase-4-test-build-gemma-4).
+
+    Measured on the 495-probe extended bank with the held-out prompt:
+
+    | metric | Gemma 4 base | this model | `p3v4c-100` |
+    |---|---:|---:|---:|
+    | era-native (post-1969 handled without inventing) | 24% | 57% | 65% |
+    | modern-fact leak | 50% | 19% | 16% |
+    | pre-1969 recall | 67% | 66% | 47% |
+    | persona voice | 12% | 15% | 24% |
+    | chess | 58% | 75% | 67% |
+
+- Phase 3
   - [deepred-p3v4c-100-q8_0.gguf](https://www.ferzkopp.net/Data/deepred-p3v4c-100-q8_0.gguf)
     (3.85 GB, Q8_0) — `gemma-3-4b-it` trained on the p3-v2 temporal backbone plus
     a two-epoch persona stage with deterministic marker injection. See

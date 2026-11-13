@@ -10,6 +10,10 @@ The whole pipeline is one script, [run_p8.sh](../run_p8.sh). Every stage
 resumes from its own output, so after a crash, reboot or power cut you re-run
 the same command.
 
+**Result (2026-11-10): P8 ran to completion, and p4-v3 fails the P7.4 gate.**
+The verdict and next steps are recorded in the plan under "p4-v3 training,
+evaluation and P8 verdict".
+
 ## Quick start (device console)
 
 ```bash

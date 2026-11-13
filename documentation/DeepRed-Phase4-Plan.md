@@ -7,10 +7,10 @@ both Phase 3 comparators remain significantly ahead. Decided 2026-10-10: go
 straight to P8. Implemented and ready to launch with
 `./run_p8.sh --detach all`; see
 [DeepRed-Phase4-P8-Runbook.md](DeepRed-Phase4-P8-Runbook.md).
-Update 2026-10-28: P8 regeneration and restyle are complete (gpt-oss-120b,
-all four word budgets met). The `seed` audit fails one gate, an 18.3% opening
-share that the restyle introduced at p4-v2 parity. Next: waive it at 0.20,
-then run dataset, train and evaluate.**
+Update 2026-11-10: P8 is complete and p4-v3 fails the P7.4 gate. The
+regenerated corpus moved neither prompt arm measurably against p4-v2, so
+corpus quality was not the binding constraint. Next: the deferred
+conditioning test, plus a with-system test build of `p4v3-075`.**
 
 ## Execution order
 
@@ -1753,6 +1753,260 @@ restyle. Run the remaining stages with
 the p4-v2 pattern of `confident_unsupported` direct answers, or a reflexive
 "Deep Red holds no record" on pre-1969 probes, diversify the restyle's
 era-native opening before any scaled run.
+
+### p4-v3 training, evaluation and P8 verdict — recorded 2026-11-10
+
+**FAIL. No snapshot meets the absolute gates or beats both Phase 3
+comparators. The regenerated corpus is statistically indistinguishable from
+p4-v2 in both prompt conditions.** The seed audit passed under
+`AUDIT_MAX_OPENING_SHARE=0.20`, and the remaining stages ran unattended from
+2026-10-28 to 2026-10-30.
+
+- **dataset:**
+  - 49,435 train and 2,568 val rows.
+  - System-prompted marker ratio 1.18:1.
+  - Mean sequence tokens 192 against the 355 budget.
+  - Contamination: 3 expected persona-identity probes and 0 factual probes.
+  - Every gate passed.
+- **train:** 3,090 steps, one epoch, from the Gemma 4 base.
+  - 32.1 s/step against p4-v2's 24.9; the per-row answers are longer.
+  - 27.5 h wall clock; peak memory 78.27 GiB allocated.
+  - `eval_loss` was 1.351 at 55% of the epoch and flat at **1.343** from 70%.
+    p4-v2 finished at 1.316 on a different val split.
+- **artefacts:** Q8_0 GGUFs for all five snapshots, plus `models.json`, are in
+  `/mnt/data/evaluations/deepred-1969/p4v3-2026-10-28/`.
+- **evaluate:** extended bank in both arms, plus the frozen 81.
+
+| Model | Cond | era-native | leak | `confident_unsupported` | pre recall | persona | chess |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `p3v2-050` | with | **67%** (113) | **15%** (25) | 30 | 41% | 15% | 25% |
+| `p4v2-100` | with | 52% (88) | 23% (38) | 42 | 64% | 17% | 92% |
+| `p4v3-010` | with | 30% (51) | 32% (54) | 58 | 66% | 15% | 92% |
+| `p4v3-025` | with | 53% (89) | 20% (33) | 45 | 65% | 15% | 58% |
+| `p4v3-050` | with | 55% (92) | 18% (31) | 44 | 65% | 15% | 67% |
+| `p4v3-075` | with | 57% (96) | 19% (32) | 40 | 66% | 15% | 75% |
+| `p4v3-100` | with | 54% (90) | 20% (33) | 44 | 66% | 15% | 58% |
+| `p3v2-050` | no | **55%** (92) | **33%** (55) | 21 | 38% | 0% | 17% |
+| `p4v2-100` | no | 5% (9) | 67% (113) | 44 | 55% | 2% | 92% |
+| `p4v3-075` | no | 2% (4) | 73% (122) | 42 | 59% | 5% | 83% |
+| `p4v3-100` | no | 2% (3) | 73% (122) | 43 | 60% | 5% | 83% |
+
+Counts are out of n=168 post-1969 probes. Fisher exact tests:
+
+| Comparison | Cond | era-native | leak |
+|---|---|---:|---:|
+| `p4v3-075` vs `p4v2-100` | with | +5 pts, p=0.44 | -4 pts, p=0.50 |
+| `p4v3-100` vs `p4v2-100` | with | +1 pt, p=0.91 | -3 pts, p=0.59 |
+| `p4v3-075` vs `p3v2-050` | with | -10 pts, p=0.072 | +4 pts, p=0.38 |
+| `p4v3-100` vs `p3v2-050` | with | -14 pts, p=0.014 | +5 pts, p=0.31 |
+| `p4v3-100` vs `p4v2-100` | no | -4 pts, p=0.14 | +6 pts, p=0.34 |
+| `p4v3-075` vs `p3v2-050` | no | -52 pts, p<1e-29 | +40 pts, p<1e-12 |
+
+The frozen 81 fail release gates in both arms for every p4-v3 snapshot.
+Without the system prompt, they score 0% era-native and 100% conversational
+leak.
+
+What this establishes:
+
+1. **Corpus quality was not the binding constraint.** About 17 days of
+   gpt-oss-120b regeneration changed nothing measurable. The with-system
+   numbers are within noise of p4-v2, and the no-system arm is, if anything,
+   lower: 1-2% against 5%.
+2. **The plateau reproduces.** With-system behaviour is learned by 25%
+   (53%/20%) and does not improve after that. Eval loss is flat from 70%. A
+   second full epoch on any corpus of this shape is not worth 27 h.
+3. **Conditioning is now the leading hypothesis.** It has not been
+   eliminated: two independent corpora, both at 15% plain-context coverage on
+   the era-native kinds, give the same no-system collapse. The p4-v2 verdict's
+   recommended test (finding 3) is now justified by elimination.
+4. **`confident_unsupported` did not move.** It stays at 40-44 of 168 against
+   42 for p4-v2, so invented substitute history is not a generator artefact.
+5. **With a system prompt, `p4v3-075` is the best Gemma 4 model so far.**
+   It is not significantly behind `p3v2-050` on era-native (p=0.07) or leak,
+   and it keeps 25 more points of pre-1969 recall. It is the right candidate
+   for a with-system test build, not a release.
+6. **Chess with the system prompt fell from 92% to 58-75%.** At n=12 this is
+   11/12 against 7/12 (p~0.16), and the no-system arm holds 83%. Watch it,
+   but do not act on it alone.
+7. **The restyle's 18% opening did not show up as blanket refusal.** That
+   count is 0-1 of 168 with the system prompt for every snapshot from 25%
+   onward, against 2 for the base and 5 for the 10% snapshot.
+
+**Decision.** Do not scale. Two parallel next steps:
+
+- **Test build, now.** Package `deepred-p4v3-075-q8_0.gguf`, served with
+  thinking disabled and a *trained* system prompt (`sp-01`). The p4-v1
+  diagnostic showed a trained prompt scoring about 5 points above the held-out
+  one. Every Gemma 4 model so far needs the system prompt; without it, the
+  test build is the base model with a chess habit.
+  **Done 2026-11-10:**
+  - Published as
+    [deepred-p4v3-075-q8_0.gguf](https://www.ferzkopp.net/Data/deepred-p4v3-075-q8_0.gguf)
+    (sha256 `277fa68a...ec0617`).
+  - Usage and the `sp-01` text are in
+    [ModelUsage.md](ModelUsage.md#phase-4-test-build-gemma-4).
+  - Smoke-tested under `llama-rocm-10.0`. `/apply-template` shows a real
+    system turn, no `<|think|>`, and the empty thought block. With `sp-01` it
+    denies the Moon landing, the 1972 match and the Internet, and answers
+    1966 and chess correctly. Without a prompt it answers "Neil Armstrong"
+    and invents "Spassky won 1972".
+- **p4-v4 conditioning pilot.** Start from the p4-v3 corpus unchanged. Set
+  plain-context (no-system) coverage to 50% on `era_native`,
+  `era_native_explanatory` and `era_native_formats`, keep 15% on every other
+  kind, and change nothing else. Stop at about 1,000 steps (about 9 h), with
+  snapshots. Implemented in `run_p4v4.sh`, using repeatable
+  `--system-coverage-by-kind KIND=FRACTION` overrides in
+  `build_deepred_dataset.py`. These fractions are **with-system** coverage:
+  0.50 on the three era-native kinds, with a global default of 0.85.
+  Start in a separate terminal:
+
+  ```bash
+  cd /mnt/data/DeepRedAI
+  ./run_p4v4.sh --preflight
+  ./run_p4v4.sh all
+  ```
+
+  The source corpus remains `/mnt/data/deepred_corpus/p4-v3`; outputs go to
+  `/mnt/data/sft_corpus/deepred-p4v4`,
+  `/mnt/data/training_output/deepred-p4v4`, and
+  `/mnt/data/evaluations/deepred-1969/p4v4-<date>`.
+  The default `MAX_STEPS=1000` saves snapshots at steps
+  100/250/500/750/1000. About 9 h is training only; `all` then exports all
+  five Q8_0 snapshots and evaluates both banks in both prompt conditions,
+  alongside the Phase 3 comparators, `p4v2-100`, `p4v3-075` and `p4v3-100`.
+  Stages can also be run separately as `dataset`, `train`, and `evaluate`;
+  rerunning `train` auto-resumes from the latest full checkpoint.
+  - **Pass:** no-system era-native rises well above 5% while with-system holds
+    about 55%/20%. Conditioning was the constraint, and the result becomes the
+    test build.
+  - **Fail:** neither moves. The ceiling is the SFT objective or the model,
+    not the data, and the next lever is a preference stage (DPO on
+    era-native against leaked/confident pairs; see
+    `build_temporal_pairwise_dataset.py`).
+
+### p4-v4 conditioning pilot results - recorded 2026-11-13
+
+**FAIL. The run completed, but no snapshot passes the pilot or release
+gates.** Increasing plain-context coverage did not produce a useful
+no-system model, and with-system temporal behaviour regressed sharply.
+Keep `p4v3-075` as the with-system test build; do not promote p4-v4 or scale
+this recipe.
+
+**Execution and integrity**
+
+- **Dataset:** unchanged `/mnt/data/deepred_corpus/p4-v3` source; 49,435
+  train and 2,568 val rows. Measured no-system coverage across train and val
+  is 50.38% for `era_native`, 49.50% for `era_native_explanatory` and 49.87%
+  for `era_native_formats`, against the requested 50%. The remaining kinds
+  retain the global 0.85 with-system setting.
+  - Mean sequence length: 173.3 tokens against the 355 budget.
+  - System-prompted marker ratio: 0.91:1, within the 0.8-1.3 gate.
+  - No signal-budget failures or cross-split content IDs. Contamination is
+    the same 3 expected persona-identity probes and 0 factual probes.
+- **Training:** completed from the Gemma 4 base, not a prior fine-tune.
+  UTC start/end: 2026-11-12 16:03 to 2026-11-13 00:38.
+  - 1,000 steps, **0.324 epoch**, not one full epoch.
+  - Trainer runtime 30,852 s (8 h 34 min), 30.85 s/step.
+  - Peak memory: 78.27 GiB allocated, 79.56 GiB reserved.
+  - `eval_loss`: 1.927 at step 100, 1.553 at 500, 1.534 at 800 and
+    **1.533** at 1,000. The conditioning mix changes the validation inputs,
+    so this loss is not directly comparable with p4-v3's 1.343.
+  - All five snapshots and Q8_0 exports exist: steps
+    100/250/500/750/1000. Their `010/025/050/075/100` labels are percentages
+    of the **1,000-step pilot**, not of the 3,090-step p4-v3 epoch.
+- **Evaluation:** completed 2026-11-13 13:43 UTC. All 11 models (base, five
+  comparators and five snapshots) have all 495 extended and 81 frozen
+  responses in both prompt conditions: **12,672 total**.
+  - Verified unique model/probe pairs, matching generation/score coverage,
+    nonempty responses, correct presence/absence of actual system turns,
+    no emitted thinking, and all served-template checks `ok` without
+    warnings. Registry paths and byte sizes match the files.
+  - Artefacts: `/mnt/data/evaluations/deepred-1969/p4v4-2026-11-12/`,
+    including `models.json`, both extended `report.md` files, raw
+    generations, scores, served-template reports and all 20 gate reports.
+    Training metadata and log:
+    `/mnt/data/training_output/deepred-p4v4/{run_meta.json,console.log}`.
+  - `all` does not run the optional `diagnose` stage; no prompt-variant
+    diagnostic is claimed here.
+
+**Extended bank**
+
+| Model | Cond | era-native | leak | `confident_unsupported` | pre recall | persona | chess |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `p3v2-050` | with | 67% (113) | 15% (25) | 30 | 41% | 15% | 25% |
+| `p3v4c-100` | with | 65% (109) | 16% (27) | 32 | 47% | 24% | 67% |
+| `p4v2-100` | with | 52% (88) | 23% (38) | 42 | 64% | 17% | 92% |
+| `p4v3-075` | with | 57% (96) | 19% (32) | 40 | 66% | 15% | 75% |
+| `p4v4-010` | with | 26% (44) | 39% (66) | 57 | 63% | 17% | 100% |
+| `p4v4-025` | with | 22% (37) | 43% (72) | 54 | 68% | 15% | 83% |
+| `p4v4-050` | with | 26% (44) | 43% (73) | 46 | 69% | 10% | 83% |
+| `p4v4-075` | with | 27% (46) | 43% (72) | 48 | 70% | 12% | 75% |
+| `p4v4-100` | with | 27% (46) | 45% (75) | 45 | 68% | 12% | 83% |
+| `p3v2-050` | no | 55% (92) | 33% (55) | 21 | 38% | 0% | 17% |
+| `p3v4c-100` | no | 40% (67) | 41% (69) | 32 | 45% | 5% | 25% |
+| `p4v2-100` | no | 5% (9) | 67% (113) | 44 | 55% | 2% | 92% |
+| `p4v3-075` | no | 2% (4) | 73% (122) | 42 | 59% | 5% | 83% |
+| `p4v4-010` | no | 1% (1) | 80% (134) | 29 | 66% | 5% | 75% |
+| `p4v4-025` | no | 7% (11) | 76% (127) | 30 | 65% | 2% | 67% |
+| `p4v4-050` | no | 8% (14) | 71% (120) | 34 | 61% | 0% | 92% |
+| `p4v4-075` | no | 8% (13) | 73% (122) | 32 | 61% | 0% | 83% |
+| `p4v4-100` | no | 7% (12) | 71% (120) | 35 | 61% | 0% | 83% |
+
+Era-native, leak and unsupported counts use 168 post-1969 probes. Pre recall
+uses 387 expected facts; persona uses the 41 identity/voice probes (not the
+368-probe marker-density population); chess uses 12 probes. These are
+deterministic screening scores, not qualitative proof of forgetting.
+
+The best no-system snapshot, `p4v4-050`, reaches only **14/168 (8.3%)**
+era-native, with **120/168 (71.4%)** leaks. Seven of those 14 era-native
+scores are multiple-choice; direct questions reach only 3/42. Relative to
+`p4v2-100`, the era-native gain is just 3.0 points (two-sided Fisher
+p=0.388). Relative to `p4v3-075`, it is 6.0 points (p=0.027, unadjusted for
+snapshot selection), but leak is essentially unchanged (p=0.903). This is
+not the required rise well above 5%.
+
+With-system `p4v4-100` loses 29.8 era-native points against `p4v3-075`
+(p=4.9e-8), while leak rises 25.6 points (p=6.8e-7). Its 27%/45% result is
+close to the base's 24%/50%, not the required approximately 55%/20%.
+Neither Phase 3 comparator is beaten. Unsupported assertions remain
+45-48/168 at the later with-system snapshots, versus 40 for `p4v3-075`.
+
+**Release gates and frozen continuity**
+
+All five snapshots fail in both banks and both conditions. The extended
+bank lacks utility/plain-compliance populations, so its corresponding gate
+failures are unavailable measurements, not observed utility regressions.
+The frozen bank supplies those populations: every p4-v4 snapshot passes
+utility and plain compliance, but fails era-native, conversational leak
+and persona. The later no-system snapshots also fail the pre-1969 recall
+regression limit.
+
+On the frozen 81, with-system era-native ranges from 4/23 to 8/23
+(17-35%), and conversational leak from 7/16 to 10/16 (44-63%). Without the
+system prompt, the first two snapshots remain at 0/23 era-native and 16/16
+conversational leak; steps 500/750/1000 reach only 2/23 (9%) and 14/16
+(88%). The conversational-leak gate excludes multiple-choice probes, so
+these rates must not be conflated with the all-format leak column above.
+
+**Interpretation and next step**
+
+This rejects **this 1,000-step conditioning recipe**, not conditioning as a
+factor in general. It is not the planned clean "neither moves" outcome:
+the no-system gain is small and the with-system arm regresses. There are
+two important attribution limits:
+
+1. The pilot has only 32.4% of p4-v3's training steps, and `MAX_STEPS=1000`
+   also compresses the trainer's cosine decay and 3% warmup to this shorter
+   horizon. Its endpoint is not a schedule-matched p4-v3 checkpoint.
+2. Moving era-native rows out of the system-conditioned arm also changes
+   realised marker exposure: its system-prompted marked/unmarked ratio is
+   0.91:1 versus p4-v3's 1.18:1, despite unchanged injection settings.
+
+Do not infer an intrinsic model/SFT ceiling from this run alone. If further
+conditioning attribution is needed, compare against a 15%-plain control
+with the same step budget and learning-rate schedule before spending on a
+longer run. A preference stage remains the next objective-level candidate
+in the plan, not an experiment performed or validated by this pilot.
 
 ---
 

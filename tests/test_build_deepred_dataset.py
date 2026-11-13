@@ -116,6 +116,51 @@ class SystemPromptTests(unittest.TestCase):
             self.assertIsNone(item['system_variant'])
             self.assertEqual('user', item['messages'][0]['role'])
 
+    def test_per_kind_coverage_changes_only_selected_kinds(self):
+        source = self._rows(1000)
+        for index, item in enumerate(source):
+            item['kind'] = 'era_native' if index % 2 else 'retain'
+        baseline = BUILDER.apply_system_prompts(
+            json.loads(json.dumps(source)), self._variants(), 0.85, 1969)
+        changed = BUILDER.apply_system_prompts(
+            json.loads(json.dumps(source)), self._variants(), 0.85, 1969,
+            BUILDER.parse_system_coverage(['era_native=0.5']))
+        repeated = BUILDER.apply_system_prompts(
+            json.loads(json.dumps(source)), self._variants(), 0.85, 1969,
+            {'era_native': 0.5})
+        self.assertEqual(changed, repeated)
+        self.assertEqual(
+            [item for item in baseline if item['kind'] == 'retain'],
+            [item for item in changed if item['kind'] == 'retain'])
+        era = [item for item in changed if item['kind'] == 'era_native']
+        plain_share = sum(not item['system_variant'] for item in era) / len(era)
+        self.assertTrue(0.45 <= plain_share <= 0.55, plain_share)
+        for before, after in zip(baseline, changed):
+            if after['system_variant']:
+                self.assertEqual(before, after)
+
+    def test_per_kind_coverage_accepts_endpoints(self):
+        rows = self._rows(2)
+        rows[0]['kind'], rows[1]['kind'] = 'era_native', 'retain'
+        BUILDER.apply_system_prompts(
+            rows, self._variants(), 0.5, 1969,
+            BUILDER.parse_system_coverage(['era_native=0', 'retain=1']))
+        self.assertIsNone(rows[0]['system_variant'])
+        self.assertIsNotNone(rows[1]['system_variant'])
+
+    def test_invalid_per_kind_coverage_fails(self):
+        for spec in ('unknown=0.5', 'retain=-0.1', 'retain=1.1',
+                     'retain=nan', 'retain=inf', 'retain=bad', 'retain'):
+            with self.subTest(spec=spec), self.assertRaises(BUILDER.DatasetError):
+                BUILDER.parse_system_coverage([spec])
+
+    def test_per_kind_coverage_requires_system_prompt_file(self):
+        args = BUILDER.build_parser().parse_args([
+            '--corpus-dir', 'unused', '--output-dir', 'unused',
+            '--system-coverage-by-kind', 'era_native=0.5'])
+        with self.assertRaisesRegex(BUILDER.DatasetError, 'requires'):
+            BUILDER.build(args)
+
     def test_existing_system_message_is_rejected(self):
         rows = [{'id': 'retain:0', 'messages': [
             {'role': 'system', 'content': 'preset'},

@@ -200,14 +200,31 @@ def unit_hash(*parts):
     return int(stable_hash(list(parts))[:16], 16) / 16**16
 
 
-def apply_system_prompts(rows, variants, coverage, seed):
+def parse_system_coverage(values):
+    spec = {}
+    for value in values or []:
+        try:
+            kind, fraction = value.split('=', 1)
+            fraction = float(fraction)
+        except ValueError as exc:
+            raise DatasetError(
+                f'invalid --system-coverage-by-kind {value!r}; '
+                'expected KIND=FRACTION') from exc
+        if kind not in KINDS or not 0 <= fraction <= 1:
+            raise DatasetError(f'invalid --system-coverage-by-kind {value!r}')
+        spec[kind] = fraction
+    return spec
+
+
+def apply_system_prompts(rows, variants, coverage, seed, coverage_by_kind=None):
     """Attach a deterministic system prompt to a reproducible subset of rows."""
     if not 0 <= coverage <= 1:
         raise DatasetError('--system-coverage must be between 0 and 1')
     for row in rows:
         if row['messages'][0]['role'] == 'system':
             raise DatasetError(f'{row["id"]}: source row already has a system message')
-        if unit_hash(seed, 'system-coverage', row['id']) >= coverage:
+        rate = (coverage_by_kind or {}).get(row.get('kind'), coverage)
+        if unit_hash(seed, 'system-coverage', row['id']) >= rate:
             row['system_variant'] = None
             continue
         index = int(stable_hash([seed, 'system-variant', row['id']])[:16], 16)
@@ -495,6 +512,9 @@ def parse_injection(values):
 def build(args):
     if not 0 < args.val_fraction < 1:
         raise DatasetError('--val-fraction must be between 0 and 1')
+    coverage_by_kind = parse_system_coverage(args.system_coverage_by_kind)
+    if coverage_by_kind and not args.system_prompt_file:
+        raise DatasetError('--system-coverage-by-kind requires --system-prompt-file')
     root = Path(args.corpus_dir)
     output = Path(args.output_dir)
     if output.exists():
@@ -529,7 +549,8 @@ def build(args):
     if args.system_prompt_file:
         variants = load_system_variants(
             args.system_prompt_file, args.hold_out_system_variant or ())
-        apply_system_prompts(rows, variants, args.system_coverage, args.seed)
+        apply_system_prompts(rows, variants, args.system_coverage, args.seed,
+                             coverage_by_kind)
         bank = load_marker_bank(args.marker_bank) if args.marker_bank else None
         injected = inject_markers(rows, parse_injection(args.inject_markers),
                                   args.seed, bank)
@@ -598,6 +619,7 @@ def build(args):
         'keep_chess_footer': sorted(set(args.keep_chess_footer)),
         'system_prompt_file': args.system_prompt_file,
         'system_coverage': args.system_coverage if args.system_prompt_file else 0,
+        'system_coverage_by_kind': coverage_by_kind,
         'marker_injection': parse_injection(args.inject_markers),
         'marker_injection_counts': dict(sorted(injected.items())),
         'marker_bank': args.marker_bank,
@@ -673,6 +695,10 @@ def build_parser():
                              'defaults to chess, where the footer is content')
     parser.add_argument('--system-prompt-file')
     parser.add_argument('--system-coverage', type=float, default=1.0)
+    parser.add_argument(
+        '--system-coverage-by-kind', action='append', metavar='KIND=FRACTION',
+        help='Override the system-prompt coverage for a kind; repeatable. '
+             'Other kinds use --system-coverage.')
     parser.add_argument(
         '--inject-markers', action='append', metavar='KIND=FRACTION',
         help='Add a persona marker to this fraction of the kind\'s '

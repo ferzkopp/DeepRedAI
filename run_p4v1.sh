@@ -53,6 +53,9 @@ EVAL_CONTAINER=${EVAL_CONTAINER:-llama-rocm-10.0}
 
 SNAPSHOT_TAGS=(010 025 050 075 100)
 EPOCHS=${EPOCHS:-2}
+MAX_STEPS=${MAX_STEPS:--1}
+SYSTEM_COVERAGE=${SYSTEM_COVERAGE:-0.85}
+read -r -a SYSTEM_COVERAGE_BY_KIND <<< "${SYSTEM_COVERAGE_BY_KIND:-}"
 LEARNING_RATE=${LEARNING_RATE:-5e-6}
 MAX_LENGTH=${MAX_LENGTH:-768}
 GRAD_ACCUM=${GRAD_ACCUM:-16}
@@ -212,11 +215,16 @@ stage_dataset() {
   for v in "${HOLDOUT_VARIANTS[@]}"; do
     holdout_args+=(--hold-out-system-variant "$v")
   done
+  local coverage_args=() spec
+  for spec in "${SYSTEM_COVERAGE_BY_KIND[@]}"; do
+    coverage_args+=(--system-coverage-by-kind "$spec")
+  done
 
   python3 scripts/build_deepred_dataset.py \
     --corpus-dir "$CORPUS" --output-dir "$DATASET" \
     --system-prompt-file "$SYSTEM_PROMPTS" \
-    "${holdout_args[@]}" --system-coverage 0.85 \
+    "${holdout_args[@]}" --system-coverage "$SYSTEM_COVERAGE" \
+    "${coverage_args[@]}" \
     --strip-boilerplate --strip-chess-footer \
     --kind persona --kind persona_controls \
     --kind persona_identity --kind persona_identity_controls \
@@ -375,6 +383,7 @@ PY
       --model '$INITIAL_MODEL' --tokenizer '$BASE_MODEL' \\
       --dataset '$DATASET' --output-dir '$TRAIN_DIR' \\
       --learning-rate '$LEARNING_RATE' --epochs '$EPOCHS' \\
+      --max-steps '$MAX_STEPS' \\
       --max-length '$MAX_LENGTH' --gradient-accumulation '$GRAD_ACCUM' \\
       --optim '$OPTIM' --tuning '$TUNING' \\
       --save-total-limit '$SAVE_TOTAL_LIMIT' \
