@@ -2,35 +2,35 @@
 # Phase 4 P8: full generator bake-off, regeneration of retain, era_native and
 # both *_formats assets with the winner, then the p4-v3 pilot.
 #
-#   ./run_p8.sh status              # where the run is; safe at any time
-#   ./run_p8.sh --detach all        # whole pipeline, survives logout
-#   ./run_p8.sh <stage>             # one stage in the foreground
+#   ./run_p4s8.sh status              # where the run is; safe at any time
+#   ./run_p4s8.sh --detach all        # whole pipeline, survives logout
+#   ./run_p4s8.sh <stage>             # one stage in the foreground
 #
 # Stages, in order: preflight salience bakeoff select generate restyle seed
 # dataset train evaluate. `all` skips stages already marked done, and every
 # stage resumes from its own output, so re-running after a crash or a reboot
-# continues where it stopped. See documentation/DeepRed-Phase4-P8-Runbook.md.
+# continues where it stopped. See documentation/DeepRed-Phase4-S8-Runbook.md.
 set -Eeuo pipefail
 
 ROOT=/mnt/data/DeepRedAI
-P8_DIR=${P8_DIR:-/mnt/data/evaluations/phase4/p8}
-LOG_DIR=$P8_DIR/logs
-STATE_DIR=$P8_DIR/state
+S8_DIR=${S8_DIR:-/mnt/data/evaluations/phase4/p8}
+LOG_DIR=$S8_DIR/logs
+STATE_DIR=$S8_DIR/state
 
 # Bash reads scripts incrementally, so editing this file mid-run would corrupt
 # the running shell. Every invocation executes a private copy instead.
-if [[ -z ${P8_FROZEN_FILE:-} ]]; then
+if [[ -z ${S8_FROZEN_FILE:-} ]]; then
   mkdir -p "$LOG_DIR"
-  frozen=$P8_DIR/.run_p8.$$.sh
+  frozen=$S8_DIR/.run_p4s8.$$.sh
   cp "${BASH_SOURCE[0]}" "$frozen"
   if [[ ${1:-} == --detach ]]; then
     shift
-    P8_FROZEN_FILE=$frozen setsid nohup bash "$frozen" "$@" \
+    S8_FROZEN_FILE=$frozen setsid nohup bash "$frozen" "$@" \
       >>"$LOG_DIR/run.log" 2>&1 </dev/null &
-    echo "P8 running detached (pid $!). Follow with: tail -f $LOG_DIR/run.log"
+    echo "p4s8 running detached (pid $!). Follow with: tail -f $LOG_DIR/run.log"
     exit 0
   fi
-  P8_FROZEN_FILE=$frozen exec bash "$frozen" "$@"
+  S8_FROZEN_FILE=$frozen exec bash "$frozen" "$@"
 fi
 
 SOURCE_CORPUS=${SOURCE_CORPUS:-/mnt/data/deepred_corpus/p4-v2}
@@ -49,9 +49,9 @@ GEN_ENDPOINT=http://127.0.0.1:$GEN_PORT
 FROZEN_PROBES=$ROOT/evaluation/deepred_1969/probes.jsonl
 EXT_PROBES=$ROOT/evaluation/deepred_p4/probes_ext.jsonl
 BASE_GGUF=/mnt/data/evaluations/deepred-1969/artifacts/gemma-4-12b-it-base-q8_0.gguf
-SALIENCE=$P8_DIR/salience/verdict.json
-BAKEOFF=$P8_DIR/bakeoff/verdict.json
-SELECTION=$P8_DIR/selected_generator.json
+SALIENCE=$S8_DIR/salience/verdict.json
+BAKEOFF=$S8_DIR/bakeoff/verdict.json
+SELECTION=$S8_DIR/selected_generator.json
 # Set GENERATOR=<candidate> to skip the bake-off verdict and force a model.
 GENERATOR_OVERRIDE=${GENERATOR:-}
 
@@ -76,14 +76,14 @@ STAGE=${1:-status}
 case "$STAGE" in
   all|status|preflight|salience|bakeoff|select|generate|restyle|seed|dataset|train|evaluate) ;;
   *) echo "Usage: $0 [--detach] {all|status|${STAGES[*]// /|}}" >&2
-     rm -f "$P8_FROZEN_FILE"; exit 2 ;;
+     rm -f "$S8_FROZEN_FILE"; exit 2 ;;
 esac
 
 GEN_STARTED=''
 cleanup() {
   stop_generator
   [[ ${LOCKED:-} ]] && rm -rf "$LOCK_DIR"
-  rm -f "$P8_FROZEN_FILE"
+  rm -f "$S8_FROZEN_FILE"
 }
 trap cleanup EXIT
 
@@ -91,13 +91,13 @@ if [[ -t 1 && $STAGE != status ]]; then
   exec > >(tee -a "$LOG_DIR/run.log") 2>&1
 fi
 
-LOCK_DIR=/tmp/deepred-p8.lock.d
+LOCK_DIR=/tmp/deepred-p4s8.lock.d
 acquire_lock() {
   local owner=''
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     [[ -r "$LOCK_DIR/pid" ]] && read -r owner < "$LOCK_DIR/pid"
     if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
-      echo "Another P8 run is active (pid $owner). Use '$0 status'." >&2
+      echo "Another p4s8 run is active (pid $owner). Use '$0 status'." >&2
       exit 1
     fi
     rm -rf "$LOCK_DIR"
@@ -196,7 +196,7 @@ stop_generator() {
 # Run the p4-v1 pilot driver for the p4-v3 corpus. Same gates, same caps and
 # marker rates as p4-v2: the regenerated corpus is the only variable.
 p4_runner() {
-  local stage=$1 frozen=$P8_DIR/.run_p4v1.$$.sh status=0
+  local stage=$1 frozen=$S8_DIR/.run_p4v1.$$.sh status=0
   cp "$ROOT/run_p4v1.sh" "$frozen"
   LABEL=$LABEL MODEL_TAG=$MODEL_TAG CORPUS=$CORPUS DATASET=$DATASET \
   TRAIN_DIR=$TRAIN_DIR EPOCHS=$EPOCHS COMPARATORS=$COMPARATORS \
@@ -259,7 +259,7 @@ stage_bakeoff() {
   say "generator bake-off over every regenerated kind"
   podman start "$CONTAINER" >/dev/null
   "$PYTHON" scripts/benchmark_generators.py \
-    --output-dir "$P8_DIR/bakeoff" --container "$CONTAINER" \
+    --output-dir "$S8_DIR/bakeoff" --container "$CONTAINER" \
     --task retain --task era_native --task retain_formats \
     --task era_native_formats --corpus-target "$BAKEOFF_TARGET" \
     --page-id-max "$(page_id_max retain)" \
@@ -414,7 +414,7 @@ stage_evaluate() { say "evaluate";         p4_runner evaluate; mark_done evaluat
 
 stage_status() {
   local stage kind budget
-  echo "P8 status ($(date '+%F %T'))"
+  echo "p4s8 status ($(date '+%F %T'))"
   if [[ -r "$LOCK_DIR/pid" ]] && kill -0 "$(cat "$LOCK_DIR/pid")" 2>/dev/null; then
     echo "  running: pid $(cat "$LOCK_DIR/pid")"
   else
@@ -448,7 +448,7 @@ if [[ "$STAGE" == status ]]; then
 fi
 
 acquire_lock
-say "P8 $STAGE (pid $$)"
+say "p4s8 $STAGE (pid $$)"
 if [[ "$STAGE" == all ]]; then
   for stage in "${STAGES[@]}"; do
     if is_done "$stage"; then
@@ -460,4 +460,4 @@ if [[ "$STAGE" == all ]]; then
 else
   run_stage "$STAGE"
 fi
-say "P8 $STAGE complete"
+say "p4s8 $STAGE complete"

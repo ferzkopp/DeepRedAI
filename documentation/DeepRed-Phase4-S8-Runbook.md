@@ -1,14 +1,16 @@
-# DeepRed Phase 4 — P8 Runbook
+# DeepRed Phase 4 — S8 Runbook
 
-This runbook covers P8 in [DeepRed-Phase4-Plan.md](DeepRed-Phase4-Plan.md):
+This runbook covers step P8 of [DeepRed-Phase4-Plan.md](DeepRed-Phase4-Plan.md)
+(hence `p4s8`: Phase 4, step 8):
 1. A generator bake-off over every regenerated asset kind.
 2. A full regeneration of `retain`, `era_native`, `retain_formats` and
    `era_native_formats` with the winning generator.
 3. The `p4-v3` pilot trained on that corpus.
 
-The whole pipeline is one script, [run_p8.sh](../run_p8.sh). Every stage
+The whole pipeline is one script, [run_p4s8.sh](../run_p4s8.sh). Every stage
 resumes from its own output, so after a crash, reboot or power cut you re-run
-the same command.
+the same command. Its working directory keeps its original name,
+`/mnt/data/evaluations/phase4/p8`, because recorded provenance points there.
 
 **Result (2026-11-10): P8 ran to completion, and p4-v3 fails the P7.4 gate.**
 The verdict and next steps are recorded in the plan under "p4-v3 training,
@@ -18,18 +20,18 @@ evaluation and P8 verdict".
 
 ```bash
 cd /mnt/data/DeepRedAI
-./run_p8.sh --detach all      # start or resume everything; safe to log out
-./run_p8.sh status            # stage state, word budgets, training progress
+./run_p4s8.sh --detach all      # start or resume everything; safe to log out
+./run_p4s8.sh status            # stage state, word budgets, training progress
 tail -f /mnt/data/evaluations/phase4/p8/logs/run.log
 ```
 
-To run one stage in the foreground instead, use `./run_p8.sh <stage>`.
+To run one stage in the foreground instead, use `./run_p4s8.sh <stage>`.
 
 `all` skips stages already marked done in `p8/state/`. To run a stage again,
 delete its `.done` file, or invoke the stage by name.
 
-The runner always executes a private copy of itself, so editing `run_p8.sh`
-mid-run is safe. A lock in `/tmp/deepred-p8.lock.d` refuses a second
+The runner always executes a private copy of itself, so editing `run_p4s8.sh`
+mid-run is safe. A lock in `/tmp/deepred-p4s8.lock.d` refuses a second
 concurrent run.
 
 ## Stages
@@ -71,7 +73,7 @@ The table and the reason each candidate was excluded are in
 
 ## Settings you may change
 
-Set these as environment variables, e.g. `GENERATOR=gpt-oss-120b ./run_p8.sh --detach all`.
+Set these as environment variables, e.g. `GENERATOR=gpt-oss-120b ./run_p4s8.sh --detach all`.
 
 | Variable | Default | Purpose |
 |---|---|---|

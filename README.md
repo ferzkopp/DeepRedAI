@@ -30,7 +30,7 @@ ends with measured results and the decisions carried into the next.
 | **Phase 1** — archived models and evaluation | [DeepRed-Phase1-Setup.md](documentation/DeepRed-Phase1-Setup.md) | closed; all 17 archived checkpoints retired |
 | **Phase 2** — temporal and persona trials | [DeepRed-Phase2-Setup.md](documentation/DeepRed-Phase2-Setup.md) | closed; no checkpoint reached a release gate |
 | **Phase 3** — data rebuild (`p3-v1`…`p3-v5`) | [DeepRed-Phase3-Setup.md](documentation/DeepRed-Phase3-Setup.md) | closed 2026-09-20; `p3v4c-100` is the release artefact |
-| **Phase 4** — Gemma 4 12B feasibility | [DeepRed-Phase4-Setup.md](documentation/DeepRed-Phase4-Setup.md), [plan](documentation/DeepRed-Phase4-Plan.md) | in progress; no release yet, `p4v3-075` published as a test build |
+| **Phase 4** — Gemma 4 12B feasibility | [DeepRed-Phase4-Setup.md](documentation/DeepRed-Phase4-Setup.md), [plan](documentation/DeepRed-Phase4-Plan.md), [p4-v5 runbook](documentation/DeepRed-Phase4-V5-Runbook.md) | in progress; `p4v3-075` published as a test build; final run `p4-v5` prepared |
 
 Supporting references:
 

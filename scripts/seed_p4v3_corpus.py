@@ -165,7 +165,7 @@ def build_parser():
     parser.add_argument('--generated', default='/mnt/data/deepred_corpus/p8-gen')
     parser.add_argument('--output', default='/mnt/data/deepred_corpus/p4-v3')
     parser.add_argument('--selection', required=True,
-                        help='selected_generator.json written by run_p8.sh')
+                        help='selected_generator.json written by run_p4s8.sh')
     parser.add_argument('--repo-root', default='/mnt/data/DeepRedAI')
     return parser
 

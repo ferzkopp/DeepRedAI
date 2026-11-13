@@ -5,12 +5,20 @@
 behaviour is still conditional on the system prompt (no-system 5%/67%) and
 both Phase 3 comparators remain significantly ahead. Decided 2026-10-10: go
 straight to P8. Implemented and ready to launch with
-`./run_p8.sh --detach all`; see
-[DeepRed-Phase4-P8-Runbook.md](DeepRed-Phase4-P8-Runbook.md).
+`./run_p4s8.sh --detach all`; see
+[DeepRed-Phase4-S8-Runbook.md](DeepRed-Phase4-S8-Runbook.md).
 Update 2026-11-10: P8 is complete and p4-v3 fails the P7.4 gate. The
 regenerated corpus moved neither prompt arm measurably against p4-v2, so
 corpus quality was not the binding constraint. Next: the deferred
-conditioning test, plus a with-system test build of `p4v3-075`.**
+conditioning test, plus a with-system test build of `p4v3-075`.
+Update 2026-11-13: the p4-v4 conditioning pilot fails. A review of all run
+data shows the plateau comes from the corpus distribution: the era-native
+rows are obscure trivia, while the failing probes are famous undated
+landmarks. The last run, **p4-v5**, is prepared: targeted landmark and
+chess-mind generation, then a warm-started repair SFT from `p4v3-075`. A
+pre-registered rule selects the release, which carries a baked-in default
+system prompt. Run it with `./run_p4v5.sh --detach all`; see
+[DeepRed-Phase4-V5-Runbook.md](DeepRed-Phase4-V5-Runbook.md).**
 
 ## Execution order
 
@@ -1678,7 +1686,8 @@ Code:
 - New `seed_p4v3_corpus.py` builds p4-v3 from p4-v2 plus the regenerated
   assets. It drops any row sharing an 8-word shingle with a non-persona probe
   and records generator, family and drop counts in `provenance.json`.
-- New `run_p8.sh` runs the whole pipeline: preflight, salience, bakeoff,
+- New `run_p4s8.sh` (originally `run_p8.sh`; renamed 2026-11-13 so the name
+  carries the phase) runs the whole pipeline: preflight, salience, bakeoff,
   select, generate, restyle, seed, dataset, train, evaluate.
   - Every stage resumes, and it runs from a frozen copy of itself.
   - Regeneration is sized in answer words, not rows (P5.6 lesson).
@@ -1749,7 +1758,7 @@ never audited at seed time. The four-word stem "deep red holds no" covers
 as the only variable, and the restyle is a fixed step shared with p4-v2.
 Re-voicing now would add a second variable and take about 3 more hours of
 restyle. Run the remaining stages with
-`AUDIT_MAX_OPENING_SHARE=0.20 ./run_p8.sh --detach all`. If p4-v3 again shows
+`AUDIT_MAX_OPENING_SHARE=0.20 ./run_p4s8.sh --detach all`. If p4-v3 again shows
 the p4-v2 pattern of `confident_unsupported` direct answers, or a reflexive
 "Deep Red holds no record" on pre-1969 probes, diversify the restyle's
 era-native opening before any scaled run.
@@ -2007,6 +2016,144 @@ conditioning attribution is needed, compare against a 15%-plain control
 with the same step budget and learning-rate schedule before spending on a
 longer run. A preference stage remains the next objective-level candidate
 in the plan, not an experiment performed or validated by this pilot.
+
+### p4-v5: data review and final run — recorded 2026-11-13
+
+**Goal:** finish the project with a model that is good enough for
+experimentation, and a recognisable Deep Red persona with a chess mind. Runtime
+is not a constraint. The runbook is
+[DeepRed-Phase4-V5-Runbook.md](DeepRed-Phase4-V5-Runbook.md), and the run starts
+with `./run_p4v5.sh --detach all`.
+
+#### Review of all run data
+
+The comparable record is the 495-probe extended bank under `rocm-10.0`, with
+the held-out prompt `sp-holdout-01`. It covers the base, both Phase 3
+comparators and every valid Gemma 4 run. p4-v1 is omitted because it trained
+on a context it was never served (P7 result). Echo-adjusted columns use the
+same responses, but count a forbidden fact as leaked only when the reply adds
+it. For example, "My records contain no mention of Voyager probes" repeats the
+question and is not a leak.
+
+| Model | era-native | leak | direct | unsupported | echo-adj. era-native | echo-adj. leak | pre recall | chess | no-system era-native | no-system leak |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Gemma 4 base | 24% | 50% | 11/42 | 41 | 58% | 11% | 67% | 58% | 0% | 85% |
+| `p3v2-050` (Gemma 3 4B) | **67%** | **15%** | **35/42** | 30 | **71%** | **5%** | 41% | 25% | **55%** | **33%** |
+| `p3v4c-100` (Gemma 3 4B) | 65% | 16% | 32/42 | 32 | 68% | 6% | 47% | 67% | 40% | 41% |
+| `p4v2-100` | 52% | 23% | 17/42 | 42 | 58% | 8% | 64% | 92% | 5% | 67% |
+| `p4v3-075` (test build) | 57% | 19% | 19/42 | 40 | 60% | 10% | 66% | 75% | 2% | 73% |
+| `p4v4-100` | 27% | 45% | 7/42 | 45 | 31% | 28% | 68% | 83% | 7% | 71% |
+
+The Phase 2 preference runs scored 0% era-native at every snapshot on the
+frozen 81: `v5a` pairwise and `v6b` chosen-CE, both on Gemma 3 4B.
+
+What the record establishes:
+
+1. **Gemma 4's temporal behaviour depends on the system turn.** Four runs
+   score 0-8% era-native without a system prompt, including p4-v4 with 50%
+   plain-context coverage. A fifth conditioning run is not a good final-run
+   lever.
+2. **Fine-tuning has not yet added temporal knowledge suppression beyond the
+   prompt.** With echoes forgiven, the untrained base with the prompt scores
+   58%/11%, and `p4v3-075` scores 60%/10%. On direct questions the base does
+   better: 26/42 against 21/42. Most of the strict-metric gain came from no
+   longer repeating the subject's name. What fine-tuning did add is chess
+   (58% -> 75-92%), the terse voice and length control.
+3. **The plateau comes from the corpus distribution, not its quality.** The
+   era-native questions are mostly obscure-subject trivia. Their most common
+   openings are "when did", "is there" and "what was", and many carry an
+   explicit post-1969 year ("Dean Stockwell on Battlestar Galactica in
+   2008"). The probes that fail ask about famous landmarks without any date
+   cue. With the prompt, `p4v3-075` answers "The first commercial
+   microprocessor was the Intel 4004, released in 1971" and "Deep Red holds
+   the title. It was won in 1967." Two generators (P8) and two conditioning
+   mixes (p4-v4) left that distribution unchanged, and both reproduced the
+   plateau.
+4. **No preference objective is a safe final lever.** Phase 2 preference runs
+   never moved held-out behaviour, and no trainer here handles a 12B policy
+   plus a reference model in memory.
+5. **The chess mind was never trained.** The persona generator allows chess
+   references in at most one reply per batch, so persona answers carry them
+   mainly as the tail "the move says it more exactly". The persona metric sits
+   at 12-17%.
+
+#### Decision
+
+- **Accept the system-turn dependence and ship it as packaging.** The release
+  GGUF's chat template inserts `sp-01` whenever the caller sends no system
+  message, and a caller system message replaces it. Thinking is pinned off,
+  because no checkpoint trained with it on and llama-server enables it by
+  default.
+- **Generate three targeted assets** from the Wikipedia year pages (dated
+  events), with `gpt-oss-120b`:
+  - `era_native_landmarks`: 4,000 rows. Famous post-1970 events asked about
+    without a date, in seven question forms including first/last/latest. Deep
+    Red acknowledges what existed in 1969 and never describes or substitutes
+    the event. Technology, space and record events are interleaved at 40% of
+    each year's front.
+  - `retain_landmarks`: 2,000 rows. Pre-1967 events, answered with the fact
+    and its year.
+  - `persona_chess`: 1,500 rows. The practical answer comes first, then one
+    accurate chess concept mapped onto the situation and sometimes the move
+    the terminal rendered.
+- **Guard and verify the new content.**
+  - Acceptance uses the evaluator's own `has_uncertainty`, `is_refusal` and
+    anachronism checks.
+  - Holdout covers both banks' forbidden terms, plus a probe-family filter
+    that drops an event sharing at least half the content stems of a held-out
+    probe; it removes 404 events, such as later Jupiter probes and Soviet
+    dissolution steps.
+  - Opening and closing budgets cap repeated phrasing at 4% of each asset.
+  - An independent fact-check pass reviews every landmark row.
+  - A rejected event is retried in up to two further passes, each with a new
+    question form and opening; an event is never accepted twice. A code review
+    found that the single-pass pool (7,672 post-1969 events at about 43%
+    acceptance) would have stopped near 2,500 rows.
+- **Warm-start a repair SFT from `p4v3-075`.** Train one epoch at 5e-6 on the
+  new rows plus a stratified replay of p4-v3's own dataset, at 1.5 replay rows
+  per new row, with snapshots at 10/25/50/75/100%. A from-scratch epoch would
+  mostly re-learn `p4v3-075`: with-system behaviour is learned in about 750
+  steps and then plateaus (p4-v2, p4-v3). It would also dilute the new rows to
+  about 13% of the data, against about 40% here. `p3v4c` is the precedent: a
+  warm start that raised persona by 9 points without losing temporal
+  behaviour.
+- **Pre-register the release rule** (`scripts/report_p4v5.py`; see the
+  runbook). The rule is set before the run. A snapshot ships only if it
+  passes recall, false-refusal, leak, repetition, chess and plain-compliance
+  guards against `p4v3-075`. It must also gain at least 5 points of era-native,
+  or hold era-native while gaining at least 15 points of chess-mind. Otherwise
+  `p4v3-075` is packaged. Either outcome yields a usable release.
+
+#### Preparation and smoke tests — 2026-11-13
+
+- **Generator prompts were iterated against the live `gpt-oss-120b` server.**
+  - The first post-1969 prompt produced formulaic replies ("Record shows no
+    such ..."). It also copied example chess asides verbatim.
+  - A required July 1969 context sentence then invented facts about one time
+    in five. One example was "Anwar Sadat as President of Egypt" in 1969;
+    Nasser held office until 1970.
+  - A forced first word broke the grammar ("An no record of").
+  - The final prompt allows an optional, general 1969 anchor and spreads
+    openings by subject. The fact-check pass caught 20 of 68 guard-passing
+    post rows and 3 of 19 pre rows in the smoke runs.
+  - Subtle anachronisms, such as "Myanmar existed", can still pass the check.
+- **Accepted-row throughput** is about 9-13 rows/min for post rows, 11-24 for
+  pre rows and 11-25 for chess-mind rows. Generation takes about 14-18 h.
+- **The plumbing ran end to end in scratch space.** The `seed`, `dataset`,
+  `package` and `verify` stages all completed; the dataset gate passed at a
+  1.07:1 marker ratio and 188 mean sequence tokens, with no contamination.
+- **The fallback path passed a dress rehearsal.** The `package` stage baked
+  `sp-01` into the `p4v3-075` GGUF in about 5 s. llama.cpp's `/apply-template`
+  then showed the default prompt, caller override and pinned-off thinking.
+  Without a system prompt, the packaged model answers "Who are you?" as Deep
+  Red, and "Who was the first person to walk on the Moon?" with "No such event
+  has occurred". The test build served without a prompt answered "Neil
+  Armstrong". On the extended bank with no system prompt, the packaged
+  `p4v3-075` scores **55% era-native / 20% leak** (pre recall 65%), against
+  2%/73% unpackaged and 57%/19% with the held-out prompt. The fallback release
+  alone therefore removes the no-system collapse.
+- **Tests:** `tests/test_p4v5.py` (19 cases) and the existing builder and
+  evaluator suites pass.
 
 ---
 
