@@ -30,7 +30,7 @@ ends with measured results and the decisions carried into the next.
 | **Phase 1** — archived models and evaluation | [DeepRed-Phase1-Setup.md](documentation/DeepRed-Phase1-Setup.md) | closed; all 17 archived checkpoints retired |
 | **Phase 2** — temporal and persona trials | [DeepRed-Phase2-Setup.md](documentation/DeepRed-Phase2-Setup.md) | closed; no checkpoint reached a release gate |
 | **Phase 3** — data rebuild (`p3-v1`…`p3-v5`) | [DeepRed-Phase3-Setup.md](documentation/DeepRed-Phase3-Setup.md) | closed 2026-09-20; `p3v4c-100` is the release artefact |
-| **Phase 4** — Gemma 4 12B feasibility | [DeepRed-Phase4-Setup.md](documentation/DeepRed-Phase4-Setup.md), [plan](documentation/DeepRed-Phase4-Plan.md), [p4-v5 runbook](documentation/DeepRed-Phase4-V5-Runbook.md) | in progress; `p4v3-075` published as a test build; final run `p4-v5` prepared |
+| **Phase 4** — Gemma 4 12B feasibility | [DeepRed-Phase4-Setup.md](documentation/DeepRed-Phase4-Setup.md), [plan](documentation/DeepRed-Phase4-Plan.md), [p4-v5 runbook](documentation/DeepRed-Phase4-V5-Runbook.md) | closed 2026-11-15; p4-v5 repair failed selection; verified local release packages `p4v3-075` with a baked default prompt; publication pending |
 
 Supporting references:
 
@@ -46,6 +46,11 @@ than by date — a ceiling on the whole approach, since any training that reward
 confidence on familiar subjects leaks across the 1969 cutoff. It closed with
 `p3v4c-100` as the usable artefact. Phase 4 evaluates whether `gemma-4-12B-it`,
 which may date entities more reliably, can lift that ceiling.
+The final p4-v5 repair did not: Phase 4 closed with the `p4v3-075` fallback
+packaged for use without a caller-supplied system prompt (55% era-native /
+20% leak on the extended bank). This verified local artefact remains
+experimental and is not yet listed for download; see the
+[final result](documentation/DeepRed-Phase4-Plan.md#final-result--2026-11-15).
 
 ### Downloadable Models
 

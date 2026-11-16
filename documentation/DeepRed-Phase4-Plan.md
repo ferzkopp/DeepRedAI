@@ -17,7 +17,14 @@ rows are obscure trivia, while the failing probes are famous undated
 landmarks. The last run, **p4-v5**, is prepared: targeted landmark and
 chess-mind generation, then a warm-started repair SFT from `p4v3-075`. A
 pre-registered rule selects the release, which carries a baked-in default
-system prompt. Run it with `./run_p4v5.sh --detach all`; see
+system prompt.
+Update 2026-11-15: **p4-v5 is complete; Phase 4 is closed.** All five repair
+snapshots fail the pre-registered leak and improvement checks. The verified
+local release packages the `p4v3-075` reference with its default prompt baked
+in; no p4-v5 repair weights were selected. Packaged no-system extended-bank
+scores are 55% era-native / 20% leak, with 65% pre-1969 recall. This is an
+experimental artefact, not a Phase 4 gate pass, and publication is pending. See
+[the final result below](#final-result--2026-11-15) and
 [DeepRed-Phase4-V5-Runbook.md](DeepRed-Phase4-V5-Runbook.md).**
 
 ## Execution order
@@ -2154,6 +2161,65 @@ What the record establishes:
   alone therefore removes the no-system collapse.
 - **Tests:** `tests/test_p4v5.py` (19 cases) and the existing builder and
   evaluator suites pass.
+
+#### Final result — 2026-11-15
+
+The full pipeline completed at 17:07 PST, including release verification.
+All three generated assets reached their targets (4,000 / 2,000 / 1,500 rows).
+After excluding 15 new training rows matching factual probes, the dataset
+contained 17,757 train / 935 validation rows, with 189.4 mean sequence tokens,
+a 0.97:1 marker ratio and no factual probe overlaps in either bank.
+
+The evaluation run is
+`/mnt/data/evaluations/deepred-1969/p4v5-2026-11-14/`; its `report.md` and
+`selection.json` record the full comparison and selection checks. The following
+are strict metrics on the 495-probe extended bank with the held-out prompt:
+
+| Model | era-native | leak | pre recall | chess | chess-mind |
+|---|---:|---:|---:|---:|---:|
+| `p4v3-075` reference | 57% | 19% | 66% | 75% | 1% |
+| `p4v5-010` | 46% | 34% | 70% | 83% | 0% |
+| `p4v5-025` | 48% | 29% | 70% | 92% | 2% |
+| `p4v5-050` | 49% | 30% | 68% | 92% | 3% |
+| `p4v5-075` | 47% | 31% | 67% | 92% | 2% |
+| `p4v5-100` | 46% | 32% | 67% | 92% | 2% |
+
+**No candidate qualifies.** Every snapshot passes recall, false-refusal,
+repetition, chess and frozen plain-compliance guards, but fails both the leak
+guard and the required improvement. The strongest strict era-native snapshot
+(`p4v5-050`) is still 8 points below the reference, with leak 11 points higher.
+Echo-adjusted results also regress: candidates score 51-52% era-native /
+17-18% leak, against the reference's 60%/10%. Chess knowledge improves, but
+the intended chess-mind transfer does not materialise. Unpackaged no-system
+era-native remains 2-4%, with 70-72% leak.
+
+**Release decision:** follow the pre-registered fallback, not the best-looking
+repair snapshot. `/mnt/data/releases/deepred-p4v5/deepred-p4v5-q8_0.gguf`
+contains `p4v3-075` weights with `sp-01` baked into the chat template, caller
+system-prompt override supported, and thinking pinned off. The release name
+identifies the final packaging run, not newly selected p4-v5 weights.
+
+The live llama.cpp template checks passed for default insertion, caller
+override and thinking suppression. The packaged model was then evaluated with
+no caller system prompt:
+
+| Bank | era-native | leak | pre recall | persona voice | chess |
+|---|---:|---:|---:|---:|---:|
+| Extended (495 probes) | 55% | 20% | 65% | 12% | 67% |
+| Frozen (81 probes) | 70% | 30% | 95% | 33% | not measured |
+
+The packaged extended-bank era-native and leak rates are within the required
+5 points of the reference's held-out-prompt arm (57%/19%). The GGUF checksum
+was independently verified after completion. `release.json`, `showcase.md`
+and both packaged evaluation arms are stored beside it. Publication has not
+been performed as part of this closeout.
+
+**Conclusion:** targeted landmark and chess-mind repair did not lift the
+temporal ceiling; the earlier corpus-distribution diagnosis was not a
+sufficient remedy. Packaging successfully removes the need for callers to
+supply the trained context themselves, but does not demonstrate prompt-free
+knowledge suppression or satisfy all Phase 4 gates. Phase 4 ends here with
+the verified fallback as a usable experimental artefact, not another run.
 
 ---
 

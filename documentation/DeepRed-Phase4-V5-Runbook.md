@@ -6,6 +6,15 @@ This is the last Phase 4 run. The plan records the evidence and decision under
 GGUF that should be usable for experiments, not a model that clears every
 Phase 4 gate.
 
+**Completed 2026-11-15 at 17:07 PST.** All stages, including packaged-model
+verification, passed. No repair snapshot passed release selection: all five
+failed the leak and improvement checks. The local release therefore contains
+the pre-registered `p4v3-075` fallback, not p4-v5 repair weights, with `sp-01`
+baked in and thinking off. With no caller system prompt, the packaged model
+scores 55% era-native / 20% leak / 65% pre-1969 recall on the extended bank.
+Its SHA-256 has been verified; publication is pending. Full results are in
+[the plan's final result](DeepRed-Phase4-Plan.md#final-result--2026-11-15).
+
 The whole pipeline is one script, [run_p4v5.sh](../run_p4v5.sh). Every
 stage resumes from its own output. After a crash, reboot or power cut, re-run
 the same command.
@@ -188,7 +197,8 @@ The repaired build excluded 15 new training rows and no replay or validation
 rows. Resampling replay at the same ratio produced 17,757 train / 935 validation
 rows. The gate passed: 189.4 mean tokens, 0.97:1 marker balance, zero factual
 probe overlaps in both banks, and only the permitted persona overlap in the
-extended bank. `dataset.done` is recorded; training is the next pending stage.
+extended bank. `dataset.done` was recorded, and the resumed pipeline subsequently
+completed training through release verification on November 15.
 
 ## After the run
 
