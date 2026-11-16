@@ -13,6 +13,7 @@ import generate_deepred_corpus as corpus  # noqa: E402
 import generate_p4v5_assets as assets  # noqa: E402
 import merge_replay_dataset as merge  # noqa: E402
 import report_p4v5 as report  # noqa: E402
+import evaluate_deepred_models as evaluator  # noqa: E402
 
 CLASSIFIER = corpus.load_classifier()
 
@@ -152,6 +153,56 @@ def dataset_row(kind, index, split='train'):
 
 
 class MergeReplayTests(unittest.TestCase):
+    def test_exclusion_matches_audit_in_all_messages_and_short_probes(self):
+        probes = [
+            {'id': 'long', 'messages': [{'role': 'user', 'content':
+             'What do your records say about the first spacecraft?'}]},
+            {'id': 'short', 'messages': [{'role': 'user', 'content': 'Who was first?'}]},
+        ]
+        rows = [dataset_row('retain', i) for i in range(4)]
+        rows[0]['messages'][0]['content'] = (
+            'What do your records say about the first railway?')
+        rows[1]['messages'][-1]['content'] = 'WHO was first?'
+        rows[2]['messages'].insert(0, {
+            'role': 'system', 'content': 'Who was first?'})
+        index = evaluator.build_probe_index(probes, 8)
+        kept, excluded = merge.exclude_probe_overlaps(rows, index)
+        self.assertEqual(kept, [rows[3]])
+        self.assertEqual([r['id'] for r in excluded],
+                         [r['id'] for r in rows[:3]])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'clean.jsonl'
+            merge.write_jsonl(path, kept)
+            _, hits = evaluator.audit_corpus(path, index, [3, 8])
+            self.assertEqual(dict(hits), {})
+
+    def test_merge_filters_both_inputs_and_splits_before_sampling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            new, replay = Path(tmp) / 'new', Path(tmp) / 'replay'
+            for directory, kind in ((new, 'landmarks'), (replay, 'retain')):
+                directory.mkdir()
+                for split in ('train', 'val'):
+                    rows = [dataset_row(kind, f'{split}-{i}', split)
+                            for i in range(6)]
+                    rows[0]['messages'][0]['content'] = 'Who was first?'
+                    rows[1]['messages'][0]['content'] = 'What are you?'
+                    merge.write_jsonl(directory / f'retain_{split}.jsonl', rows)
+            probes = [
+                {'id': 'fact', 'category': 'pre_1969', 'messages': [
+                    {'role': 'user', 'content': 'Who was first?'}]},
+                {'id': 'voice', 'category': 'persona', 'messages': [
+                    {'role': 'user', 'content': 'What are you?'}]},
+            ]
+            train, val, excluded = merge.merge(new, replay, 0.6, 1, probes)
+            self.assertEqual((len(train), len(val)), (8, 8))
+            self.assertTrue(all(len(rows) == 1 for rows in excluded.values()))
+            self.assertTrue(all(rows[0]['probe_ids'] == ['fact']
+                                for rows in excluded.values()))
+            self.assertIn('What are you?', [
+                row['messages'][0]['content'] for row in train])
+            self.assertEqual((train, val, excluded),
+                             merge.merge(new, replay, 0.6, 1, probes))
+
     def test_stratified_sample_is_exact_and_proportional(self):
         rows = ([dataset_row('retain', i) for i in range(60)]
                 + [dataset_row('chess', i) for i in range(30)]

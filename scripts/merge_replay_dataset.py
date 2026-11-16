@@ -28,6 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_deepred_dataset import (  # noqa: E402
     MARKER_PRESENT, contingency_table, target_token_stats, write_jsonl,
 )
+from evaluate_deepred_models import (  # noqa: E402
+    build_probe_index, iter_record_texts, shingles, validate_probes,
+)
 
 
 class MergeError(ValueError):
@@ -75,11 +78,37 @@ def system_marker_ratio(rows):
     return marked / max(unmarked, 1)
 
 
-def merge(new_dir, replay_dir, ratio, seed):
+def exclude_probe_overlaps(rows, index):
+    sizes = sorted({len(shingle.split()) for shingle in index})
+    kept, excluded = [], []
+    for row in rows:
+        hits = {
+            probe_id
+            for text in iter_record_texts(row)
+            for size in sizes
+            for shingle in shingles(text, size)
+            for probe_id in index.get(shingle, ())
+        }
+        if hits:
+            excluded.append({'id': row['id'], 'probe_ids': sorted(hits)})
+        else:
+            kept.append(row)
+    return kept, excluded
+
+
+def merge(new_dir, replay_dir, ratio, seed, probes=()):
     new_train = load_jsonl(Path(new_dir) / 'retain_train.jsonl')
     new_val = load_jsonl(Path(new_dir) / 'retain_val.jsonl')
     replay_train = load_jsonl(Path(replay_dir) / 'retain_train.jsonl')
     replay_val = load_jsonl(Path(replay_dir) / 'retain_val.jsonl')
+    # Match the dataset gate, including short probes and all message roles.
+    index = build_probe_index(
+        [probe for probe in probes if probe.get('category') != 'persona'], 8)
+    exclusions = {}
+    new_train, exclusions['new_train'] = exclude_probe_overlaps(new_train, index)
+    new_val, exclusions['new_val'] = exclude_probe_overlaps(new_val, index)
+    replay_train, exclusions['replay_train'] = exclude_probe_overlaps(replay_train, index)
+    replay_val, exclusions['replay_val'] = exclude_probe_overlaps(replay_val, index)
     if not new_train:
         raise MergeError(f'{new_dir} has no training rows')
     replay_n = round(len(new_train) * ratio)
@@ -97,7 +126,7 @@ def merge(new_dir, replay_dir, ratio, seed):
                 & {row['content_id'] for row in val})
     if crossing:
         raise MergeError(f'{len(crossing)} content ids cross train/val')
-    return train, val
+    return train, val, exclusions
 
 
 def write_dataset(output, train, val, meta, tokenizer):
@@ -138,8 +167,19 @@ def main(argv=None):
     parser.add_argument('--output-dir', required=True)
     parser.add_argument('--seed', type=int, default=1969)
     parser.add_argument('--tokenizer')
+    parser.add_argument('--exclude-probes', action='append', default=[],
+                        help='probe bank to exclude before replay sampling; '
+                             'uses the audit eight-word matcher, except persona')
     parser.add_argument('--force', action='store_true')
     args = parser.parse_args(argv)
+
+    probes = []
+    for path in args.exclude_probes:
+        bank = load_jsonl(path)
+        errors = validate_probes(bank)
+        if errors:
+            parser.error(f'{path}: {"; ".join(errors)}')
+        probes.extend(bank)
 
     output = Path(args.output_dir)
     if output.exists():
@@ -147,7 +187,8 @@ def main(argv=None):
             parser.error(f'{output} exists; use --force to replace it')
         shutil.rmtree(output)
     try:
-        train, val = merge(args.new, args.replay, args.replay_ratio, args.seed)
+        train, val, exclusions = merge(
+            args.new, args.replay, args.replay_ratio, args.seed, probes)
     except MergeError as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
         return 1
@@ -155,7 +196,13 @@ def main(argv=None):
     manifest = write_dataset(output, train, val, {
         'new_dataset': str(Path(args.new)), 'replay_dataset': str(Path(args.replay)),
         'replay_ratio': args.replay_ratio, 'seed': args.seed,
+        'probe_exclusion': {
+            'banks': args.exclude_probes, 'shingle_size': 8,
+            'excluded': exclusions,
+        },
     }, args.tokenizer)
+    for source, rows in exclusions.items():
+        print(f'  probe exclusions {source}: {len(rows)} rows')
     print(f"merged {manifest['train_rows']:,} train / {manifest['val_rows']:,} val "
           f"-> {output}")
     print(f"  system-prompted marker ratio {manifest['system_marker_ratio']:.2f}:1, "

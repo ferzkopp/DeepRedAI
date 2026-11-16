@@ -51,7 +51,11 @@ run.
    `provenance.json`.
 3. **Build the dataset.** The new kinds use the usual system-prompt coverage
    and marker injection. Replay is a stratified sample of p4-v3's own training
-   rows, 1.5 replay rows per new row.
+   rows, 1.5 replay rows per new row. Before sampling, the merge excludes rows
+   from both inputs and both splits that overlap factual probes in either bank,
+   using the audit's eight-word matcher (including shorter probes). Persona
+   overlap remains allowed. The manifest's `probe_exclusion` records excluded
+   row IDs and matching probe IDs; source assets are unchanged.
 4. **Train** with a warm start from the `p4v3-075` snapshot for one epoch at
    5e-6, saving snapshots at 10/25/50/75/100%. Training uses the unchanged
    `run_p4v1.sh train` path.
@@ -168,6 +172,23 @@ deleting `state/dataset.done` and the stages after it.
 | Selection | `select` | Not a failure: falling back to `p4v3-075` is a valid outcome |
 | Served template: default prompt, caller override, thinking off | `verify` | Do not publish; inspect `deepred-p4v5.jinja` and the llama.cpp build |
 | Packaged no-system arm within 5 points of the prompted arm on era-native and leak | `verify` | Do not publish; the baked prompt is not reaching the model |
+
+### Recovering the November 14 dataset stop
+
+The first build passed length (189.4 mean tokens) and marker balance (0.97:1),
+but the extended-bank audit flagged 19 factual probes. Shared question
+prefixes such as "what do your records say about the first" triggered the
+eight-word matcher on unrelated events. The frozen bank had no matches.
+The merge now excludes these rows without relaxing the gate or modifying
+the probe banks. Run `./run_p4v5.sh dataset` to rebuild and re-audit, then
+`./run_p4v5.sh --detach all` to resume from training. Generation and seeding
+do not need repeating.
+
+The repaired build excluded 15 new training rows and no replay or validation
+rows. Resampling replay at the same ratio produced 17,757 train / 935 validation
+rows. The gate passed: 189.4 mean tokens, 0.97:1 marker balance, zero factual
+probe overlaps in both banks, and only the permitted persona overlap in the
+extended bank. `dataset.done` is recorded; training is the next pending stage.
 
 ## After the run
 

@@ -393,6 +393,7 @@ stage_dataset() {
     --fail-on-cross-split-duplicates --force
   "$PYTHON" scripts/merge_replay_dataset.py --new "$NEW_DATASET" \
     --replay "$REPLAY_DATASET" --replay-ratio "$REPLAY_RATIO" \
+    --exclude-probes "$EXT_PROBES" --exclude-probes "$FROZEN_PROBES" \
     --output-dir "$DATASET" --tokenizer "$BASE_MODEL" --force
 
   # The audit exits non-zero on any overlap; the check below decides whether
